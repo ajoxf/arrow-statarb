@@ -1,0 +1,117 @@
+"""Auto-trader lifecycle: entry → hold → exit/stop, EV gate, time-stop, dry-run.
+
+The algo is driven directly through ``_tick`` with a controllable signal dict so
+the z-score lifecycle is deterministic (no threads, no network)."""
+
+import time
+
+from arrow_statarb.core.algo import ArrowAutoTrader
+
+
+def _make(params_over=None):
+    state = {"sig": None}
+    calls = {"execute": [], "close": []}
+
+    def execute_fn(direction, lots):
+        calls["execute"].append((direction, lots))
+        return {"success": True, "dry_run": True, "results": [{"order_id": "A"}, {"order_id": "B"}]}
+
+    def close_fn(direction, lots):
+        calls["close"].append((direction, lots))
+        return {"success": True, "results": [{"order_id": "C"}, {"order_id": "D"}]}
+
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "tick_interval": 0.5, "cooldown": 300, "lot_multiplier": 75.0,
+              "enable_probability_filter": False, "min_win_probability": 0.60,
+              "min_expected_value": 0.0, "brokerage_per_lot": 10.0,
+              "slippage_per_lot": 5.0, "time_stop_half_lives": 3.0}
+    if params_over:
+        params.update(params_over)
+
+    algo = ArrowAutoTrader(
+        signal_provider=lambda: state["sig"],
+        params_provider=lambda: params,
+        execute_fn=execute_fn,
+        close_fn=close_fn,
+    )
+    return algo, state, calls
+
+
+def _sig(z, ready=True, half_life=0.0, std=1.0):
+    return {"zscore": z, "std": std, "ready": ready, "leg_a": 110.0, "leg_b": 10.0,
+            "spread": 100.0, "mean": 100.0, "samples": 300, "half_life": half_life,
+            "sample_interval_sec": 0.5, "entry_zscore": 2.0, "exit_zscore": 0.0,
+            "stop_zscore": 4.0, "min_signal_minutes": 1.0, "span_minutes": 5.0}
+
+
+def test_not_ready_collects():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-3.0, ready=False)
+    algo._tick()
+    assert "collecting" in algo.get_state()["status"]
+    assert not calls["execute"]
+
+
+def test_entry_long_spread():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-2.5)            # z ≤ -entry → LONG_SPREAD (buy A / sell B)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+    assert algo.get_state()["in_position"] is True
+    assert algo.get_state()["position"]["dry_run"] is True
+
+
+def test_entry_short_spread():
+    algo, state, calls = _make()
+    state["sig"] = _sig(2.5)             # z ≥ +entry → SHORT_SPREAD (sell A / buy B)
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+def test_hold_then_exit_target():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-2.5); algo._tick()         # enter LONG
+    state["sig"] = _sig(-1.0); algo._tick()         # still holding
+    assert algo.get_state()["in_position"] is True
+    assert "holding" in algo.get_state()["status"]
+    state["sig"] = _sig(0.1); algo._tick()          # reverted through exit_z → exit
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert algo.get_state()["in_position"] is False
+
+
+def test_stop_loss():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-2.5); algo._tick()         # enter LONG
+    state["sig"] = _sig(-4.5); algo._tick()         # |z| ≥ stop → stop out
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "STOP" in algo._snap["status"]
+
+
+def test_cooldown_blocks_reentry():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-2.5); algo._tick()         # enter
+    state["sig"] = _sig(0.1); algo._tick()          # exit → cooldown starts
+    state["sig"] = _sig(-2.5); algo._tick()         # would re-enter but cooling down
+    assert len(calls["execute"]) == 1
+    assert algo.get_state()["status"] == "cooldown"
+
+
+def test_ev_gate_blocks_entry():
+    # Impossibly high min EV → filter blocks the entry.
+    algo, state, calls = _make({"enable_probability_filter": True,
+                                "min_expected_value": 1e12})
+    state["sig"] = _sig(-2.5)
+    algo._tick()
+    assert not calls["execute"]
+    assert "blocked" in algo.get_state()["status"]
+
+
+def test_time_stop():
+    algo, state, calls = _make({"time_stop_half_lives": 3.0})
+    state["sig"] = _sig(-2.5, half_life=10.0); algo._tick()   # enter (max hold = 3*10*0.5 = 15s)
+    # Pretend the position has been held well past the time stop.
+    algo._pos["entry_time"] = time.time() - 100
+    state["sig"] = _sig(-1.5, half_life=10.0)                 # not reverted, not stopped
+    algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "TIME-STOP" in algo._snap["status"]
