@@ -1,0 +1,28 @@
+# Arrow broker SDK
+pyarrow-client
+
+# TOTP / auth
+pyotp
+
+# Networking / streaming
+websocket-client
+requests
+
+# Web app
+flask
+flask-socketio
+python-socketio
+python-engineio
+
+# Config / env / logging
+pyyaml
+python-dotenv
+loguru
+
+# Quant
+numpy
+pandas
+
+# Optional: exact erfi for the probability filter (a pure-Python fallback is
+# used if scipy is absent).
+scipy

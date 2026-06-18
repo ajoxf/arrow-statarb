@@ -1,0 +1,59 @@
+# Arrow StatArb — single source of configuration. Nothing is hardcoded.
+# Credentials are NEVER stored here — they come from environment variables
+# (see broker.credentials note below and .env.example).
+
+broker:
+  name: arrow
+  # Kotak-style segment key → Arrow ExchSeg (the master's real exchange+segment
+  # field: NSECM/NSEFO/BSECM/BSEFO). Used to filter the instrument master.
+  segments:
+    nse_cm: NSECM
+    nse_fo: NSEFO
+    bse_cm: BSECM
+    bse_fo: BSEFO
+  # Segment key → Arrow Exchange enum value used on orders/quotes.
+  exchange_enum:
+    nse_cm: NSE
+    nse_fo: NFO
+    bse_cm: BSE
+    bse_fo: BFO
+  # Optional manual lot-size overrides keyed by trading symbol, e.g. {NIFTY: 75}
+  lot_overrides: {}
+  # Credentials via env: ARROW_APP_ID, ARROW_USER_ID, ARROW_PASSWORD,
+  #                      ARROW_API_SECRET, ARROW_TOTP_SECRET
+
+# Default 2-leg spread (e.g. a NIFTY calendar: buy near-month / sell far-month).
+# The dashboard picker overrides these into config/leg_assignments.yaml.
+instruments:
+  leg_a: { segment: nse_fo, symbol: NIFTY30JUN26F, ratio: 1 }
+  leg_b: { segment: nse_fo, symbol: NIFTY28JUL26F, ratio: 1 }
+
+# Signal — the single server-side source of truth (algo AND dashboard read it).
+signal:
+  window_minutes: 120        # time-based rolling window for mean/std/z
+  sample_interval_sec: 0.5   # how often the server samples the spread
+  display_refresh_ms: 50     # how often the dashboard polls live prices
+  min_signal_minutes: 10     # need this much history before the signal is "ready"
+  entry_zscore: 2.0
+  exit_zscore: 0.0
+  stop_zscore: 4.0
+  confirmation_ticks: 3
+
+# Probability / EV / cost gate (OU gambler's-ruin model).
+filters:
+  enable_probability_filter: true
+  min_win_probability: 0.60
+  min_expected_value: 0
+  brokerage_per_lot: 10      # INR per lot per leg, one way
+  slippage_per_lot: 5        # INR per lot per leg, one way
+  time_stop_half_lives: 3.0  # exit if held longer than this × half-life
+
+execution:
+  product: NRML
+  order_type: market
+  default_lots: 1
+  cooldown_sec: 300
+
+# dry_run never transmits orders (Arrow has no sandbox — this is a local gate).
+# Fail-safe: anything unreadable / not "live" is treated as dry_run.
+mode: dry_run   # dry_run | live
