@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+{% block title %}Setup — Arrow StatArb{% endblock %}
+{% block nav_setup %}active{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <!-- ── Arrow connection ─────────────────────────────────────────────── -->
+    <div class="col-lg-5">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-plug-fill me-2"></i>Arrow Connection</span>
+                <span id="arrow-status-badge" class="badge bg-secondary">Disconnected</span>
+            </div>
+            <div class="card-body">
+                <p class="text-secondary small mb-3">
+                    Leave fields blank to use the <code>ARROW_*</code> environment
+                    variables. TOTP secret is the base32 seed, not the 6-digit code.
+                    This host's IP must be registered with Arrow (SEBI static-IP rule).
+                </p>
+                <div class="mb-2"><input class="form-control form-control-sm" id="app_id" placeholder="App ID"></div>
+                <div class="mb-2"><input class="form-control form-control-sm" id="user_id" placeholder="User ID"></div>
+                <div class="mb-2"><input class="form-control form-control-sm" type="password" id="password" placeholder="Password"></div>
+                <div class="mb-2"><input class="form-control form-control-sm" type="password" id="api_secret" placeholder="API Secret"></div>
+                <div class="mb-2"><input class="form-control form-control-sm" type="password" id="totp_secret" placeholder="TOTP Secret (base32 seed)"></div>
+                <button class="btn btn-primary btn-sm" id="connect-btn" onclick="arrowConnect()">
+                    <i class="bi bi-plug-fill me-1"></i>Connect
+                </button>
+                <button class="btn btn-outline-secondary btn-sm d-none" id="disconnect-btn" onclick="arrowDisconnect()">
+                    Disconnect
+                </button>
+                <div class="small mt-2" id="conn-msg"></div>
+                <div class="small text-secondary mt-1" id="scrip-msg"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Instrument picker ────────────────────────────────────────────── -->
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-search me-2"></i>Instrument Picker</div>
+            <div class="card-body">
+                <ul class="nav nav-pills mb-3" id="type-tabs">
+                    <li class="nav-item"><button class="nav-link active" onclick="setType('futures', this)">Futures</button></li>
+                    <li class="nav-item"><button class="nav-link" onclick="setType('options', this)">Options</button></li>
+                </ul>
+                <div class="row g-2">
+                    <div class="col-md-3">
+                        <label class="form-label small">Segment</label>
+                        <select class="form-select form-select-sm" id="p-segment" onchange="onSegmentChange()">
+                            <option value="nse_fo">NSE F&amp;O</option>
+                            <option value="bse_fo">BSE F&amp;O</option>
+                            <option value="nse_cm">NSE Cash</option>
+                            <option value="bse_cm">BSE Cash</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">Underlying</label>
+                        <select class="form-select form-select-sm" id="p-underlying" onchange="onUnderlyingChange()">
+                            <option value="">— connect first —</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label small">Contract (expiry shown)</label>
+                        <select class="form-select form-select-sm" id="p-contract">
+                            <option value="">— select underlying —</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                    <button class="btn btn-outline-success btn-sm" onclick="assignLeg('leg_a')">
+                        <i class="bi bi-1-circle me-1"></i>Assign to Leg A
+                    </button>
+                    <button class="btn btn-outline-info btn-sm" onclick="assignLeg('leg_b')">
+                        <i class="bi bi-2-circle me-1"></i>Assign to Leg B
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Leg assignment ──────────────────────────────────────────────── -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Spread Legs</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-5">
+                        <label class="form-label"><strong>Leg A</strong> <span class="text-secondary small">(buy on LONG_SPREAD)</span></label>
+                        <input class="form-control font-monospace" id="leg_a-sym" readonly placeholder="— not assigned —">
+                        <input type="hidden" id="leg_a-mapping">
+                        <div class="mt-2"><label class="form-label small">Ratio</label>
+                            <input type="number" class="form-control form-control-sm" id="leg_a-ratio" value="1" min="0.01" step="0.01"></div>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label"><strong>Leg B</strong> <span class="text-secondary small">(sell on LONG_SPREAD)</span></label>
+                        <input class="form-control font-monospace" id="leg_b-sym" readonly placeholder="— not assigned —">
+                        <input type="hidden" id="leg_b-mapping">
+                        <div class="mt-2"><label class="form-label small">Ratio</label>
+                            <input type="number" class="form-control form-control-sm" id="leg_b-ratio" value="1" min="0.01" step="0.01"></div>
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button class="btn btn-primary w-100" onclick="saveLegAssignments()">
+                            <i class="bi bi-save me-1"></i>Save
+                        </button>
+                    </div>
+                </div>
+                <div class="alert alert-secondary mt-3 mb-0" id="leg-summary">
+                    <em>No legs assigned yet.</em>
+                </div>
+                <div class="alert alert-info mt-2 mb-0 small">
+                    spread = Leg&nbsp;A − Leg&nbsp;B. <strong>z ≤ −entry</strong> ⇒ LONG_SPREAD (buy A / sell B);
+                    <strong>z ≥ +entry</strong> ⇒ SHORT_SPREAD (sell A / buy B).
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    let _type = 'futures';
+    let _connected = false;
+
+    function _setConnUI(connected) {
+        _connected = connected;
+        document.getElementById('connect-btn').classList.toggle('d-none', connected);
+        document.getElementById('disconnect-btn').classList.toggle('d-none', !connected);
+        const b = document.getElementById('arrow-status-badge');
+        b.className = 'badge ' + (connected ? 'bg-success' : 'bg-secondary');
+        b.textContent = connected ? 'Connected' : 'Disconnected';
+        if (!connected) {
+            document.getElementById('p-underlying').innerHTML = '<option value="">— connect first —</option>';
+            document.getElementById('p-contract').innerHTML = '<option value="">— select underlying —</option>';
+        }
+    }
+
+    async function arrowConnect() {
+        const payload = {};
+        ['app_id','user_id','password','api_secret','totp_secret'].forEach(id => {
+            payload[id] = document.getElementById(id).value.trim();
+        });
+        const btn = document.getElementById('connect-btn');
+        btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Connecting…';
+        document.getElementById('conn-msg').textContent = '';
+        try {
+            const res = await fetch('/api/arrow/connect', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(payload)
+            }).then(r => r.json());
+            if (res.success) {
+                _setConnUI(true);
+                ['password','api_secret','totp_secret'].forEach(id => document.getElementById(id).value = '');
+                document.getElementById('scrip-msg').textContent = 'Loading instrument master…';
+                pollScripReady();
+            } else {
+                document.getElementById('conn-msg').innerHTML =
+                    '<span class="text-danger">' + (res.error || res.message || 'Connection failed') + '</span>';
+            }
+        } catch (e) {
+            document.getElementById('conn-msg').innerHTML = '<span class="text-danger">Network error: ' + e.message + '</span>';
+        }
+        btn.disabled = false; btn.innerHTML = '<i class="bi bi-plug-fill me-1"></i>Connect';
+    }
+
+    async function arrowDisconnect() {
+        await fetch('/api/arrow/disconnect', { method: 'POST' });
+        _setConnUI(false);
+        document.getElementById('scrip-msg').textContent = '';
+    }
+
+    function pollScripReady() {
+        let ticks = 0;
+        const iv = setInterval(async () => {
+            try {
+                const st = await fetch('/api/arrow/status').then(r => r.json());
+                ticks++;
+                if (!st.connected) { clearInterval(iv); _setConnUI(false); return; }
+                if (st.instruments_ready) {
+                    clearInterval(iv);
+                    document.getElementById('scrip-msg').textContent =
+                        `Instrument master ready — ${st.instrument_count.toLocaleString()} rows, ${st.lot_size_count.toLocaleString()} lot sizes`;
+                    loadUnderlyings();
+                } else {
+                    document.getElementById('scrip-msg').textContent = `Loading instrument master… ${ticks * 2}s`;
+                }
+            } catch (e) { clearInterval(iv); }
+        }, 2000);
+    }
+
+    function setType(t, el) {
+        _type = t;
+        document.querySelectorAll('#type-tabs .nav-link').forEach(b => b.classList.remove('active'));
+        el.classList.add('active');
+        loadUnderlyings();
+        document.getElementById('p-contract').innerHTML = '<option value="">— select underlying —</option>';
+    }
+
+    function onSegmentChange() {
+        loadUnderlyings();
+        document.getElementById('p-contract').innerHTML = '<option value="">— select underlying —</option>';
+    }
+
+    async function loadUnderlyings() {
+        const sel = document.getElementById('p-underlying');
+        if (!_connected) { sel.innerHTML = '<option value="">— connect first —</option>'; return; }
+        const seg = document.getElementById('p-segment').value;
+        sel.innerHTML = '<option value="">Loading…</option>';
+        try {
+            const list = await fetch(`/api/arrow/commodities?segment=${seg}&type=${_type}`).then(r => r.json());
+            sel.innerHTML = list.length
+                ? '<option value="">— select —</option>' + list.map(c => `<option value="${c}">${c}</option>`).join('')
+                : '<option value="">— none —</option>';
+        } catch (e) { sel.innerHTML = '<option value="">— error —</option>'; }
+    }
+
+    async function onUnderlyingChange() {
+        const cSel = document.getElementById('p-contract');
+        const und = document.getElementById('p-underlying').value;
+        if (!und) { cSel.innerHTML = '<option value="">— select underlying —</option>'; return; }
+        const seg = document.getElementById('p-segment').value;
+        cSel.innerHTML = '<option value="">Loading…</option>';
+        try {
+            const list = await fetch(`/api/arrow/contracts?segment=${seg}&commodity=${encodeURIComponent(und)}&type=${_type}`).then(r => r.json());
+            cSel.innerHTML = list.length
+                ? '<option value="">— select contract —</option>' + list.map(c => {
+                    const label = c.expiry ? `${c.trading_symbol}  ·  exp ${c.expiry}` : c.trading_symbol;
+                    return `<option value="${c.trading_symbol}" data-lot="${c.lot_size}">${label}</option>`;
+                  }).join('')
+                : '<option value="">— none found —</option>';
+        } catch (e) { cSel.innerHTML = '<option value="">— error —</option>'; }
+    }
+
+    function assignLeg(leg) {
+        const seg = document.getElementById('p-segment').value;
+        const sym = document.getElementById('p-contract').value;
+        if (!sym) { alert('Select a contract first.'); return; }
+        document.getElementById(leg + '-sym').value = sym;
+        document.getElementById(leg + '-mapping').value = seg + '|' + sym;
+        updateSummary();
+    }
+
+    function updateSummary() {
+        const a = document.getElementById('leg_a-sym').value;
+        const b = document.getElementById('leg_b-sym').value;
+        const el = document.getElementById('leg-summary');
+        if (a && b) {
+            const rA = document.getElementById('leg_a-ratio').value || 1;
+            const rB = document.getElementById('leg_b-ratio').value || 1;
+            el.innerHTML = `<strong>Spread:</strong> <code>${a}</code> (×${rA}) <strong>−</strong> <code>${b}</code> (×${rB})`;
+        } else {
+            el.innerHTML = '<em>No legs assigned yet.</em>';
+        }
+    }
+
+    async function saveLegAssignments() {
+        const mA = document.getElementById('leg_a-mapping').value;
+        const mB = document.getElementById('leg_b-mapping').value;
+        if (!mA || !mB) { alert('Assign both Leg A and Leg B first.'); return; }
+        const payload = {
+            leg_a: { mapping_id: mA, ratio: parseFloat(document.getElementById('leg_a-ratio').value) || 1 },
+            leg_b: { mapping_id: mB, ratio: parseFloat(document.getElementById('leg_b-ratio').value) || 1 },
+        };
+        const res = await fetch('/api/leg-assignments', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+        }).then(r => r.json());
+        if (res.success) { updateSummary(); alert('Leg assignments saved.'); }
+        else alert('Error: ' + res.error);
+    }
+
+    async function loadExisting() {
+        try {
+            const a = await fetch('/api/leg-assignments').then(r => r.json());
+            ['leg_a','leg_b'].forEach(lk => {
+                const e = a[lk];
+                if (e && e.mapping_id && e.mapping_id.includes('|')) {
+                    document.getElementById(lk + '-sym').value = e.mapping_id.split('|')[1];
+                    document.getElementById(lk + '-mapping').value = e.mapping_id;
+                    if (e.ratio) document.getElementById(lk + '-ratio').value = e.ratio;
+                }
+            });
+            updateSummary();
+        } catch (e) {}
+        // If already connected from a prior page load, populate the picker.
+        try {
+            const st = await fetch('/api/arrow/status').then(r => r.json());
+            if (st.connected) { _setConnUI(true); if (st.instruments_ready) loadUnderlyings(); else pollScripReady(); }
+        } catch (e) {}
+    }
+    ['leg_a-ratio','leg_b-ratio'].forEach(id => document.getElementById(id).addEventListener('input', updateSummary));
+    loadExisting();
+</script>
+{% endblock %}

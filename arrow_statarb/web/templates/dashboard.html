@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Arrow StatArb{% endblock %}
+{% block nav_dash %}active{% endblock %}
+
+{% block content %}
+<div id="lot-mismatch" class="alert alert-warning d-none"></div>
+
+<div class="row g-3">
+    <!-- ── Live prices + signal ─────────────────────────────────────────── -->
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-graph-up me-2"></i>Live Signal</span>
+                <span id="feed-badge" class="badge bg-secondary">no feed</span>
+            </div>
+            <div class="card-body">
+                <div class="row text-center g-3">
+                    <div class="col">
+                        <div class="metric-label">Leg A <span class="font-monospace text-secondary">{{ leg_a }}</span></div>
+                        <div class="metric" id="m-leg-a">—</div>
+                    </div>
+                    <div class="col">
+                        <div class="metric-label">Leg B <span class="font-monospace text-secondary">{{ leg_b }}</span></div>
+                        <div class="metric" id="m-leg-b">—</div>
+                    </div>
+                    <div class="col">
+                        <div class="metric-label">Spread</div>
+                        <div class="metric" id="m-spread">—</div>
+                    </div>
+                    <div class="col">
+                        <div class="metric-label">Z-Score <span class="text-secondary">(server)</span></div>
+                        <div class="z-big" id="m-z">—</div>
+                    </div>
+                </div>
+                <hr>
+                <div class="row text-center small text-secondary g-2">
+                    <div class="col">mean <span id="m-mean" class="text-body">—</span></div>
+                    <div class="col">std <span id="m-std" class="text-body">—</span></div>
+                    <div class="col">samples <span id="m-samples" class="text-body">—</span></div>
+                    <div class="col">half-life <span id="m-hl" class="text-body">—</span></div>
+                    <div class="col">window <span id="m-window" class="text-body">—</span></div>
+                </div>
+                <div class="mt-2 small" id="signal-status"></div>
+            </div>
+        </div>
+
+        <!-- ── Algorithm ─────────────────────────────────────────────────── -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-robot me-2"></i>Auto-Trader</span>
+                <div class="form-check form-switch m-0">
+                    <input class="form-check-input" type="checkbox" id="algo-toggle" role="switch">
+                    <label class="form-check-label" for="algo-toggle">Algorithm Active
+                        <span id="algo-status" class="text-muted ms-1">OFF</span></label>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="font-monospace small" id="algo-state-line">—</div>
+                <div id="system-log" class="mt-2 border rounded p-2"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Position + manual + mode ─────────────────────────────────────── -->
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-wallet2 me-2"></i>Current Position</div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between"><span>Direction</span><strong id="pos-dir">FLAT</strong></div>
+                <div class="d-flex justify-content-between"><span>Leg A qty</span><span id="pos-a">0</span></div>
+                <div class="d-flex justify-content-between"><span>Leg B qty</span><span id="pos-b">0</span></div>
+                <hr>
+                <div class="d-flex justify-content-between"><span>Unrealized P&amp;L</span>
+                    <strong id="pos-pnl">₹0.00</strong></div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header"><i class="bi bi-hand-index me-2"></i>Manual Trade</div>
+            <div class="card-body">
+                <label class="form-label small">Direction</label>
+                <select class="form-select form-select-sm mb-2" id="manual-direction">
+                    <option value="LONG_SPREAD">LONG_SPREAD (buy A / sell B)</option>
+                    <option value="SHORT_SPREAD">SHORT_SPREAD (sell A / buy B)</option>
+                </select>
+                <label class="form-label small">Lots</label>
+                <input type="number" class="form-control form-control-sm mb-2" id="manual-lots" value="1" min="1">
+                <div class="d-flex gap-2">
+                    <button class="btn btn-success btn-sm flex-fill" onclick="manualExecute()">Execute</button>
+                    <button class="btn btn-outline-danger btn-sm flex-fill" onclick="manualClose()">Close</button>
+                </div>
+                <div class="small mt-2" id="manual-msg"></div>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Trading Mode</div>
+            <div class="card-body">
+                <div class="mb-2">Current: <span id="mode-text" class="fw-bold">—</span></div>
+                <button class="btn btn-outline-warning btn-sm" id="to-dryrun" onclick="setMode('dry_run')">Switch to DRY-RUN</button>
+                <button class="btn btn-outline-danger btn-sm" id="to-live" onclick="goLive()">Go LIVE</button>
+                <div class="form-text">DRY-RUN never transmits orders to Arrow.</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const REFRESH_MS = {{ display_refresh_ms }};
+
+    function _fmt(v, d=2) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(d); }
+    function log(msg, cls='') {
+        const el = document.getElementById('system-log');
+        el.innerHTML += `<div class="log-entry ${cls}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+        el.scrollTop = el.scrollHeight;
+        while (el.children.length > 200) el.removeChild(el.firstChild);
+    }
+
+    // ── Live prices + feed badge ─────────────────────────────────────────
+    async function pollPrices() {
+        try {
+            const p = await fetch('/api/prices').then(r => r.json());
+            document.getElementById('m-leg-a').textContent = _fmt(p.leg_a);
+            document.getElementById('m-leg-b').textContent = _fmt(p.leg_b);
+            const fb = document.getElementById('feed-badge');
+            if (!p.connected) { fb.className = 'badge bg-secondary'; fb.textContent = 'disconnected'; }
+            else if (p.source === 'stream') { fb.className = 'badge bg-success'; fb.textContent = 'STREAM'; }
+            else if (p.stale) { fb.className = 'badge bg-warning text-dark'; fb.textContent = 'STALE'; }
+            else { fb.className = 'badge bg-info text-dark'; fb.textContent = 'REST'; }
+        } catch (e) {}
+    }
+
+    // ── Server signal (single source of truth) ───────────────────────────
+    async function pollSignal() {
+        try {
+            const s = await fetch('/api/signal').then(r => r.json());
+            document.getElementById('m-spread').textContent = _fmt(s.spread);
+            document.getElementById('m-z').textContent = _fmt(s.zscore);
+            document.getElementById('m-mean').textContent = _fmt(s.mean);
+            document.getElementById('m-std').textContent = _fmt(s.std, 4);
+            document.getElementById('m-samples').textContent = s.samples ?? '—';
+            document.getElementById('m-hl').textContent = s.half_life_sec ? `${_fmt(s.half_life_sec,0)}s` : '—';
+            document.getElementById('m-window').textContent = `${s.window_minutes ?? '—'}m`;
+            const zEl = document.getElementById('m-z');
+            const z = Number(s.zscore || 0);
+            zEl.className = 'z-big ' + (Math.abs(z) >= (s.entry_zscore||2) ? 'text-warning' : '');
+            const st = document.getElementById('signal-status');
+            if (!s.running) st.innerHTML = '<span class="text-secondary">signal engine idle (connect Arrow)</span>';
+            else if (!s.ready) st.innerHTML = `<span class="text-info">collecting history: ${_fmt(s.span_minutes,1)}/${s.min_signal_minutes} min</span>`;
+            else st.innerHTML = '<span class="text-success">signal ready</span>';
+        } catch (e) {}
+    }
+
+    // ── Position ─────────────────────────────────────────────────────────
+    async function pollPosition() {
+        try {
+            const p = await fetch('/api/positions').then(r => r.json());
+            document.getElementById('pos-dir').textContent = p.direction || 'FLAT';
+            document.getElementById('pos-a').textContent = p.leg_a || 0;
+            document.getElementById('pos-b').textContent = p.leg_b || 0;
+            const pnl = Number(p.unrealized_pnl || 0);
+            const el = document.getElementById('pos-pnl');
+            el.textContent = '₹' + pnl.toFixed(2);
+            el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : '');
+        } catch (e) {}
+    }
+
+    // ── Lot-size mismatch warning ────────────────────────────────────────
+    async function pollLegInfo() {
+        try {
+            const i = await fetch('/api/leg-info').then(r => r.json());
+            const w = document.getElementById('lot-mismatch');
+            if (i.lot_mismatch) { w.textContent = i.message; w.classList.remove('d-none'); }
+            else w.classList.add('d-none');
+        } catch (e) {}
+    }
+
+    // ── Mode ─────────────────────────────────────────────────────────────
+    async function pollMode() {
+        try {
+            const c = await fetch('/api/config').then(r => r.json());
+            document.getElementById('mode-text').textContent = c.dry_run ? 'DRY-RUN' : 'LIVE';
+            document.getElementById('to-dryrun').classList.toggle('d-none', c.dry_run);
+            document.getElementById('to-live').classList.toggle('d-none', !c.dry_run);
+        } catch (e) {}
+    }
+    async function setMode(mode) {
+        await fetch('/api/trading-mode', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ mode })
+        });
+        pollMode(); refreshBadges();
+    }
+    function goLive() {
+        if (prompt('Type LIVE to enable real order transmission to Arrow:') === 'LIVE') setMode('live');
+    }
+
+    // ── Manual trade ─────────────────────────────────────────────────────
+    async function manualExecute() {
+        const body = JSON.stringify({
+            direction: document.getElementById('manual-direction').value,
+            lots: parseInt(document.getElementById('manual-lots').value) || 1
+        });
+        const res = await fetch('/api/manual-trade/execute', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body
+        }).then(r => r.json());
+        document.getElementById('manual-msg').innerHTML = res.success
+            ? `<span class="text-success">${res.message}</span>`
+            : `<span class="text-danger">${res.error}</span>`;
+        log(res.success ? 'MANUAL ' + res.message : 'MANUAL FAILED: ' + res.error,
+            res.success ? 'log-trade' : 'log-error');
+    }
+    async function manualClose() {
+        const body = JSON.stringify({
+            direction: document.getElementById('manual-direction').value,
+            lots: parseInt(document.getElementById('manual-lots').value) || 1
+        });
+        const res = await fetch('/api/manual-trade/close', {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body
+        }).then(r => r.json());
+        document.getElementById('manual-msg').innerHTML = res.success
+            ? `<span class="text-success">${res.message}</span>`
+            : `<span class="text-danger">${res.error}</span>`;
+        log(res.success ? 'CLOSE ' + res.message : 'CLOSE FAILED: ' + res.error,
+            res.success ? 'log-trade' : 'log-error');
+    }
+
+    // ── Algorithm toggle + state ─────────────────────────────────────────
+    document.getElementById('algo-toggle').addEventListener('change', async function () {
+        const enabled = this.checked;
+        const ep = enabled ? '/api/algo/start' : '/api/algo/stop';
+        const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('manual-lots').value) || 1 }) : null;
+        try {
+            const r = await fetch(ep, { method: 'POST', headers: {'Content-Type':'application/json'}, body }).then(x => x.json());
+            if (enabled && !r.success) {
+                this.checked = false;
+                alert('Could not start algo: ' + (r.error || 'unknown'));
+                return;
+            }
+            log('Algorithm ' + (enabled ? 'STARTED' : 'STOPPED'), 'log-warning');
+        } catch (e) { this.checked = false; alert('Algo toggle failed: ' + e); }
+    });
+
+    let _lastAlgoStatus = '';
+    async function pollAlgoState() {
+        try {
+            const s = await fetch('/api/algo/state').then(r => r.json());
+            const tog = document.getElementById('algo-toggle');
+            const stEl = document.getElementById('algo-status');
+            tog.checked = !!s.running;
+            stEl.textContent = s.running ? 'ON' : 'OFF';
+            stEl.className = 'ms-1 ' + (s.running ? 'text-success' : 'text-muted');
+            const el = document.getElementById('algo-state-line');
+            if (!s.running) { el.textContent = 'idle'; return; }
+            const mode = s.dry_run ? 'DRY-RUN' : 'LIVE';
+            let txt = `[${mode}] ${s.status || '—'}`;
+            if (s.zscore != null) txt += ` · z=${Number(s.zscore).toFixed(2)}`;
+            if (s.in_position && s.position) txt += ` · IN ${s.position.direction}`;
+            if (s.last_error) txt += ` · ⚠ ${s.last_error}`;
+            el.textContent = txt;
+            if (s.status && s.status !== _lastAlgoStatus) {
+                _lastAlgoStatus = s.status;
+                if (/ENTRY|EXIT|STOP|blocked/.test(s.status))
+                    log('ALGO: ' + s.status, /blocked|STOP/.test(s.status) ? 'log-warning' : 'log-trade');
+            }
+        } catch (e) {}
+    }
+
+    // ── Schedulers ───────────────────────────────────────────────────────
+    pollPrices(); setInterval(pollPrices, REFRESH_MS);
+    pollSignal(); setInterval(pollSignal, 1000);
+    pollPosition(); setInterval(pollPosition, 2000);
+    pollLegInfo(); setInterval(pollLegInfo, 5000);
+    pollMode(); setInterval(pollMode, 3000);
+    pollAlgoState(); setInterval(pollAlgoState, 1000);
+</script>
+{% endblock %}
