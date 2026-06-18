@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}Arrow StatArb{% endblock %}</title>
+    <title>{% block title %}Nexus{% endblock %}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
@@ -23,7 +23,7 @@
     <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom mb-3">
         <div class="container-fluid">
             <a class="navbar-brand fw-bold" href="/">
-                <i class="bi bi-arrow-left-right me-1"></i>Arrow StatArb
+                <i class="bi bi-arrow-left-right me-1"></i>Nexus
             </a>
             <div class="navbar-nav">
                 <a class="nav-link {% block nav_dash %}{% endblock %}" href="/dashboard">Dashboard</a>
@@ -32,6 +32,9 @@
                 <a class="nav-link {% block nav_analysis %}{% endblock %}" href="/analysis">Analysis</a>
             </div>
             <div class="ms-auto d-flex align-items-center gap-2">
+                <span class="navbar-brand fw-bold me-2 mb-0">
+                    <i class="bi bi-arrow-up-right me-1"></i>Arrow
+                </span>
                 <span id="algo-pill" class="d-flex align-items-center gap-1 small">
                     <span id="algo-dot" class="badge rounded-pill bg-secondary">&nbsp;</span>
                     <span id="algo-pill-text" class="text-secondary">Stopped</span>
