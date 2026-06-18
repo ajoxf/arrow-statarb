@@ -97,6 +97,34 @@ class ArrowAutoTrader:
         self.running = False
         logger.info("ArrowAlgo: stopped (open position, if any, is left untouched)")
 
+    def restore_position(self, pos: Optional[Dict]) -> bool:
+        """Re-adopt an open position after a process restart so the running
+        engine manages (and can exit/stop) a trade it didn't itself open.
+
+        ``pos`` comes from the trade log: ``{direction, lots, entry_spread, ts,
+        dry_run}``. Only the SIGN of ``entry_z`` matters to the exit logic
+        (which side of the mean we entered), so it is reconstructed from the
+        direction. No-op if a position is already held or ``pos`` is empty."""
+        if not pos or not pos.get("direction"):
+            return False
+        with self._lock:
+            if self._pos is not None:
+                return False
+            direction = pos["direction"]
+            self._pos = {
+                "direction": direction,
+                "lots": max(1, int(pos.get("lots", 1))),
+                "entry_z": -1.0 if direction == "LONG_SPREAD" else 1.0,
+                "entry_spread": pos.get("entry_spread"),
+                "entry_time": float(pos.get("ts") or time.time()),
+                "order_ids": [],
+                "dry_run": bool(pos.get("dry_run", False)),
+                "restored": True,
+            }
+        logger.warning("ArrowAlgo: restored open {} position ({} lot(s)) from trade log",
+                       direction, self._pos["lots"])
+        return True
+
     def get_state(self) -> Dict:
         with self._lock:
             return {

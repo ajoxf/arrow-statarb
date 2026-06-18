@@ -82,6 +82,21 @@ class TradeLog:
             self._save()
         return rec
 
+    def open_position(self) -> Optional[Dict]:
+        """The most recent OPEN that has not been matched by a later CLOSE,
+        i.e. a position still believed to be live. Used to restore engine state
+        after a restart. Returns ``{direction, lots, entry_spread, ts, dry_run}``
+        or ``None`` when flat."""
+        with self._lock:
+            for rec in reversed(self._trades):
+                if rec.get("action") == "OPEN" and not rec.get("_closed"):
+                    return {"direction": rec.get("direction"),
+                            "lots": int(rec.get("lots", 1)),
+                            "entry_spread": rec.get("entry_spread"),
+                            "ts": float(rec.get("ts", 0.0)),
+                            "dry_run": bool(rec.get("dry_run", False))}
+        return None
+
     def all(self) -> List[Dict]:
         with self._lock:
             return list(reversed(self._trades))   # newest first

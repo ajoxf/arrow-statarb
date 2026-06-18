@@ -79,6 +79,38 @@ def test_get_ltp_parses_titlecase(arrow_broker):
     assert out["NIFTY30JUN26F"] == pytest.approx(25001.25)
 
 
+def test_get_order_status_normalizes_from_order_book(arrow_broker):
+    arrow_broker._client.order_book = [
+        {"orderNo": "OID9", "status": "COMPLETE", "filledQty": "75", "avgPrice": "25000"},
+    ]
+    st = arrow_broker.get_order_status("OID9")
+    assert st["status"] == "COMPLETE"
+    assert st["filled_qty"] == 75
+    assert st["avg_price"] == pytest.approx(25000.0)
+
+
+def test_get_order_status_maps_rejected(arrow_broker):
+    arrow_broker._client.order_book = [{"nestOrderNumber": "OID7", "orderStatus": "REJECTED"}]
+    assert arrow_broker.get_order_status("OID7")["status"] == "REJECTED"
+
+
+def test_get_order_status_unknown_when_absent(arrow_broker):
+    arrow_broker._client.order_book = []
+    assert arrow_broker.get_order_status("NOPE")["status"] == "UNKNOWN"
+
+
+def test_amend_order_calls_modify(arrow_broker):
+    assert arrow_broker.amend_order("OID1", price=25010.5) is True
+    assert arrow_broker._client.modified[-1]["order_id"] == "OID1"
+    assert arrow_broker._client.modified[-1]["price"] == pytest.approx(25010.5)
+
+
+def test_amend_order_not_connected():
+    from arrow_statarb.brokers.arrow_broker import ArrowBroker
+    b = ArrowBroker(config={"app_id": "x"})
+    assert b.amend_order("OID1", price=1.0) is False
+
+
 def test_positions_parse_titlecase(arrow_broker):
     arrow_broker._client.get_positions = lambda: [
         {"TradingSymbol": "NIFTY30JUN26F", "NetQty": "75", "AvgPrice": "25000",

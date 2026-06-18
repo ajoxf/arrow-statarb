@@ -69,9 +69,18 @@ trading_hours:
 
 execution:
   product: NRML
-  order_type: market
+  order_type: limit          # default live order type (limit | market)
   default_lots: 1
   cooldown_sec: 300
+  # ── LIVE order-execution safety (SpreadExecutor) ──────────────────────────
+  use_limit_orders: true     # place legs as LIMIT (priced off LTP), not MARKET
+  limit_offset_pct: 0.05     # % through LTP for a marketable limit (caps slippage)
+  amend_step_pct: 0.05       # extra % added each amendment to chase the fill
+  amend_interval_sec: 1.5    # re-price the resting limit this often while waiting
+  fill_timeout_sec: 5        # wait this long for a limit before escalating
+  poll_interval_sec: 0.4     # order-status (fill) poll cadence
+  limit_to_market: true      # on timeout, cancel the limit and re-send as MARKET
+  verify_flat_before_entry: true   # skip entry if a leg already has a position
 
 # dry_run never transmits orders (Arrow has no sandbox — this is a local gate).
 # Fail-safe: anything unreadable / not "live" is treated as dry_run.

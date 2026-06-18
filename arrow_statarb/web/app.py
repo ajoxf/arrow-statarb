@@ -18,7 +18,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -32,6 +31,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.core.signal import SignalEngine
 from arrow_statarb.core.algo import ArrowAutoTrader
+from arrow_statarb.core.executor import SpreadExecutor, LegOrder
 from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
@@ -108,48 +108,37 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return [(sa, ya, "buy", qa), (sb, yb, "sell", qb)]
         return [(sa, ya, "sell", qa), (sb, yb, "buy", qb)]
 
-    def _spread_order(legs, dry_run: bool, label: str) -> Dict:
-        """Place each leg in parallel through the active broker (lot-multiplied,
-        segment-aware, mpp market). Simulated when dry_run. Shared by manual
-        endpoints AND the auto-trader."""
+    def _spread_order(legs, dry_run: bool, label: str, verify_flat: bool = False) -> Dict:
+        """Execute both legs through the active broker (lot-multiplied,
+        segment-aware). Simulated when ``dry_run``; otherwise routed through the
+        safe :class:`SpreadExecutor` (limit orders, fill confirmation, orphan
+        recovery). Shared by the manual endpoints AND the auto-trader."""
         broker = active.get()
         if not broker:
             return {"success": False, "error": "No broker connected"}
 
-        def _submit_leg(leg):
-            seg, sym, side, qty = leg
-            lot_size = broker.resolve_lot_size(seg, sym)
-            actual_qty = qty * lot_size
-            if dry_run:
+        if dry_run:
+            results = []
+            for seg, sym, side, qty in legs:
+                lot_size = broker.resolve_lot_size(seg, sym)
+                actual_qty = qty * lot_size
                 logger.info("[DRY-RUN] {}: would {} {}lot(s)×{}={} {}/{} — NOT transmitted",
                             label, side, qty, lot_size, actual_qty, sym, seg)
-                return {"order_id": f"DRYRUN-{side}-{sym}", "status": "submitted",
-                        "symbol": sym, "side": side, "quantity": actual_qty, "dry_run": True}
-            tok = broker.resolve_token(seg, sym)
-            res = broker.submit_order(symbol=sym, side=side, quantity=actual_qty,
-                                      order_type="market", exchange_segment=seg,
-                                      product=str(cfg.get("execution.product", "NRML")), token=tok)
-            if res.get("status") == "error":
-                logger.error("{}: {} {}×{}={} {}/{} FAILED — {}",
-                             label, side, qty, lot_size, actual_qty, sym, seg, res.get("message"))
-            else:
-                logger.info("{}: {} {}×{}={} {}/{} → {} (id={})",
-                            label, side, qty, lot_size, actual_qty, sym, seg,
-                            res.get("status"), res.get("order_id"))
-            return res
+                results.append({"order_id": f"DRYRUN-{side}-{sym}", "status": "submitted",
+                                "symbol": sym, "side": side, "quantity": actual_qty,
+                                "dry_run": True})
+            ids = [r["order_id"] for r in results]
+            return {"success": True, "message": f"[DRY-RUN] Simulated: {', '.join(ids)}",
+                    "results": results, "dry_run": True}
 
-        with ThreadPoolExecutor(max_workers=len(legs)) as ex:
-            results = [f.result() for f in [ex.submit(_submit_leg, leg) for leg in legs]]
-        errors = [r for r in results if r.get("status") == "error"]
-        if errors:
-            return {"success": False,
-                    "error": "; ".join(r.get("message", "order rejected") for r in errors),
-                    "results": results, "dry_run": dry_run}
-        ids = [r.get("order_id", "?") for r in results]
-        verb = "Simulated" if dry_run else "Placed"
-        tag = "DRY-RUN" if dry_run else "LIVE"
-        return {"success": True, "message": f"[{tag}] {verb}: {', '.join(ids)}",
-                "results": results, "dry_run": dry_run}
+        # LIVE — resolve each leg to units + token, then hand to the executor.
+        leg_orders = []
+        for seg, sym, side, qty in legs:
+            lot_size = broker.resolve_lot_size(seg, sym)
+            tok = broker.resolve_token(seg, sym)
+            leg_orders.append(LegOrder(segment=seg, symbol=sym, side=side,
+                                       units=qty * lot_size, token=tok))
+        return spread_executor.execute(leg_orders, label=label, verify_flat=verify_flat)
 
     def _current_spread() -> Optional[float]:
         return signal_engine.get_signal().get("spread")
@@ -161,7 +150,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(direction, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _spread_order(legs, _is_dry_run(), "Order")
+        res = _spread_order(legs, _is_dry_run(), "Order", verify_flat=True)
         if res.get("success"):
             trade_log.record(action="OPEN", direction=direction, lots=lots,
                              spread=_current_spread(), dry_run=_is_dry_run(),
@@ -206,6 +195,48 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             except Exception:
                 pass
         return (px.get(syms["leg_a"].upper()), px.get(syms["leg_b"].upper()))
+
+    # ── live executor wiring (limit orders, fills, orphan recovery) ──────────
+    def _one_ltp(seg: str, sym: str) -> Optional[float]:
+        """Latest price for a single leg — stream cache first, REST fallback.
+        Used by the executor to price limit orders and amendments."""
+        broker = active.get()
+        if not broker:
+            return None
+        px: Dict[str, float] = {}
+        if hasattr(broker, "get_streamed_ltp"):
+            try:
+                broker.start_price_stream([sym])  # idempotent
+                px = broker.get_streamed_ltp([sym]) or {}
+            except Exception:
+                px = {}
+        if sym.upper() not in px:
+            try:
+                px.update(broker.get_ltp(
+                    [{"exchange_segment": seg, "instrument_token": sym}]) or {})
+            except Exception:
+                pass
+        return px.get(sym.upper())
+
+    def _exec_params() -> Dict:
+        """Execution params for the SpreadExecutor, read live from config."""
+        e = cfg.section("execution")
+        r = cfg.section("risk")
+        return {
+            "use_limit_orders": bool(e.get("use_limit_orders", True)),
+            "limit_offset_pct": float(e.get("limit_offset_pct", 0.05)),
+            "amend_step_pct": float(e.get("amend_step_pct", 0.05)),
+            "fill_timeout_sec": float(e.get("fill_timeout_sec", 5.0)),
+            "amend_interval_sec": float(e.get("amend_interval_sec", 1.5)),
+            "poll_interval_sec": float(e.get("poll_interval_sec", 0.4)),
+            "limit_to_market": bool(e.get("limit_to_market", True)),
+            "verify_flat_before_entry": bool(e.get("verify_flat_before_entry", True)),
+            "product": str(e.get("product", "NRML")),
+            "max_slippage_pct": float(r.get("max_slippage_pct", 0.5)),
+        }
+
+    spread_executor = SpreadExecutor(broker_fn=active.get, price_fn=_one_ltp,
+                                     params_fn=_exec_params)
 
     # ── signal + algo wiring ─────────────────────────────────────────────────
     def _signal_params() -> Dict:
@@ -268,6 +299,49 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         execute_fn=_spread_execute,
         close_fn=_spread_close,
     )
+
+    # Position recovery on restart: re-adopt any open trade from the log so the
+    # engine manages (and can exit) a position it didn't open this run.
+    try:
+        _open = trade_log.open_position()
+        if _open:
+            arrow_algo.restore_position(_open)
+    except Exception as exc:        # never block startup on recovery
+        logger.warning("Position recovery skipped — {}", exc)
+
+    def _reconcile() -> Dict:
+        """Compare engine belief (algo position) against the broker's actual
+        leg positions. Powers the dashboard mismatch banner so a divergence
+        (rejected leg, manual close, orphan) is surfaced immediately."""
+        st = arrow_algo.get_state()
+        engine_open = bool(st.get("in_position"))
+        legs = _read_legs()
+        out = {"engine_open": engine_open, "engine": st.get("position"),
+               "exchange": [], "mismatch": False, "message": "", "checked": False}
+        broker = active.get()
+        if not broker or not _have_both_legs(legs):
+            return out
+        try:
+            positions = {str(p.get("symbol", "")).upper(): int(p.get("net_quantity", 0) or 0)
+                         for p in (broker.get_positions() or [])}
+        except Exception as exc:
+            out["message"] = f"could not read positions: {exc}"
+            return out
+        out["checked"] = True
+        leg_syms = {lk: legs[lk]["symbol"] for lk in ("leg_a", "leg_b")}
+        out["exchange"] = [{"leg": lk, "symbol": leg_syms[lk],
+                            "net_quantity": positions.get(leg_syms[lk].upper(), 0)}
+                           for lk in ("leg_a", "leg_b")]
+        exch_open = any(e["net_quantity"] != 0 for e in out["exchange"])
+        if engine_open and not exch_open:
+            out["mismatch"] = True
+            out["message"] = ("Engine holds a position but the exchange shows both legs "
+                              "flat — it may have been closed/rejected outside the engine.")
+        elif exch_open and not engine_open:
+            out["mismatch"] = True
+            out["message"] = ("Exchange shows an open leg position but the engine is flat — "
+                              "possible orphaned leg or manual trade. Review positions.")
+        return out
 
     # ── pages ────────────────────────────────────────────────────────────────
     @app.route("/")
@@ -594,6 +668,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         st = arrow_algo.get_state()
         st["dry_run"] = _is_dry_run()
         return jsonify(st)
+
+    @app.route("/api/reconcile", methods=["GET"])
+    def api_reconcile():
+        return jsonify(_reconcile())
 
     # ── mode (dry-run / live) ────────────────────────────────────────────────
     @app.route("/api/config", methods=["GET"])

@@ -84,6 +84,32 @@ _PRODUCT_MAP: Dict[str, str] = {
     "cnc":  "C",
 }
 
+# Broker/NEST order-status strings → our normalized lifecycle states. Anything
+# unmapped but non-empty is treated as still working (OPEN); empty → UNKNOWN.
+_ORDER_STATUS_MAP: Dict[str, str] = {
+    "COMPLETE": "COMPLETE", "COMPLETED": "COMPLETE", "FILLED": "COMPLETE",
+    "EXECUTED": "COMPLETE", "TRADED": "COMPLETE",
+    "REJECTED": "REJECTED", "REJECT": "REJECTED",
+    "CANCELLED": "CANCELLED", "CANCELED": "CANCELLED",
+    "PARTIALLY FILLED": "PARTIAL", "PARTIAL": "PARTIAL",
+    "OPEN": "OPEN", "VALIDATION PENDING": "PENDING", "PUT ORDER REQ RECEIVED": "PENDING",
+    "MODIFY VALIDATION PENDING": "PENDING", "TRIGGER PENDING": "PENDING",
+    "TRIGGER_PENDING": "PENDING", "OPEN PENDING": "PENDING", "PENDING": "PENDING",
+    "AFTER MARKET ORDER REQ RECEIVED": "PENDING",
+}
+
+
+def _dig(d: Dict, *keys, default=None):
+    """Case-insensitive first-present lookup across candidate keys."""
+    if not isinstance(d, dict):
+        return default
+    low = {str(k).lower(): v for k, v in d.items()}
+    for k in keys:
+        v = low.get(k.lower())
+        if v not in (None, ""):
+            return v
+    return default
+
 
 class ArrowBroker(BaseBroker):
     """
@@ -812,6 +838,103 @@ class ArrowBroker(BaseBroker):
         except Exception as exc:
             logger.error("ArrowBroker: cancel order {} failed — {}", order_id, exc)
             return False
+
+    def get_order_status(self, order_id: str) -> Dict:
+        """Normalized fill state for one order. Tries the SDK's per-order
+        history endpoints first, then falls back to scanning the order book.
+        The exact SDK method/field names vary by build, so this is deliberately
+        tolerant — anything it can't read degrades to ``UNKNOWN``."""
+        unknown = {"order_id": order_id, "status": "UNKNOWN", "filled_qty": 0,
+                   "pending_qty": 0, "avg_price": 0.0, "raw": {}}
+        if not self.connected or not self._client:
+            return unknown
+
+        client = self._client
+        raw = None
+        for meth in ("get_order_status", "get_order_history", "single_order_history",
+                     "order_history"):
+            fn = getattr(client, meth, None)
+            if fn is None:
+                continue
+            try:
+                raw = fn(order_id)
+                break
+            except Exception as exc:
+                logger.debug("ArrowBroker: {}({}) failed — {}", meth, order_id, exc)
+        if raw is None:
+            fn = getattr(client, "get_order_book", None) or getattr(client, "get_orders", None)
+            if fn is not None:
+                try:
+                    book = fn() or []
+                    raw = [o for o in book if isinstance(o, dict) and str(
+                        _dig(o, "orderNo", "order_id", "nestOrderNumber", "norenordno",
+                             "id", "ID", default="")) == str(order_id)]
+                except Exception as exc:
+                    logger.debug("ArrowBroker: order-book scan failed — {}", exc)
+
+        # An order's history is a list of states (newest last); take the latest.
+        rec = raw[-1] if isinstance(raw, list) and raw else (raw if isinstance(raw, dict) else None)
+        if not rec:
+            return unknown
+
+        status_raw = str(_dig(rec, "status", "orderStatus", "ordStatus", "report_type",
+                              default="")).upper().strip()
+        status = _ORDER_STATUS_MAP.get(status_raw, "OPEN" if status_raw else "UNKNOWN")
+        filled = int(float(_dig(rec, "filledQty", "filled_quantity", "fillshares",
+                                "cumQty", "filledQuantity", default=0) or 0))
+        pend = int(float(_dig(rec, "pendingQty", "unfilledSize", "pending_quantity",
+                              "remainingQuantity", default=0) or 0))
+        avg = float(_dig(rec, "avgPrice", "averagePrice", "avgprc", "avg_price",
+                         "tradedPrice", default=0) or 0)
+        return {"order_id": order_id, "status": status, "filled_qty": filled,
+                "pending_qty": pend, "avg_price": avg, "raw": rec}
+
+    def amend_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        quantity: Optional[int] = None,
+        order_type: Optional[str] = None,
+    ) -> bool:
+        """Modify a pending order's price / qty / type. Tries the SDK's
+        modify/amend method under its various names; returns False if none
+        exists or the call is rejected."""
+        if not self.connected or not self._client:
+            logger.error("ArrowBroker: not connected — cannot amend order")
+            return False
+
+        payload: Dict = {}
+        if price is not None:
+            payload["price"] = float(price)
+        if quantity is not None:
+            payload["quantity"] = int(quantity)
+        if order_type is not None:
+            ot_wire = _ORDER_TYPE_MAP.get(order_type.lower(), "LMT")
+            try:
+                payload["order_type"] = OrderType(ot_wire)
+            except ValueError:
+                pass
+
+        client = self._client
+        for meth in ("modify_order", "amend_order", "update_order"):
+            fn = getattr(client, meth, None)
+            if fn is None:
+                continue
+            try:
+                fn(order_id, **payload)
+            except TypeError:
+                try:
+                    fn(order_id=order_id, **payload)
+                except Exception as exc:
+                    logger.error("ArrowBroker: {} {} failed — {}", meth, order_id, exc)
+                    return False
+            except Exception as exc:
+                logger.error("ArrowBroker: {} {} failed — {}", meth, order_id, exc)
+                return False
+            logger.info("ArrowBroker: amended order {} → {}", order_id, payload)
+            return True
+        logger.warning("ArrowBroker: SDK exposes no modify/amend method")
+        return False
 
     # ── Positions ─────────────────────────────────────────────────────────────
 

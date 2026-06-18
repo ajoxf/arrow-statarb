@@ -76,6 +76,8 @@ class ArrowClient:
         self.app_id = app_id
         self.token = "FAKETOKEN1234567890"
         self.placed_orders = []
+        self.order_book = []       # tests push order-status rows here
+        self.modified = []         # records modify_order kwargs
 
     def set_token(self, t):
         self.token = t
@@ -98,6 +100,13 @@ class ArrowClient:
 
     def cancel_order(self, oid):
         return True
+
+    def get_order_book(self):
+        return self.order_book
+
+    def modify_order(self, order_id, **kwargs):
+        self.modified.append({"order_id": order_id, **kwargs})
+        return "OK"
 
     def get_positions(self):
         return []

@@ -49,6 +49,30 @@ class BaseBroker(ABC):
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order. Returns True on success."""
 
+    # ── order lifecycle (fill confirmation / amendment) ──────────────────────
+    # These power the live SpreadExecutor's safety net (fill polling, limit
+    # amendment, orphan detection). Brokers that cannot report order state
+    # inherit the safe defaults below: status ``UNKNOWN`` and amend unsupported.
+    def get_order_status(self, order_id: str) -> Dict:
+        """Normalized order state:
+        ``{order_id, status, filled_qty, pending_qty, avg_price, raw}`` where
+        ``status`` ∈ ``PENDING | OPEN | PARTIAL | COMPLETE | REJECTED |
+        CANCELLED | UNKNOWN``. A broker without an order-status API returns
+        ``UNKNOWN`` so callers can degrade gracefully."""
+        return {"order_id": order_id, "status": "UNKNOWN", "filled_qty": 0,
+                "pending_qty": 0, "avg_price": 0.0, "raw": {}}
+
+    def amend_order(
+        self,
+        order_id: str,
+        price: Optional[float] = None,
+        quantity: Optional[int] = None,
+        order_type: Optional[str] = None,
+    ) -> bool:
+        """Modify a pending order's price / quantity / type in place. Returns
+        True on success, False if the broker has no amend capability."""
+        return False
+
     # ── market data ──────────────────────────────────────────────────────────
     @abstractmethod
     def get_ltp(self, instruments: List[Dict]) -> Dict[str, float]:

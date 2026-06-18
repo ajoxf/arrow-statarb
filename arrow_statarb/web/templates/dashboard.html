@@ -14,6 +14,9 @@
 </div>
 
 <div id="lot-mismatch" class="alert alert-warning d-none"></div>
+<div id="position-mismatch" class="alert alert-danger d-none">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i><span id="position-mismatch-msg"></span>
+</div>
 
 <!-- ── Live Prices ─────────────────────────────────────────────────────────── -->
 <div class="card mb-3">
@@ -417,6 +420,18 @@
         } catch (e) {}
     }
 
+    // ── Position reconciliation (engine vs exchange) ─────────────────────────
+    async function pollReconcile() {
+        try {
+            const r = await fetch('/api/reconcile').then(x => x.json());
+            const w = document.getElementById('position-mismatch');
+            if (r.mismatch) {
+                document.getElementById('position-mismatch-msg').textContent = r.message;
+                w.classList.remove('d-none');
+            } else w.classList.add('d-none');
+        } catch (e) {}
+    }
+
     // ── Markets bar ──────────────────────────────────────────────────────────
     async function pollMarkets() {
         try {
@@ -600,6 +615,7 @@
     pollRisk();     setInterval(pollRisk, 3000);
     pollBroker();   setInterval(pollBroker, 3000);
     pollLegInfo();  setInterval(pollLegInfo, 5000);
+    pollReconcile(); setInterval(pollReconcile, 4000);
     pollMarkets();  setInterval(pollMarkets, 5000);
     pollMode();     setInterval(pollMode, 3000);
     pollTrades();   setInterval(pollTrades, 3000);

@@ -86,3 +86,16 @@ def test_trade_log_short_direction(tmp_path):
     rec = tl.record(action="CLOSE", direction="SHORT_SPREAD", lots=2, spread=90.0, dry_run=False, status="LIVE")
     # SHORT profits when spread falls: 100 → 90 ⇒ +10 × 2 lots.
     assert rec["spread_pnl"] == 20.0
+
+def test_trade_log_open_position_tracks_unmatched_open(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    assert tl.open_position() is None
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=3, spread=100.0,
+              dry_run=False, status="LIVE")
+    op = tl.open_position()
+    assert op["direction"] == "LONG_SPREAD" and op["lots"] == 3
+    assert op["entry_spread"] == 100.0
+    # Once closed, it is no longer an open position.
+    tl.record(action="CLOSE", direction="LONG_SPREAD", lots=3, spread=110.0,
+              dry_run=False, status="LIVE")
+    assert tl.open_position() is None

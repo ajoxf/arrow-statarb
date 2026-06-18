@@ -115,3 +115,38 @@ def test_time_stop():
     algo._tick()
     assert calls["close"] == [("LONG_SPREAD", 1)]
     assert "TIME-STOP" in algo._snap["status"]
+
+
+def test_restore_position_readopts_open_trade():
+    algo, state, calls = _make()
+    ok = algo.restore_position({"direction": "SHORT_SPREAD", "lots": 2,
+                                "entry_spread": 101.5, "ts": time.time(), "dry_run": False})
+    assert ok is True
+    st = algo.get_state()
+    assert st["in_position"] is True
+    assert st["position"]["direction"] == "SHORT_SPREAD"
+    assert st["position"]["lots"] == 2
+    # entry_z sign must reflect a SHORT entry (z >= +entry → positive)
+    assert algo._pos["entry_z"] > 0
+
+
+def test_restore_position_noop_when_already_in_position():
+    algo, state, calls = _make()
+    state["sig"] = _sig(-2.5); algo._tick()          # opens a LONG_SPREAD
+    assert algo.restore_position({"direction": "SHORT_SPREAD", "lots": 9}) is False
+    assert algo._pos["direction"] == "LONG_SPREAD"
+
+
+def test_restore_position_ignores_empty():
+    algo, state, calls = _make()
+    assert algo.restore_position(None) is False
+    assert algo.restore_position({}) is False
+    assert algo.get_state()["in_position"] is False
+
+
+def test_restored_position_can_exit_on_revert():
+    algo, state, calls = _make()
+    algo.restore_position({"direction": "LONG_SPREAD", "lots": 1, "ts": time.time()})
+    state["sig"] = _sig(0.2)                          # reverted through exit_z (0.0)
+    algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]

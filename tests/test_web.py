@@ -20,7 +20,19 @@ class FakeBroker:
 
     def submit_order(self, **kw):
         self.orders.append(kw)
-        return {"order_id": "OID", "status": "submitted", **kw}
+        oid = f"OID{len(self.orders)}"
+        return {"order_id": oid, "status": "submitted", **kw}
+
+    # the live SpreadExecutor confirms fills — report every order as filled
+    def get_order_status(self, order_id):
+        return {"order_id": order_id, "status": "COMPLETE", "filled_qty": 150,
+                "pending_qty": 0, "avg_price": 100.0, "raw": {}}
+
+    def amend_order(self, order_id, price=None, quantity=None, order_type=None):
+        return True
+
+    def cancel_order(self, order_id):
+        return True
 
     # streaming is optional — return nothing so REST path is skipped in prices
     def start_price_stream(self, syms):
@@ -42,6 +54,7 @@ def _app(tmp_path, mode="dry_run"):
         "broker:\n  name: arrow\n"
         "  segments: {nse_fo: NSEFO}\n"
         "execution:\n  product: NRML\n  default_lots: 1\n"
+        "  use_limit_orders: false\n  verify_flat_before_entry: false\n"
         "signal:\n  window_minutes: 120\n  sample_interval_sec: 0.5\n"
     )
     legs = tmp_path / "leg_assignments.yaml"
