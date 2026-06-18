@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}Settings — Arrow StatArb{% endblock %}
+{% block nav_settings %}active{% endblock %}
+
+{% block content %}
+<h3 class="mb-3"><i class="bi bi-gear me-2"></i>Trading Settings</h3>
+
+<div class="row g-3">
+    <!-- ── Signal Parameters ─────────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-graph-up me-2"></i>Signal Parameters</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Lookback Period <span class="badge bg-secondary">ticks</span></label>
+                        <input type="number" class="form-control" id="s-lookback">
+                        <div class="form-text" id="s-lookback-help">price history before any trade</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Tick Interval (sec)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-tick">
+                        <div class="form-text">Price update rate (0.5 s default)</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Entry Z-Score (σ)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-entry">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Exit Z-Score (σ)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-exit">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Stop Loss Z-Score (σ)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-stop">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Confirmation Ticks</label>
+                        <input type="number" class="form-control" id="s-confirm">
+                        <div class="form-text">Consecutive ticks above threshold before entry</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Risk Management ───────────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-shield me-2"></i>Risk Management</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Lots per Trade</label>
+                        <input type="number" class="form-control" id="r-lots">
+                        <div class="form-text">Contracts placed on each entry signal</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Contracts / Leg</label>
+                        <input type="number" class="form-control" id="r-maxleg">
+                        <div class="form-text">Hard position cap per leg</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Slippage (%)</label>
+                        <input type="number" step="0.1" class="form-control" id="r-slip">
+                        <div class="form-text">Reject fills beyond this slippage (e.g. 0.5 = 0.5%)</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Daily Loss (₹)</label>
+                        <input type="number" class="form-control" id="r-mdl">
+                        <div class="form-text">0 = disabled</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Trading Hours Filter ──────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-clock me-2"></i>Trading Hours Filter</div>
+            <div class="card-body">
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="th-enabled" role="switch">
+                    <label class="form-check-label" for="th-enabled">Enable Trading Hours Filter</label>
+                </div>
+                <div class="form-text mb-3">Block trades outside the configured window (IST)</div>
+                <div class="row g-3">
+                    <div class="col-3"><label class="form-label">Start Hour</label><input type="number" class="form-control" id="th-sh"></div>
+                    <div class="col-3"><label class="form-label">Start Min</label><input type="number" class="form-control" id="th-sm"></div>
+                    <div class="col-3"><label class="form-label">End Hour</label><input type="number" class="form-control" id="th-eh"></div>
+                    <div class="col-3"><label class="form-label">End Min</label><input type="number" class="form-control" id="th-em"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Mode Settings ─────────────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-toggles me-2"></i>Mode Settings</div>
+            <div class="card-body">
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="m-paper" role="switch">
+                    <label class="form-check-label fw-bold" for="m-paper">Paper Trading Mode</label>
+                </div>
+                <div class="form-text mb-3">Orders are simulated without real execution (dry-run)</div>
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="m-algo" role="switch">
+                    <label class="form-check-label fw-bold" for="m-algo">Algorithm Enabled</label>
+                </div>
+                <div class="form-text">Enable / disable automatic order placement</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Brokerage & Probability Filter ────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-cash-coin me-2"></i>Brokerage &amp; Probability Filter</div>
+            <div class="card-body">
+                <label class="form-label">Brokerage Basis</label>
+                <div class="btn-group w-100 mb-1" role="group">
+                    <input type="radio" class="btn-check" name="basis" id="b-perlot" value="per_lot">
+                    <label class="btn btn-outline-primary" for="b-perlot">Per Lot</label>
+                    <input type="radio" class="btn-check" name="basis" id="b-perorder" value="per_order">
+                    <label class="btn btn-outline-primary" for="b-perorder">Per Order</label>
+                </div>
+                <div class="form-text mb-3" id="basis-help">Brokerage scales with number of lots traded</div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Brokerage per Lot (₹, one-way)</label>
+                        <input type="number" step="0.5" class="form-control" id="b-brk">
+                        <div class="form-text">Brokerage per lot per spread leg</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Slippage per Lot (₹, one-way)</label>
+                        <input type="number" step="0.5" class="form-control" id="b-slip">
+                        <div class="form-text">Expected market impact per lot</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Min Win Probability (%)</label>
+                        <input type="number" class="form-control" id="b-winprob">
+                        <div class="form-text">OU reversion probability threshold</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Min Expected Value (₹)</label>
+                        <input type="number" class="form-control" id="b-ev">
+                        <div class="form-text">Minimum EV per trade to allow entry</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Time Stop (× half-lives)</label>
+                        <input type="number" step="0.1" class="form-control" id="b-tstop">
+                        <div class="form-text">Exit after N × half-life if not reverted</div>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="b-enabled" role="switch">
+                            <label class="form-check-label" for="b-enabled">Enable Probability Filter</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── System Tests ──────────────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-check-circle me-2"></i>System Tests</div>
+            <div class="card-body">
+                <p class="text-secondary">Run the automated test suite to verify system functionality.</p>
+                <button class="btn btn-info" id="test-btn" onclick="runTests()">
+                    <i class="bi bi-play-circle me-1"></i>Run Unit Tests</button>
+                <pre id="test-out" class="mt-3 small d-none border rounded p-2" style="max-height:240px;overflow:auto;"></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Save bar ──────────────────────────────────────────────────────── -->
+    <div class="col-12">
+        <div class="d-flex gap-2 align-items-center">
+            <button class="btn btn-primary" onclick="saveSettings()"><i class="bi bi-save me-1"></i>Save Settings</button>
+            <button class="btn btn-outline-secondary" onclick="loadSettings()"><i class="bi bi-arrow-clockwise me-1"></i>Reload</button>
+            <span id="save-msg" class="small"></span>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    function _set(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+    function _setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = !!v; }
+
+    async function loadSettings() {
+        const s = await fetch('/api/settings').then(r => r.json());
+        _set('s-lookback', s.signal.lookback_period);
+        document.getElementById('s-lookback-help').textContent =
+            `≈ ${(s.signal.lookback_period * s.signal.sample_interval_sec / 60).toFixed(1)} min of history before any trade`;
+        _set('s-tick', s.signal.sample_interval_sec);
+        _set('s-entry', s.signal.entry_zscore);
+        _set('s-exit', s.signal.exit_zscore);
+        _set('s-stop', s.signal.stop_zscore);
+        _set('s-confirm', s.signal.confirmation_ticks);
+
+        _set('r-lots', s.risk.lots_per_trade);
+        _set('r-maxleg', s.risk.max_contracts_per_leg);
+        _set('r-slip', s.risk.max_slippage_pct);
+        _set('r-mdl', s.risk.max_daily_loss);
+
+        _setChk('th-enabled', s.trading_hours.enabled);
+        _set('th-sh', s.trading_hours.start_hour); _set('th-sm', s.trading_hours.start_min);
+        _set('th-eh', s.trading_hours.end_hour);   _set('th-em', s.trading_hours.end_min);
+
+        _setChk('m-paper', s.mode.paper_trading);
+        _setChk('m-algo', s.mode.algorithm_enabled);
+
+        document.getElementById(s.filters.commission_basis === 'per_order' ? 'b-perorder' : 'b-perlot').checked = true;
+        _set('b-brk', s.filters.brokerage_per_lot);
+        _set('b-slip', s.filters.slippage_per_lot);
+        _set('b-winprob', Math.round(s.filters.min_win_probability * 100));
+        _set('b-ev', s.filters.min_expected_value);
+        _set('b-tstop', s.filters.time_stop_half_lives);
+        _setChk('b-enabled', s.filters.enable_probability_filter);
+    }
+
+    document.querySelectorAll('input[name=basis]').forEach(el => el.addEventListener('change', () => {
+        document.getElementById('basis-help').textContent = el.value === 'per_order'
+            ? 'Flat brokerage per order; slippage still scales with lots'
+            : 'Brokerage scales with number of lots traded';
+    }));
+
+    async function saveSettings() {
+        const payload = {
+            signal: {
+                lookback_period: +document.getElementById('s-lookback').value,
+                sample_interval_sec: +document.getElementById('s-tick').value,
+                entry_zscore: +document.getElementById('s-entry').value,
+                exit_zscore: +document.getElementById('s-exit').value,
+                stop_zscore: +document.getElementById('s-stop').value,
+                confirmation_ticks: +document.getElementById('s-confirm').value,
+            },
+            risk: {
+                lots_per_trade: +document.getElementById('r-lots').value,
+                max_contracts_per_leg: +document.getElementById('r-maxleg').value,
+                max_slippage_pct: +document.getElementById('r-slip').value,
+                max_daily_loss: +document.getElementById('r-mdl').value,
+            },
+            trading_hours: {
+                enabled: document.getElementById('th-enabled').checked,
+                start_hour: +document.getElementById('th-sh').value, start_min: +document.getElementById('th-sm').value,
+                end_hour: +document.getElementById('th-eh').value, end_min: +document.getElementById('th-em').value,
+            },
+            filters: {
+                enable_probability_filter: document.getElementById('b-enabled').checked,
+                commission_basis: document.querySelector('input[name=basis]:checked').value,
+                brokerage_per_lot: +document.getElementById('b-brk').value,
+                slippage_per_lot: +document.getElementById('b-slip').value,
+                min_win_probability: (+document.getElementById('b-winprob').value) / 100,
+                min_expected_value: +document.getElementById('b-ev').value,
+                time_stop_half_lives: +document.getElementById('b-tstop').value,
+            },
+            mode: {
+                paper_trading: document.getElementById('m-paper').checked,
+                algorithm_enabled: document.getElementById('m-algo').checked,
+            },
+        };
+        const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(payload) }).then(r => r.json());
+        const msg = document.getElementById('save-msg');
+        msg.innerHTML = res.success ? '<span class="text-success">Saved ✓</span>' : '<span class="text-danger">Save failed</span>';
+        setTimeout(() => msg.textContent = '', 3000);
+        refreshBadges();
+    }
+
+    async function runTests() {
+        const btn = document.getElementById('test-btn'), out = document.getElementById('test-out');
+        btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Running…';
+        out.classList.remove('d-none'); out.textContent = 'Running pytest…';
+        try {
+            const r = await fetch('/api/run-tests', { method:'POST' }).then(x => x.json());
+            out.textContent = (r.success ? '✓ PASS\n' : '✗ FAIL\n') + (r.output || '');
+            out.className = 'mt-3 small border rounded p-2 ' + (r.success ? 'text-success' : 'text-danger');
+        } catch (e) { out.textContent = 'Error: ' + e; }
+        btn.disabled = false; btn.innerHTML = '<i class="bi bi-play-circle me-1"></i>Run Unit Tests';
+    }
+
+    loadSettings();
+</script>
+{% endblock %}

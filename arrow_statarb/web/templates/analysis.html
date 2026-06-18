@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Analysis — Arrow StatArb{% endblock %}
+{% block nav_analysis %}active{% endblock %}
+
+{% block content %}
+<h3 class="mb-3"><i class="bi bi-bar-chart me-2"></i>Analysis</h3>
+<div class="card">
+    <div class="card-header"><i class="bi bi-clipboard-data me-2"></i>Session Summary</div>
+    <div class="card-body">
+        <div class="row text-center g-3">
+            <div class="col"><div class="metric" id="a-count">0</div><div class="metric-label">Total Trades</div></div>
+            <div class="col"><div class="metric" id="a-closed">0</div><div class="metric-label">Closed</div></div>
+            <div class="col"><div class="metric" id="a-pnl">₹0.00</div><div class="metric-label">Net P&amp;L</div></div>
+            <div class="col"><div class="metric" id="a-win">0.0%</div><div class="metric-label">Win Rate</div></div>
+        </div>
+    </div>
+</div>
+<div class="card mt-3">
+    <div class="card-header"><i class="bi bi-table me-2"></i>Trade History</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <thead><tr class="small text-secondary">
+                    <th class="ps-3">Time</th><th>Action</th><th>Dir</th><th>Lots</th>
+                    <th class="text-end">Spread P&amp;L</th><th class="text-end">Brokerage</th>
+                    <th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Status</th>
+                </tr></thead>
+                <tbody id="a-body"><tr><td colspan="8" class="text-center text-secondary py-3">No trades yet</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    function _rs(v) { return '₹' + Number(v || 0).toFixed(2); }
+    async function load() {
+        const r = await fetch('/api/trades').then(x => x.json());
+        const t = r.trades || [], st = r.stats || {};
+        document.getElementById('a-count').textContent = st.count || 0;
+        document.getElementById('a-closed').textContent = st.closed || 0;
+        document.getElementById('a-pnl').textContent = _rs(st.total_pnl);
+        document.getElementById('a-win').textContent = (st.win_rate || 0).toFixed(1) + '%';
+        const body = document.getElementById('a-body');
+        if (!t.length) return;
+        body.innerHTML = t.map(x => {
+            const np = Number(x.net_pnl || 0), npc = np>0?'text-success':(np<0?'text-danger':'');
+            return `<tr class="small"><td class="ps-3">${x.time}</td><td>${x.action}</td>
+                <td>${(x.direction||'').replace('_SPREAD','')}</td><td>${x.lots}</td>
+                <td class="text-end">${_rs(x.spread_pnl)}</td><td class="text-end">${_rs(x.brokerage)}</td>
+                <td class="text-end ${npc}">${_rs(np)}</td>
+                <td class="text-end pe-3"><span class="badge ${x.dry_run?'bg-warning text-dark':'bg-success'}">${x.status}</span></td></tr>`;
+        }).join('');
+    }
+    load(); setInterval(load, 3000);
+</script>
+{% endblock %}

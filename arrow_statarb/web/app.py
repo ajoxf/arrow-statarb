@@ -15,8 +15,11 @@ mpp market orders, gated by the dry-run/live mode.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -25,10 +28,14 @@ from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit
 from loguru import logger
 
-from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
+from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE, PROJECT_ROOT
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.core.signal import SignalEngine
 from arrow_statarb.core.algo import ArrowAutoTrader
+from arrow_statarb.core.trade_log import TradeLog
+from arrow_statarb.models.probability_filter import ProbabilityFilter
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
@@ -39,6 +46,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     active = ActiveBroker()
     _ltp_cache: Dict[str, Any] = {}
+    trade_log = TradeLog(PROJECT_ROOT / "data" / "trades.json",
+                         brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 10)))
 
     # ── config helpers ───────────────────────────────────────────────────────
     def _is_dry_run() -> bool:
@@ -142,16 +151,24 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return {"success": True, "message": f"[{tag}] {verb}: {', '.join(ids)}",
                 "results": results, "dry_run": dry_run}
 
-    def _spread_execute(direction: str, lots: int) -> Dict:
+    def _current_spread() -> Optional[float]:
+        return signal_engine.get_signal().get("spread")
+
+    def _spread_execute(direction: str, lots: int, source: str = "manual") -> Dict:
         if not active.get():
             return {"success": False, "error": "No broker connected"}
         try:
             legs = _order_legs(direction, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        return _spread_order(legs, _is_dry_run(), "Order")
+        res = _spread_order(legs, _is_dry_run(), "Order")
+        if res.get("success"):
+            trade_log.record(action="OPEN", direction=direction, lots=lots,
+                             spread=_current_spread(), dry_run=_is_dry_run(),
+                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source)
+        return res
 
-    def _spread_close(direction: str, lots: int) -> Dict:
+    def _spread_close(direction: str, lots: int, source: str = "manual") -> Dict:
         if not active.get():
             return {"success": False, "error": "No broker connected"}
         close_dir = "SHORT_SPREAD" if direction == "LONG_SPREAD" else "LONG_SPREAD"
@@ -159,7 +176,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(close_dir, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        return _spread_order(legs, _is_dry_run(), "Close")
+        res = _spread_order(legs, _is_dry_run(), "Close")
+        if res.get("success"):
+            trade_log.record(action="CLOSE", direction=direction, lots=lots,
+                             spread=_current_spread(), dry_run=_is_dry_run(),
+                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source)
+        return res
 
     # ── live leg prices (stream first, REST fallback) ────────────────────────
     def _leg_prices() -> Tuple[Optional[float], Optional[float]]:
@@ -216,20 +238,28 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def _algo_params() -> Dict:
         s = cfg.section("signal")
         f = cfg.section("filters")
+        r = cfg.section("risk")
+        cap = int(r.get("max_contracts_per_leg", 0) or 0)
+        lots = int(_algo_lots["lots"])
+        if cap > 0:
+            lots = min(lots, cap)            # hard position cap per leg
         return {
             "entry_zscore": float(s.get("entry_zscore", 2.0)),
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
+            "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
-            "lots": int(_algo_lots["lots"]),
+            "lots": lots,
             "lot_multiplier": _lot_multiplier(),
             "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
+            "commission_basis": str(f.get("commission_basis", "per_lot")),
             "min_win_probability": float(f.get("min_win_probability", 0.60)),
             "min_expected_value": float(f.get("min_expected_value", 0.0)),
             "brokerage_per_lot": float(f.get("brokerage_per_lot", 10.0)),
             "slippage_per_lot": float(f.get("slippage_per_lot", 5.0)),
             "time_stop_half_lives": float(f.get("time_stop_half_lives", 3.0)),
+            "trading_hours": cfg.section("trading_hours"),
         }
 
     arrow_algo = ArrowAutoTrader(
@@ -253,6 +283,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             leg_a=legs.get("leg_a", {}).get("symbol", "Leg A"),
             leg_b=legs.get("leg_b", {}).get("symbol", "Leg B"),
             display_refresh_ms=int(cfg.get("signal.display_refresh_ms", 50)),
+            entry_zscore=float(cfg.get("signal.entry_zscore", 2.0)),
+            stop_zscore=float(cfg.get("signal.stop_zscore", 4.0)),
+            window_minutes=int(cfg.get("signal.window_minutes", 120)),
         )
 
     # ── Arrow connection ─────────────────────────────────────────────────────
@@ -452,6 +485,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         sig["dry_run"] = _is_dry_run()
         return jsonify(sig)
 
+    @app.route("/api/signal/history", methods=["GET"])
+    def api_signal_history():
+        """Recent spread + z series for the dashboard's Spread History and
+        Z-Score charts (server-side, so the charts match the algo's z)."""
+        try:
+            n = min(1000, max(20, int(request.args.get("points", 200))))
+        except (ValueError, TypeError):
+            n = 200
+        return jsonify(signal_engine.get_series(n))
+
     @app.route("/api/positions", methods=["GET"])
     def api_positions():
         out = {"connected": False, "direction": "FLAT", "leg_a": 0, "leg_b": 0,
@@ -565,6 +608,220 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         cfg.set_mode(mode)
         logger.warning("Trading mode set to {}", mode.upper())
         return jsonify({"success": True, "mode": mode, "dry_run": _is_dry_run()})
+
+    # ── settings page + API ──────────────────────────────────────────────────
+    @app.route("/settings")
+    def settings_page():
+        return render_template("settings.html", broker_name=cfg.get("broker.name", "arrow"))
+
+    @app.route("/analysis")
+    def analysis_page():
+        return render_template("analysis.html")
+
+    @app.route("/api/settings", methods=["GET", "POST"])
+    def api_settings():
+        cfg.reload()
+        if request.method == "GET":
+            s, f, r, th = (cfg.section("signal"), cfg.section("filters"),
+                           cfg.section("risk"), cfg.section("trading_hours"))
+            return jsonify({
+                "signal": {
+                    "lookback_period": s.get("lookback_period", 250),
+                    "sample_interval_sec": s.get("sample_interval_sec", 0.5),
+                    "entry_zscore": s.get("entry_zscore", 2.0),
+                    "exit_zscore": s.get("exit_zscore", 0.0),
+                    "stop_zscore": s.get("stop_zscore", 4.0),
+                    "confirmation_ticks": s.get("confirmation_ticks", 3),
+                },
+                "risk": {
+                    "lots_per_trade": r.get("lots_per_trade", 1),
+                    "max_contracts_per_leg": r.get("max_contracts_per_leg", 5),
+                    "max_slippage_pct": r.get("max_slippage_pct", 0.5),
+                    "max_daily_loss": r.get("max_daily_loss", 0),
+                },
+                "trading_hours": {
+                    "enabled": bool(th.get("enabled", False)),
+                    "start_hour": th.get("start_hour", 9), "start_min": th.get("start_min", 15),
+                    "end_hour": th.get("end_hour", 15), "end_min": th.get("end_min", 30),
+                },
+                "filters": {
+                    "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
+                    "commission_basis": f.get("commission_basis", "per_lot"),
+                    "brokerage_per_lot": f.get("brokerage_per_lot", 10),
+                    "slippage_per_lot": f.get("slippage_per_lot", 5),
+                    "min_win_probability": f.get("min_win_probability", 0.60),
+                    "min_expected_value": f.get("min_expected_value", 0),
+                    "time_stop_half_lives": f.get("time_stop_half_lives", 3.0),
+                },
+                "mode": {"paper_trading": cfg.is_dry_run,
+                         "algorithm_enabled": bool(cfg.get("algorithm_enabled", False))},
+            })
+
+        data = request.get_json(force=True) or {}
+
+        def _num(v, d):
+            try:
+                return type(d)(v)
+            except (ValueError, TypeError):
+                return d
+
+        raw = cfg.raw
+        sig = raw.setdefault("signal", {})
+        for k, d in (("lookback_period", 250), ("sample_interval_sec", 0.5),
+                     ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
+                     ("confirmation_ticks", 3)):
+            if k in (data.get("signal") or {}):
+                sig[k] = _num(data["signal"][k], d)
+
+        rk = raw.setdefault("risk", {})
+        for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
+                     ("max_slippage_pct", 0.5), ("max_daily_loss", 0)):
+            if k in (data.get("risk") or {}):
+                rk[k] = _num(data["risk"][k], d)
+
+        th = raw.setdefault("trading_hours", {})
+        td = data.get("trading_hours") or {}
+        if "enabled" in td:
+            th["enabled"] = bool(td["enabled"])
+        for k, d in (("start_hour", 9), ("start_min", 15), ("end_hour", 15), ("end_min", 30)):
+            if k in td:
+                th[k] = _num(td[k], d)
+
+        fl = raw.setdefault("filters", {})
+        fd = data.get("filters") or {}
+        if "enable_probability_filter" in fd:
+            fl["enable_probability_filter"] = bool(fd["enable_probability_filter"])
+        if "commission_basis" in fd:
+            fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
+        for k, d in (("brokerage_per_lot", 10.0), ("slippage_per_lot", 5.0),
+                     ("min_win_probability", 0.60), ("min_expected_value", 0.0),
+                     ("time_stop_half_lives", 3.0)):
+            if k in fd:
+                fl[k] = _num(fd[k], d)
+
+        md = data.get("mode") or {}
+        if "paper_trading" in md:
+            raw["mode"] = "dry_run" if md["paper_trading"] else "live"
+        if "algorithm_enabled" in md:
+            raw["algorithm_enabled"] = bool(md["algorithm_enabled"])
+
+        cfg.save()
+        # keep the running lot size in sync with lots_per_trade
+        _algo_lots["lots"] = int(rk.get("lots_per_trade", _algo_lots["lots"]))
+        logger.info("Settings saved")
+        return jsonify({"success": True})
+
+    # ── signal quality (win-prob / EV / breakeven / half-life gate) ──────────
+    @app.route("/api/signal/quality", methods=["GET"])
+    def api_signal_quality():
+        sig = signal_engine.get_signal()
+        f = cfg.section("filters")
+        z = sig.get("zscore")
+        std = sig.get("std")
+        hl_sec = sig.get("half_life_sec", 0.0) or 0.0
+        out = {"verdict": "WAITING", "ready": bool(sig.get("ready")),
+               "win_probability": None, "expected_value": None, "breakeven_z": None,
+               "round_trip_cost": None, "half_life_sec": hl_sec,
+               "allowed_min_sec": float(f.get("half_life_min_sec", 0) or 0),
+               "allowed_max_sec": float(f.get("half_life_max_sec", 0) or 0),
+               "time_stop_sec": round(float(f.get("time_stop_half_lives", 3.0)) * hl_sec, 1),
+               "entry_zscore": sig.get("entry_zscore", 2.0)}
+        if z is None or std is None or not sig.get("ready"):
+            return jsonify(out)
+        pf = ProbabilityFilter(
+            commission_per_lot=float(f.get("brokerage_per_lot", 10)) * 2.0,
+            slippage_per_lot=float(f.get("slippage_per_lot", 5)) * 2.0,
+            commission_basis=str(f.get("commission_basis", "per_lot")),
+            lot_multiplier=_lot_multiplier(),
+            min_win_probability=float(f.get("min_win_probability", 0.60)),
+            min_expected_value=float(f.get("min_expected_value", 0)),
+            exit_zscore=float(cfg.get("signal.exit_zscore", 0.0)),
+            stop_zscore=float(cfg.get("signal.stop_zscore", 4.0)),
+            enabled=bool(f.get("enable_probability_filter", True)),
+        )
+        m = pf._compute_metrics(z, std, int(_algo_lots["lots"]))
+        out.update(win_probability=round(m["win_probability"], 4),
+                   expected_value=round(m["expected_value"], 2),
+                   breakeven_z=round(m["breakeven_z"], 3),
+                   round_trip_cost=round(m["round_trip_cost"], 2))
+        entry_z = float(sig.get("entry_zscore", 2.0))
+        if abs(z) < entry_z:
+            out["verdict"] = "WATCHING"
+        else:
+            allow, _reason, _m = pf.check_entry(z, std, hl_sec, int(_algo_lots["lots"]))
+            out["verdict"] = "ALLOW" if allow else "BLOCKED"
+        return jsonify(out)
+
+    # ── risk metrics (leg notionals + max daily loss) ────────────────────────
+    @app.route("/api/risk", methods=["GET"])
+    def api_risk():
+        out = {"leg_a_notional": 0.0, "leg_b_notional": 0.0,
+               "max_daily_loss": float(cfg.get("risk.max_daily_loss", 0) or 0)}
+        broker = active.get()
+        legs = _read_legs()
+        if not broker or not _have_both_legs(legs):
+            return jsonify(out)
+        syms = {lk: legs[lk]["symbol"] for lk in ("leg_a", "leg_b")}
+        prices = {}
+        try:
+            prices = broker.get_streamed_ltp(list(syms.values())) or {}
+        except Exception:
+            prices = {}
+        positions = {}
+        try:
+            positions = {str(p.get("symbol", "")).upper(): p for p in (broker.get_positions() or [])}
+        except Exception:
+            positions = {}
+        for lk, sym in syms.items():
+            ltp = prices.get(sym.upper()) or 0.0
+            p = positions.get(sym.upper())
+            qty = abs(int(p.get("net_quantity") or 0)) if p else 0
+            if qty == 0:
+                # No position → show prospective notional for the configured lots.
+                try:
+                    qty = broker.resolve_lot_size(legs[lk]["segment"], sym) * int(_algo_lots["lots"])
+                except Exception:
+                    qty = 0
+            out[f"{lk}_notional"] = round(float(ltp) * qty, 2)
+        return jsonify(out)
+
+    # ── trades table ─────────────────────────────────────────────────────────
+    @app.route("/api/trades", methods=["GET"])
+    def api_trades():
+        return jsonify({"trades": trade_log.all(), "stats": trade_log.stats()})
+
+    @app.route("/api/trades/clear", methods=["POST"])
+    def api_trades_clear():
+        trade_log.clear()
+        return jsonify({"success": True})
+
+    # ── markets bar (session clock) ──────────────────────────────────────────
+    @app.route("/api/markets", methods=["GET"])
+    def api_markets():
+        now = datetime.now(_IST)
+        ist = now.strftime("%H:%M IST")
+        legs = _read_legs()
+        pair = ""
+        if _have_both_legs(legs):
+            pair = f"{legs['leg_a']['symbol']} ↔ {legs['leg_b']['symbol']}"
+        # Equity/F&O regular session 09:15–15:30 IST.
+        open_now = (now.hour, now.minute) >= (9, 15) and (now.hour, now.minute) <= (15, 30)
+        segs = [{"name": n, "time": ist, "open": open_now}
+                for n in ("MCX", "NSE F&O", "NSE Cash", "BSE")]
+        return jsonify({"segments": segs, "pair": pair})
+
+    # ── system tests ─────────────────────────────────────────────────────────
+    @app.route("/api/run-tests", methods=["POST"])
+    def api_run_tests():
+        try:
+            proc = subprocess.run([sys.executable, "-m", "pytest", "-q"],
+                                  cwd=str(PROJECT_ROOT), capture_output=True,
+                                  text=True, timeout=300)
+            tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
+            return jsonify({"success": proc.returncode == 0,
+                            "returncode": proc.returncode, "output": tail})
+        except Exception as exc:
+            return jsonify({"success": False, "output": str(exc)}), 500
 
     # ── socketio ─────────────────────────────────────────────────────────────
     @socketio.on("connect")

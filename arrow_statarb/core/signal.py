@@ -184,3 +184,41 @@ class SignalEngine:
             ready=(span_min >= p["min_signal_minutes"] and std > 1e-12),
         )
         return out
+
+    def get_series(self, max_points: int = 200) -> Dict:
+        """Recent spread + per-sample z series for the dashboard charts.
+
+        z is computed against the window's CURRENT mean/std (one consistent
+        snapshot), so the chart matches the live signal/algo z. Downsampled to
+        at most ``max_points`` so the charts stay light regardless of window
+        size (a 120-min window at 0.5s holds ~14.4k samples)."""
+        with self._lock:
+            samples = list(self._samples)
+        if not samples:
+            return {"points": [], "spread_min": None, "spread_max": None,
+                    "entry_zscore": self._p()["entry_zscore"],
+                    "stop_zscore": self._p()["stop_zscore"]}
+
+        spreads = [s[3] for s in samples]
+        mean, std = self.compute_stats(spreads)
+        sd = std if std > 1e-12 else 0.0
+
+        step = max(1, len(samples) // max_points)
+        points = []
+        for i in range(0, len(samples), step):
+            sp = samples[i][3]
+            z = (sp - mean) / sd if sd else 0.0
+            points.append({"spread": round(sp, 4), "z": round(z, 4)})
+        # Always include the most recent sample as the final point.
+        if (len(samples) - 1) % step != 0:
+            sp = samples[-1][3]
+            points.append({"spread": round(sp, 4),
+                           "z": round((sp - mean) / sd, 4) if sd else 0.0})
+
+        return {
+            "points": points,
+            "spread_min": round(min(spreads), 4),
+            "spread_max": round(max(spreads), 4),
+            "entry_zscore": self._p()["entry_zscore"],
+            "stop_zscore": self._p()["stop_zscore"],
+        }

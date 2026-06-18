@@ -3,103 +3,250 @@
 {% block nav_dash %}active{% endblock %}
 
 {% block content %}
+<!-- ── Markets bar ─────────────────────────────────────────────────────────── -->
+<div class="card mb-3 border-0">
+    <div class="card-body py-2 px-3 rounded text-white d-flex flex-wrap align-items-center"
+         style="background:#0d6efd;">
+        <span class="fw-bold me-3"><i class="bi bi-globe me-1"></i>Markets:</span>
+        <span id="markets-segs" class="d-flex flex-wrap gap-3 small"></span>
+        <span class="ms-auto small">Pair: <strong id="markets-pair">—</strong></span>
+    </div>
+</div>
+
 <div id="lot-mismatch" class="alert alert-warning d-none"></div>
 
+<!-- ── Live Prices ─────────────────────────────────────────────────────────── -->
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-currency-exchange me-2"></i>Live Prices</span>
+        <span class="font-monospace small text-secondary">
+            <span id="lp-a-sym">{{ leg_a }}</span> <i class="bi bi-arrow-left-right"></i>
+            <span id="lp-b-sym">{{ leg_b }}</span>
+            <span id="feed-badge" class="badge bg-secondary ms-2">no feed</span>
+        </span>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6">
+                <div class="fs-5">Leg A (<span class="font-monospace">{{ leg_a }}</span>)
+                    <span class="badge bg-secondary">INR</span></div>
+                <div class="fs-4">Price: <span id="m-leg-a" class="text-success font-monospace">0.00</span></div>
+            </div>
+            <div class="col-md-6">
+                <div class="fs-5">Leg B (<span class="font-monospace">{{ leg_b }}</span>)
+                    <span class="badge bg-secondary">INR</span></div>
+                <div class="fs-4">Price: <span id="m-leg-b" class="text-success font-monospace">0.00</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="row g-3">
-    <!-- ── Live prices + signal ─────────────────────────────────────────── -->
+    <!-- ════════════════ LEFT / MAIN COLUMN ════════════════ -->
     <div class="col-lg-8">
-        <div class="card">
+        <!-- Stat tiles -->
+        <div class="row g-3 mb-1">
+            <div class="col-6 col-xl-3"><div class="card text-center h-100"><div class="card-body">
+                <div class="metric" id="t-z">0.00</div><div class="metric-label">Z-Score</div></div></div></div>
+            <div class="col-6 col-xl-3"><div class="card text-center h-100"><div class="card-body">
+                <div class="metric" id="t-spread">0.00</div><div class="metric-label">Current Spread</div></div></div></div>
+            <div class="col-6 col-xl-3"><div class="card text-center h-100"><div class="card-body">
+                <div class="metric text-success" id="t-pnl">₹0.00</div><div class="metric-label">Total P&amp;L</div></div></div></div>
+            <div class="col-6 col-xl-3"><div class="card text-center h-100"><div class="card-body">
+                <div class="metric" id="t-winrate">0.0%</div><div class="metric-label">Win Rate</div></div></div></div>
+        </div>
+
+        <!-- Z-Score Monitor -->
+        <div class="card mt-3">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-graph-up me-2"></i>Live Signal</span>
-                <span id="feed-badge" class="badge bg-secondary">no feed</span>
+                <span><i class="bi bi-graph-up me-2"></i>Z-Score Monitor</span>
+                <div>
+                    <span class="badge bg-secondary me-1">Mean: <span id="zm-mean">0.00</span></span>
+                    <span class="badge bg-secondary">Std: <span id="zm-std">0.00</span></span>
+                </div>
             </div>
             <div class="card-body">
-                <div class="row text-center g-3">
-                    <div class="col">
-                        <div class="metric-label">Leg A <span class="font-monospace text-secondary">{{ leg_a }}</span></div>
-                        <div class="metric" id="m-leg-a">—</div>
-                    </div>
-                    <div class="col">
-                        <div class="metric-label">Leg B <span class="font-monospace text-secondary">{{ leg_b }}</span></div>
-                        <div class="metric" id="m-leg-b">—</div>
-                    </div>
-                    <div class="col">
-                        <div class="metric-label">Spread</div>
-                        <div class="metric" id="m-spread">—</div>
-                    </div>
-                    <div class="col">
-                        <div class="metric-label">Z-Score <span class="text-secondary">(server)</span></div>
-                        <div class="z-big" id="m-z">—</div>
-                    </div>
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <span><i class="bi bi-hourglass-split me-1"></i>Data Collection
+                        <span id="dc-badge" class="badge bg-secondary">offline</span></span>
+                    <span class="small text-secondary"><span id="dc-have">0</span> / <span id="dc-window">{{ window_minutes }}</span> min</span>
                 </div>
-                <hr>
-                <div class="row text-center small text-secondary g-2">
-                    <div class="col">mean <span id="m-mean" class="text-body">—</span></div>
-                    <div class="col">std <span id="m-std" class="text-body">—</span></div>
-                    <div class="col">samples <span id="m-samples" class="text-body">—</span></div>
-                    <div class="col">half-life <span id="m-hl" class="text-body">—</span></div>
-                    <div class="col">window <span id="m-window" class="text-body">—</span></div>
+                <div class="progress mb-2" style="height:6px;">
+                    <div id="dc-bar" class="progress-bar" style="width:0%"></div>
                 </div>
-                <div class="mt-2 small" id="signal-status"></div>
+                <div id="dc-warn" class="small text-warning mb-2"></div>
+                <div style="height: 200px;"><canvas id="zscore-canvas"></canvas></div>
             </div>
         </div>
 
-        <!-- ── Algorithm ─────────────────────────────────────────────────── -->
+        <!-- Signal Quality -->
         <div class="card mt-3">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-robot me-2"></i>Auto-Trader</span>
-                <div class="form-check form-switch m-0">
-                    <input class="form-check-input" type="checkbox" id="algo-toggle" role="switch">
-                    <label class="form-check-label" for="algo-toggle">Algorithm Active
-                        <span id="algo-status" class="text-muted ms-1">OFF</span></label>
-                </div>
+                <span><i class="bi bi-bar-chart-line me-2"></i>Signal Quality</span>
+                <span id="sq-verdict" class="badge bg-secondary">WAITING</span>
             </div>
             <div class="card-body">
-                <div class="font-monospace small" id="algo-state-line">—</div>
-                <div id="system-log" class="mt-2 border rounded p-2"></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Win Probability</span><span class="fw-bold" id="sq-winprob">—</span></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Expected Value</span><span class="fw-bold" id="sq-ev">—</span></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Break-even Z</span><span class="fw-bold" id="sq-bez">—</span></div>
+                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Round-trip Cost</span><span class="fw-bold" id="sq-cost">—</span></div>
+                <hr class="my-2">
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Detected Half-Life</span><span class="fw-bold" id="sq-hl">—</span></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Allowed Range</span><span class="fw-bold" id="sq-range">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Time Stop</span><span class="fw-bold" id="sq-tstop">—</span></div>
+                <p class="small text-secondary mt-2 mb-0"><strong>What is Half-Life?</strong> It measures how
+                    quickly the spread mean-reverts. A half-life of 5 days means the spread closes ~50% of the
+                    gap in 5 days. Entries are only allowed when the detected half-life sits inside the
+                    <em>Allowed Range</em> — too short means noise, too long means the trade won't close
+                    before your time stop fires.</p>
+            </div>
+        </div>
+
+        <!-- Spread History -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-graph-up-arrow me-2"></i>Spread History</span>
+                <div>
+                    <span class="badge bg-info text-dark me-1">Min: <span id="spread-min">0.00</span></span>
+                    <span class="badge bg-warning text-dark">Max: <span id="spread-max">0.00</span></span>
+                </div>
+            </div>
+            <div class="card-body"><div style="height: 200px;"><canvas id="spread-canvas"></canvas></div></div>
+        </div>
+
+        <!-- System Log -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-terminal me-2"></i>System Log</span>
+                <button class="btn btn-sm btn-outline-secondary" onclick="clearLog()">Clear</button>
+            </div>
+            <div class="card-body"><div id="system-log" class="border rounded p-2"></div></div>
+        </div>
+
+        <!-- Trades table -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-table me-2"></i>Trades</span>
+                <div>
+                    <span class="badge bg-secondary me-1"><span id="tr-count">0</span> trades</span>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="pollTrades()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0 align-middle">
+                        <thead><tr class="small text-secondary">
+                            <th class="ps-3">Time</th><th>Action</th><th>Dir</th><th>Lots</th>
+                            <th class="text-end">Spread P&amp;L</th><th class="text-end">Brokerage</th>
+                            <th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Status</th>
+                        </tr></thead>
+                        <tbody id="trades-body">
+                            <tr><td colspan="8" class="text-center text-secondary py-3">No trades yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- ── Position + manual + mode ─────────────────────────────────────── -->
+    <!-- ════════════════ RIGHT COLUMN ════════════════ -->
     <div class="col-lg-4">
+        <!-- Algorithm Control -->
         <div class="card">
-            <div class="card-header"><i class="bi bi-wallet2 me-2"></i>Current Position</div>
-            <div class="card-body">
-                <div class="d-flex justify-content-between"><span>Direction</span><strong id="pos-dir">FLAT</strong></div>
-                <div class="d-flex justify-content-between"><span>Leg A qty</span><span id="pos-a">0</span></div>
-                <div class="d-flex justify-content-between"><span>Leg B qty</span><span id="pos-b">0</span></div>
-                <hr>
-                <div class="d-flex justify-content-between"><span>Unrealized P&amp;L</span>
-                    <strong id="pos-pnl">₹0.00</strong></div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-robot me-2"></i>Algorithm Control</span>
+                <span id="algo-mode-badge" class="badge bg-warning text-dark">DRY-RUN</span>
             </div>
-        </div>
-
-        <div class="card mt-3">
-            <div class="card-header"><i class="bi bi-hand-index me-2"></i>Manual Trade</div>
             <div class="card-body">
-                <label class="form-label small">Direction</label>
-                <select class="form-select form-select-sm mb-2" id="manual-direction">
-                    <option value="LONG_SPREAD">LONG_SPREAD (buy A / sell B)</option>
-                    <option value="SHORT_SPREAD">SHORT_SPREAD (sell A / buy B)</option>
-                </select>
-                <label class="form-label small">Lots</label>
-                <input type="number" class="form-control form-control-sm mb-2" id="manual-lots" value="1" min="1">
-                <div class="d-flex gap-2">
-                    <button class="btn btn-success btn-sm flex-fill" onclick="manualExecute()">Execute</button>
-                    <button class="btn btn-outline-danger btn-sm flex-fill" onclick="manualClose()">Close</button>
+                <div class="form-check form-switch d-flex justify-content-between align-items-center m-0">
+                    <span><label class="form-check-label fw-bold" for="algo-toggle">Algorithm Active</label>
+                        <div class="small text-secondary">Executes trades automatically on signals</div></span>
+                    <span class="d-flex align-items-center">
+                        <input class="form-check-input me-2" type="checkbox" id="algo-toggle" role="switch">
+                        <span id="algo-status" class="text-muted">OFF</span></span>
                 </div>
-                <div class="small mt-2" id="manual-msg"></div>
+                <div class="font-monospace small mt-2" id="algo-state-line">idle</div>
+                <hr>
+                <div id="mode-help" class="text-center small text-primary mb-2">
+                    Dry-run mode — signals fire but no real orders are placed</div>
+                <button class="btn btn-outline-danger w-100" id="to-live" onclick="goLive()">
+                    <i class="bi bi-lightning-charge me-1"></i>Go Live</button>
+                <button class="btn btn-outline-warning w-100 d-none" id="to-dryrun" onclick="setMode('dry_run')">
+                    Switch to Dry-Run</button>
             </div>
         </div>
 
+        <!-- Manual Spread Trade -->
         <div class="card mt-3">
-            <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Trading Mode</div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-hand-index me-2"></i>Manual Spread Trade</span>
+                <span id="mt-badge" class="badge bg-secondary">IDLE</span>
+            </div>
             <div class="card-body">
-                <div class="mb-2">Current: <span id="mode-text" class="fw-bold">—</span></div>
-                <button class="btn btn-outline-warning btn-sm" id="to-dryrun" onclick="setMode('dry_run')">Switch to DRY-RUN</button>
-                <button class="btn btn-outline-danger btn-sm" id="to-live" onclick="goLive()">Go LIVE</button>
-                <div class="form-text">DRY-RUN never transmits orders to Arrow.</div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Live Spread (₹)</span><span class="font-monospace" id="mt-spread">—</span></div>
+                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Z-Score</span><span class="font-monospace" id="mt-z">—</span></div>
+                <ul class="nav nav-pills nav-justified mb-2 small" id="mt-tabs">
+                    <li class="nav-item"><button class="nav-link active py-1" onclick="mtTab('watch', this)">Watch for Entry</button></li>
+                    <li class="nav-item"><button class="nav-link py-1" onclick="mtTab('inpos', this)">Already In Position</button></li>
+                    <li class="nav-item"><button class="nav-link py-1" onclick="mtTab('exit', this)">Set Exit / SL Only</button></li>
+                </ul>
+                <div class="row g-2">
+                    <div class="col-4"><label class="form-label small mb-0">Entry Spread (₹)</label>
+                        <input class="form-control form-control-sm" id="mt-entry" placeholder="e.g. 450">
+                        <div class="form-text small">blank = execute now</div></div>
+                    <div class="col-4"><label class="form-label small mb-0">Exit Target (₹)</label>
+                        <input class="form-control form-control-sm" id="mt-exit" placeholder="e.g. 400">
+                        <div class="form-text small">blank = manual close</div></div>
+                    <div class="col-4"><label class="form-label small mb-0">Stop Loss (₹)</label>
+                        <input class="form-control form-control-sm" id="mt-stop" placeholder="e.g. 470">
+                        <div class="form-text small">optional</div></div>
+                </div>
+                <div class="alert alert-secondary small my-2 py-2" id="mt-info">
+                    Set your targets above, then Activate or Execute</div>
+                <label class="form-label small mb-0">Lots per Leg</label>
+                <input type="number" class="form-control form-control-sm mb-2" id="mt-lots" value="1" min="1">
+                <button class="btn btn-primary w-100 mb-2" id="mt-activate" onclick="mtActivate()">
+                    <i class="bi bi-play-fill"></i> Activate — Watch for Entry</button>
+                <button class="btn btn-outline-danger w-100 mb-2 d-none" id="mt-close" onclick="mtClose()">
+                    Close Position</button>
+                <button class="btn btn-outline-secondary w-100" onclick="mtTestOrder()">
+                    <i class="bi bi-send"></i> Place Test Order (1 lot → close in 3s)</button>
+                <div class="form-text small">Set targets above — Exit&gt;Entry ⇒ LONG, Exit&lt;Entry ⇒ SHORT.</div>
+            </div>
+        </div>
+
+        <!-- Risk Metrics -->
+        <div class="card mt-3">
+            <div class="card-header"><i class="bi bi-bank me-2"></i>Risk Metrics</div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg A Notional</span><span class="fw-bold" id="rk-a">₹0.00</span></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg B Notional</span><span class="fw-bold" id="rk-b">₹0.00</span></div>
+                <div class="d-flex justify-content-between bg-body-secondary rounded px-2 py-1">
+                    <span class="fw-bold">Max Daily Loss</span><span class="fw-bold text-danger" id="rk-mdl">₹0.00</span></div>
+            </div>
+        </div>
+
+        <!-- Broker -->
+        <div class="card mt-3">
+            <div class="card-header"><i class="bi bi-shield me-2"></i>Broker</div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Connection</span>
+                    <span id="bk-conn" class="badge bg-secondary">Disconnected</span></div>
+                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Instruments</span>
+                    <span id="bk-instr" class="badge bg-secondary">—</span></div>
+                <a href="/" class="btn btn-outline-warning w-100"><i class="bi bi-sliders me-1"></i>Setup / Connect</a>
+            </div>
+        </div>
+
+        <!-- Current Position -->
+        <div class="card mt-3">
+            <div class="card-header"><i class="bi bi-folder me-2"></i>Current Position</div>
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Direction:</span><strong id="pos-dir">FLAT</strong></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg A:</span><span><span id="pos-a">0</span> contracts</span></div>
+                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Leg B:</span><span><span id="pos-b">0</span> contracts</span></div>
+                <hr>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Unrealized P&amp;L:</span><strong id="pos-pnl" class="text-success">₹0.00</strong></div>
             </div>
         </div>
     </div>
@@ -107,67 +254,160 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
     const REFRESH_MS = {{ display_refresh_ms }};
+    const ENTRY_Z = {{ entry_zscore }};
+    const STOP_Z  = {{ stop_zscore }};
 
     function _fmt(v, d=2) { return (v === null || v === undefined) ? '—' : Number(v).toFixed(d); }
+    function _rs(v, d=2) { return '₹' + Number(v || 0).toFixed(d); }
     function log(msg, cls='') {
         const el = document.getElementById('system-log');
         el.innerHTML += `<div class="log-entry ${cls}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
         el.scrollTop = el.scrollHeight;
         while (el.children.length > 200) el.removeChild(el.firstChild);
     }
+    function clearLog() { document.getElementById('system-log').innerHTML =
+        '<div class="log-entry log-info">Log cleared.</div>'; }
 
-    // ── Live prices + feed badge ─────────────────────────────────────────
+    // ── Charts (server signal series) ────────────────────────────────────────
+    const _noAnim = { responsive: true, maintainAspectRatio: false, animation: false,
+        elements: { point: { radius: 0 } }, plugins: { legend: { display: false } },
+        scales: { x: { display: false } } };
+    const zscoreChart = new Chart(document.getElementById('zscore-canvas'), {
+        type: 'line', data: { labels: [], datasets: [
+            { label: 'Z', data: [], borderColor: '#0d6efd', backgroundColor: 'rgba(13,110,253,.1)', fill: true, borderWidth: 2, tension: .2 },
+            { label: 'Entry+', data: [], borderColor: '#dc3545', borderDash: [5,5], borderWidth: 1, fill: false },
+            { label: 'Entry-', data: [], borderColor: '#198754', borderDash: [5,5], borderWidth: 1, fill: false },
+            { label: 'Stop+', data: [], borderColor: '#6c757d', borderDash: [2,3], borderWidth: 1, fill: false },
+            { label: 'Stop-', data: [], borderColor: '#6c757d', borderDash: [2,3], borderWidth: 1, fill: false },
+        ]}, options: _noAnim });
+    const spreadChart = new Chart(document.getElementById('spread-canvas'), {
+        type: 'line', data: { labels: [], datasets: [
+            { label: 'Spread', data: [], borderColor: '#6f42c1', backgroundColor: 'rgba(111,66,193,.1)', fill: true, borderWidth: 2, tension: .2 },
+        ]}, options: _noAnim });
+
+    async function pollHistory() {
+        try {
+            const h = await fetch('/api/signal/history?points=200').then(r => r.json());
+            const pts = h.points || [];
+            const labels = pts.map((_, i) => i);
+            const ez = h.entry_zscore ?? ENTRY_Z, sz = h.stop_zscore ?? STOP_Z;
+            zscoreChart.data.labels = labels;
+            zscoreChart.data.datasets[0].data = pts.map(p => p.z);
+            zscoreChart.data.datasets[1].data = labels.map(() => ez);
+            zscoreChart.data.datasets[2].data = labels.map(() => -ez);
+            zscoreChart.data.datasets[3].data = labels.map(() => sz);
+            zscoreChart.data.datasets[4].data = labels.map(() => -sz);
+            zscoreChart.update();
+            spreadChart.data.labels = labels;
+            spreadChart.data.datasets[0].data = pts.map(p => p.spread);
+            spreadChart.update();
+            document.getElementById('spread-min').textContent = h.spread_min == null ? '—' : Number(h.spread_min).toFixed(2);
+            document.getElementById('spread-max').textContent = h.spread_max == null ? '—' : Number(h.spread_max).toFixed(2);
+        } catch (e) {}
+    }
+
+    // ── Live prices + feed badge ─────────────────────────────────────────────
     async function pollPrices() {
         try {
             const p = await fetch('/api/prices').then(r => r.json());
             document.getElementById('m-leg-a').textContent = _fmt(p.leg_a);
             document.getElementById('m-leg-b').textContent = _fmt(p.leg_b);
             const fb = document.getElementById('feed-badge');
-            if (!p.connected) { fb.className = 'badge bg-secondary'; fb.textContent = 'disconnected'; }
-            else if (p.source === 'stream') { fb.className = 'badge bg-success'; fb.textContent = 'STREAM'; }
-            else if (p.stale) { fb.className = 'badge bg-warning text-dark'; fb.textContent = 'STALE'; }
-            else { fb.className = 'badge bg-info text-dark'; fb.textContent = 'REST'; }
+            if (!p.connected) { fb.className = 'badge bg-secondary ms-2'; fb.textContent = 'disconnected'; }
+            else if (p.source === 'stream') { fb.className = 'badge bg-success ms-2'; fb.textContent = 'STREAM'; }
+            else if (p.stale) { fb.className = 'badge bg-warning text-dark ms-2'; fb.textContent = 'STALE'; }
+            else { fb.className = 'badge bg-info text-dark ms-2'; fb.textContent = 'REST'; }
         } catch (e) {}
     }
 
-    // ── Server signal (single source of truth) ───────────────────────────
+    // ── Signal + tiles + data-collection ─────────────────────────────────────
+    let _liveSpread = null, _liveZ = null;
     async function pollSignal() {
         try {
             const s = await fetch('/api/signal').then(r => r.json());
-            document.getElementById('m-spread').textContent = _fmt(s.spread);
-            document.getElementById('m-z').textContent = _fmt(s.zscore);
-            document.getElementById('m-mean').textContent = _fmt(s.mean);
-            document.getElementById('m-std').textContent = _fmt(s.std, 4);
-            document.getElementById('m-samples').textContent = s.samples ?? '—';
-            document.getElementById('m-hl').textContent = s.half_life_sec ? `${_fmt(s.half_life_sec,0)}s` : '—';
-            document.getElementById('m-window').textContent = `${s.window_minutes ?? '—'}m`;
-            const zEl = document.getElementById('m-z');
-            const z = Number(s.zscore || 0);
-            zEl.className = 'z-big ' + (Math.abs(z) >= (s.entry_zscore||2) ? 'text-warning' : '');
-            const st = document.getElementById('signal-status');
-            if (!s.running) st.innerHTML = '<span class="text-secondary">signal engine idle (connect Arrow)</span>';
-            else if (!s.ready) st.innerHTML = `<span class="text-info">collecting history: ${_fmt(s.span_minutes,1)}/${s.min_signal_minutes} min</span>`;
-            else st.innerHTML = '<span class="text-success">signal ready</span>';
+            _liveSpread = s.spread; _liveZ = s.zscore;
+            document.getElementById('t-z').textContent = _fmt(s.zscore);
+            document.getElementById('t-spread').textContent = _fmt(s.spread);
+            document.getElementById('zm-mean').textContent = _fmt(s.mean);
+            document.getElementById('zm-std').textContent = _fmt(s.std, 4);
+            document.getElementById('mt-spread').textContent = _fmt(s.spread);
+            document.getElementById('mt-z').textContent = _fmt(s.zscore);
+            // Data Collection
+            const have = Number(s.span_minutes || 0), win = Number(s.window_minutes || {{ window_minutes }});
+            document.getElementById('dc-have').textContent = have.toFixed(1);
+            document.getElementById('dc-window').textContent = win;
+            document.getElementById('dc-bar').style.width = Math.min(100, 100*have/win) + '%';
+            const badge = document.getElementById('dc-badge');
+            const warn = document.getElementById('dc-warn');
+            if (!s.running) { badge.className='badge bg-secondary'; badge.textContent='offline';
+                warn.textContent='Broker not connected — prices unavailable'; }
+            else if (!s.ready) { badge.className='badge bg-info text-dark'; badge.textContent='collecting';
+                warn.textContent=`Collecting history — preliminary until ${s.min_signal_minutes} min`; }
+            else { badge.className='badge bg-success'; badge.textContent='ready'; warn.textContent=''; }
         } catch (e) {}
     }
 
-    // ── Position ─────────────────────────────────────────────────────────
+    // ── Signal Quality ───────────────────────────────────────────────────────
+    async function pollQuality() {
+        try {
+            const q = await fetch('/api/signal/quality').then(r => r.json());
+            const vb = document.getElementById('sq-verdict');
+            const map = { ALLOW:'bg-success', BLOCKED:'bg-danger', WATCHING:'bg-info text-dark', WAITING:'bg-secondary' };
+            vb.className = 'badge ' + (map[q.verdict] || 'bg-secondary'); vb.textContent = q.verdict;
+            document.getElementById('sq-winprob').textContent = q.win_probability == null ? '—' : (q.win_probability*100).toFixed(1)+'%';
+            document.getElementById('sq-ev').textContent = q.expected_value == null ? '—' : _rs(q.expected_value);
+            document.getElementById('sq-bez').textContent = q.breakeven_z == null ? '—' : _fmt(q.breakeven_z);
+            document.getElementById('sq-cost').textContent = q.round_trip_cost == null ? '—' : _rs(q.round_trip_cost);
+            document.getElementById('sq-hl').textContent = q.half_life_sec ? q.half_life_sec.toFixed(0)+'s' : '— ';
+            const lo = q.allowed_min_sec || 0, hi = q.allowed_max_sec || 0;
+            document.getElementById('sq-range').textContent = (lo||hi) ? `${lo}–${hi}s` : 'any';
+            document.getElementById('sq-tstop').textContent = q.time_stop_sec ? q.time_stop_sec.toFixed(0)+'s' : '— ';
+        } catch (e) {}
+    }
+
+    // ── Position ─────────────────────────────────────────────────────────────
+    let _inPosition = false, _posDir = 'FLAT';
     async function pollPosition() {
         try {
             const p = await fetch('/api/positions').then(r => r.json());
-            document.getElementById('pos-dir').textContent = p.direction || 'FLAT';
+            _posDir = p.direction || 'FLAT';
+            _inPosition = !!(p.leg_a || p.leg_b);
+            document.getElementById('pos-dir').textContent = _posDir;
             document.getElementById('pos-a').textContent = p.leg_a || 0;
             document.getElementById('pos-b').textContent = p.leg_b || 0;
             const pnl = Number(p.unrealized_pnl || 0);
             const el = document.getElementById('pos-pnl');
-            el.textContent = '₹' + pnl.toFixed(2);
-            el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : '');
+            el.textContent = _rs(pnl); el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : '');
         } catch (e) {}
     }
 
-    // ── Lot-size mismatch warning ────────────────────────────────────────
+    // ── Risk Metrics ─────────────────────────────────────────────────────────
+    async function pollRisk() {
+        try {
+            const r = await fetch('/api/risk').then(r => r.json());
+            document.getElementById('rk-a').textContent = _rs(r.leg_a_notional);
+            document.getElementById('rk-b').textContent = _rs(r.leg_b_notional);
+            document.getElementById('rk-mdl').textContent = _rs(r.max_daily_loss);
+        } catch (e) {}
+    }
+
+    // ── Broker card ──────────────────────────────────────────────────────────
+    async function pollBroker() {
+        try {
+            const st = await fetch('/api/arrow/status').then(r => r.json());
+            const c = document.getElementById('bk-conn');
+            c.className = 'badge ' + (st.connected ? 'bg-success' : 'bg-secondary');
+            c.textContent = st.connected ? 'Connected' : 'Disconnected';
+            const i = document.getElementById('bk-instr');
+            i.className = 'badge ' + (st.instruments_ready ? 'bg-success' : 'bg-secondary');
+            i.textContent = st.connected ? (st.instruments_ready ? st.instrument_count.toLocaleString() : 'loading…') : '—';
+        } catch (e) {}
+    }
+
+    // ── Lot-mismatch warning ─────────────────────────────────────────────────
     async function pollLegInfo() {
         try {
             const i = await fetch('/api/leg-info').then(r => r.json());
@@ -177,102 +417,194 @@
         } catch (e) {}
     }
 
-    // ── Mode ─────────────────────────────────────────────────────────────
+    // ── Markets bar ──────────────────────────────────────────────────────────
+    async function pollMarkets() {
+        try {
+            const m = await fetch('/api/markets').then(r => r.json());
+            document.getElementById('markets-pair').textContent = m.pair || '—';
+            document.getElementById('markets-segs').innerHTML = (m.segments||[]).map(s =>
+                `<span><i class="bi bi-circle-fill ${s.open?'text-success':'text-secondary'}" style="font-size:.5rem"></i> ${s.name} <span class="opacity-75">${s.time}</span></span>`
+            ).join('');
+        } catch (e) {}
+    }
+
+    // ── Mode + Total P&L + Win Rate ──────────────────────────────────────────
     async function pollMode() {
         try {
             const c = await fetch('/api/config').then(r => r.json());
-            document.getElementById('mode-text').textContent = c.dry_run ? 'DRY-RUN' : 'LIVE';
-            document.getElementById('to-dryrun').classList.toggle('d-none', c.dry_run);
+            const b = document.getElementById('algo-mode-badge');
+            b.className = 'badge ' + (c.dry_run ? 'bg-warning text-dark' : 'bg-danger');
+            b.textContent = c.dry_run ? 'DRY-RUN' : 'LIVE';
+            document.getElementById('mode-help').textContent = c.dry_run
+                ? 'Dry-run mode — signals fire but no real orders are placed'
+                : 'LIVE mode — real orders are transmitted to Arrow';
             document.getElementById('to-live').classList.toggle('d-none', !c.dry_run);
+            document.getElementById('to-dryrun').classList.toggle('d-none', c.dry_run);
         } catch (e) {}
     }
     async function setMode(mode) {
-        await fetch('/api/trading-mode', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ mode })
-        });
+        await fetch('/api/trading-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode}) });
         pollMode(); refreshBadges();
     }
-    function goLive() {
-        if (prompt('Type LIVE to enable real order transmission to Arrow:') === 'LIVE') setMode('live');
+    function goLive() { if (prompt('Type LIVE to enable real order transmission to Arrow:') === 'LIVE') setMode('live'); }
+
+    // ── Trades table ─────────────────────────────────────────────────────────
+    async function pollTrades() {
+        try {
+            const r = await fetch('/api/trades').then(x => x.json());
+            const t = r.trades || [], st = r.stats || {};
+            document.getElementById('tr-count').textContent = st.count || 0;
+            document.getElementById('t-pnl').textContent = _rs(st.total_pnl || 0);
+            document.getElementById('t-winrate').textContent = (st.win_rate || 0).toFixed(1) + '%';
+            const body = document.getElementById('trades-body');
+            if (!t.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-3">No trades yet</td></tr>'; return; }
+            body.innerHTML = t.map(x => {
+                const np = Number(x.net_pnl||0);
+                const npc = np>0?'text-success':(np<0?'text-danger':'');
+                return `<tr class="small"><td class="ps-3">${x.time}</td><td>${x.action}</td>
+                    <td>${(x.direction||'').replace('_SPREAD','')}</td><td>${x.lots}</td>
+                    <td class="text-end">${_rs(x.spread_pnl)}</td><td class="text-end">${_rs(x.brokerage)}</td>
+                    <td class="text-end ${npc}">${_rs(np)}</td>
+                    <td class="text-end pe-3"><span class="badge ${x.dry_run?'bg-warning text-dark':'bg-success'}">${x.status}</span></td></tr>`;
+            }).join('');
+        } catch (e) {}
     }
 
-    // ── Manual trade ─────────────────────────────────────────────────────
-    async function manualExecute() {
-        const body = JSON.stringify({
-            direction: document.getElementById('manual-direction').value,
-            lots: parseInt(document.getElementById('manual-lots').value) || 1
-        });
-        const res = await fetch('/api/manual-trade/execute', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body
-        }).then(r => r.json());
-        document.getElementById('manual-msg').innerHTML = res.success
-            ? `<span class="text-success">${res.message}</span>`
-            : `<span class="text-danger">${res.error}</span>`;
-        log(res.success ? 'MANUAL ' + res.message : 'MANUAL FAILED: ' + res.error,
-            res.success ? 'log-trade' : 'log-error');
-    }
-    async function manualClose() {
-        const body = JSON.stringify({
-            direction: document.getElementById('manual-direction').value,
-            lots: parseInt(document.getElementById('manual-lots').value) || 1
-        });
-        const res = await fetch('/api/manual-trade/close', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body
-        }).then(r => r.json());
-        document.getElementById('manual-msg').innerHTML = res.success
-            ? `<span class="text-success">${res.message}</span>`
-            : `<span class="text-danger">${res.error}</span>`;
-        log(res.success ? 'CLOSE ' + res.message : 'CLOSE FAILED: ' + res.error,
-            res.success ? 'log-trade' : 'log-error');
-    }
-
-    // ── Algorithm toggle + state ─────────────────────────────────────────
+    // ── Algorithm toggle + state ─────────────────────────────────────────────
     document.getElementById('algo-toggle').addEventListener('change', async function () {
         const enabled = this.checked;
         const ep = enabled ? '/api/algo/start' : '/api/algo/stop';
-        const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('manual-lots').value) || 1 }) : null;
+        const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('mt-lots').value) || 1 }) : null;
         try {
-            const r = await fetch(ep, { method: 'POST', headers: {'Content-Type':'application/json'}, body }).then(x => x.json());
-            if (enabled && !r.success) {
-                this.checked = false;
-                alert('Could not start algo: ' + (r.error || 'unknown'));
-                return;
-            }
-            log('Algorithm ' + (enabled ? 'STARTED' : 'STOPPED'), 'log-warning');
-        } catch (e) { this.checked = false; alert('Algo toggle failed: ' + e); }
+            const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body }).then(x=>x.json());
+            if (enabled && !r.success) { this.checked=false; alert('Could not start algo: ' + (r.error||'unknown')); return; }
+            log('Algorithm ' + (enabled?'STARTED':'STOPPED'), 'log-warning');
+        } catch (e) { this.checked=false; alert('Algo toggle failed: ' + e); }
     });
-
     let _lastAlgoStatus = '';
     async function pollAlgoState() {
         try {
             const s = await fetch('/api/algo/state').then(r => r.json());
-            const tog = document.getElementById('algo-toggle');
-            const stEl = document.getElementById('algo-status');
-            tog.checked = !!s.running;
-            stEl.textContent = s.running ? 'ON' : 'OFF';
-            stEl.className = 'ms-1 ' + (s.running ? 'text-success' : 'text-muted');
+            const tog = document.getElementById('algo-toggle'), stEl = document.getElementById('algo-status');
+            tog.checked = !!s.running; stEl.textContent = s.running?'ON':'OFF';
+            stEl.className = s.running?'text-success':'text-muted';
             const el = document.getElementById('algo-state-line');
-            if (!s.running) { el.textContent = 'idle'; return; }
-            const mode = s.dry_run ? 'DRY-RUN' : 'LIVE';
-            let txt = `[${mode}] ${s.status || '—'}`;
-            if (s.zscore != null) txt += ` · z=${Number(s.zscore).toFixed(2)}`;
-            if (s.in_position && s.position) txt += ` · IN ${s.position.direction}`;
-            if (s.last_error) txt += ` · ⚠ ${s.last_error}`;
-            el.textContent = txt;
+            if (!s.running) { el.textContent = 'idle'; }
+            else {
+                const mode = s.dry_run ? 'DRY-RUN' : 'LIVE';
+                let txt = `[${mode}] ${s.status||'—'}`;
+                if (s.zscore != null) txt += ` · z=${Number(s.zscore).toFixed(2)}`;
+                if (s.in_position && s.position) txt += ` · IN ${s.position.direction}`;
+                if (s.last_error) txt += ` · ⚠ ${s.last_error}`;
+                el.textContent = txt;
+            }
             if (s.status && s.status !== _lastAlgoStatus) {
                 _lastAlgoStatus = s.status;
                 if (/ENTRY|EXIT|STOP|blocked/.test(s.status))
-                    log('ALGO: ' + s.status, /blocked|STOP/.test(s.status) ? 'log-warning' : 'log-trade');
+                    log('ALGO: ' + s.status, /blocked|STOP/.test(s.status)?'log-warning':'log-trade');
             }
         } catch (e) {}
     }
 
-    // ── Schedulers ───────────────────────────────────────────────────────
-    pollPrices(); setInterval(pollPrices, REFRESH_MS);
-    pollSignal(); setInterval(pollSignal, 1000);
+    // ── Manual Spread Trade (client-side watcher) ────────────────────────────
+    let _mtMode = 'watch';
+    let _mt = { active:false, inPos:false, dir:null, entry:null, exit:null, stop:null, lots:1 };
+    function mtTab(mode, el) {
+        _mtMode = mode;
+        document.querySelectorAll('#mt-tabs .nav-link').forEach(b=>b.classList.remove('active'));
+        el.classList.add('active');
+        const btn = document.getElementById('mt-activate');
+        btn.innerHTML = mode==='watch' ? '<i class="bi bi-play-fill"></i> Activate — Watch for Entry'
+            : (mode==='inpos' ? '<i class="bi bi-flag"></i> Mark In Position'
+            : '<i class="bi bi-shield"></i> Arm Exit / SL');
+    }
+    function _mtSetBadge(t, cls) { const b=document.getElementById('mt-badge'); b.textContent=t; b.className='badge '+cls; }
+    function _mtInfo(html) { document.getElementById('mt-info').innerHTML = html; }
+    function _mtDir(entry, exit) {
+        if (exit != null && entry != null) return exit > entry ? 'LONG_SPREAD' : 'SHORT_SPREAD';
+        if (exit != null && _liveSpread != null) return exit > _liveSpread ? 'LONG_SPREAD' : 'SHORT_SPREAD';
+        return 'LONG_SPREAD';
+    }
+    function _num(id) { const v = document.getElementById(id).value.trim(); return v==='' ? null : parseFloat(v); }
+
+    async function mtActivate() {
+        _mt.entry = _num('mt-entry'); _mt.exit = _num('mt-exit'); _mt.stop = _num('mt-stop');
+        _mt.lots = parseInt(document.getElementById('mt-lots').value) || 1;
+        _mt.dir = _mtDir(_mt.entry, _mt.exit);
+        if (_mtMode === 'inpos') {
+            _mt.active = true; _mt.inPos = true;
+            _mtSetBadge('IN POSITION','bg-primary'); document.getElementById('mt-close').classList.remove('d-none');
+            _mtInfo(`Watching to exit ${_mt.dir.replace('_SPREAD','')} · exit ${_mt.exit ?? '—'} · stop ${_mt.stop ?? '—'}`);
+            log('MANUAL: marked IN POSITION ('+_mt.dir+')', 'log-info'); return;
+        }
+        if (_mt.entry == null) {            // execute immediately
+            await _mtExecute(_mt.dir);
+        } else {
+            _mt.active = true; _mt.inPos = false;
+            _mtSetBadge('WATCHING','bg-info text-dark');
+            _mtInfo(`Watching for entry ${_mt.dir.replace('_SPREAD','')} when spread ${_mt.dir==='LONG_SPREAD'?'≤':'≥'} ${_mt.entry}`);
+            log('MANUAL: watching for entry @ '+_mt.entry, 'log-info');
+        }
+    }
+    async function _mtExecute(dir) {
+        const res = await fetch('/api/manual-trade/execute', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ direction:dir, lots:_mt.lots }) }).then(r=>r.json());
+        if (res.success) { _mt.active=true; _mt.inPos=true; _mt.dir=dir;
+            _mtSetBadge('IN POSITION','bg-primary'); document.getElementById('mt-close').classList.remove('d-none');
+            _mtInfo(`IN ${dir.replace('_SPREAD','')} · ${res.message}`); log('MANUAL '+res.message,'log-trade'); }
+        else { _mtInfo(`<span class="text-danger">${res.error}</span>`); log('MANUAL FAILED: '+res.error,'log-error'); }
+    }
+    async function mtClose() {
+        const res = await fetch('/api/manual-trade/close', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ direction:_mt.dir||'LONG_SPREAD', lots:_mt.lots }) }).then(r=>r.json());
+        if (res.success) { _mt={active:false,inPos:false,dir:null,entry:null,exit:null,stop:null,lots:_mt.lots};
+            _mtSetBadge('IDLE','bg-secondary'); document.getElementById('mt-close').classList.add('d-none');
+            _mtInfo('Position closed.'); log('CLOSE '+res.message,'log-trade'); }
+        else { _mtInfo(`<span class="text-danger">${res.error}</span>`); log('CLOSE FAILED: '+res.error,'log-error'); }
+    }
+    async function mtTestOrder() {
+        log('TEST ORDER: 1 lot → auto-close in 3s', 'log-warning');
+        const ex = await fetch('/api/manual-trade/execute', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ direction:'LONG_SPREAD', lots:1 }) }).then(r=>r.json());
+        log('TEST open: ' + (ex.success?ex.message:ex.error), ex.success?'log-trade':'log-error');
+        setTimeout(async () => {
+            const cl = await fetch('/api/manual-trade/close', { method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ direction:'LONG_SPREAD', lots:1 }) }).then(r=>r.json());
+            log('TEST close: ' + (cl.success?cl.message:cl.error), cl.success?'log-trade':'log-error');
+        }, 3000);
+    }
+    // Watch loop — drives entry/exit/stop off the live server spread.
+    function mtWatch() {
+        if (!_mt.active || _liveSpread == null) return;
+        const sp = _liveSpread;
+        if (!_mt.inPos && _mt.entry != null) {
+            const hit = _mt.dir==='LONG_SPREAD' ? sp <= _mt.entry : sp >= _mt.entry;
+            if (hit) { log(`MANUAL: entry hit @ ${sp.toFixed(2)}`, 'log-trade'); _mtExecute(_mt.dir); }
+        } else if (_mt.inPos) {
+            if (_mt.stop != null) {
+                const stopHit = _mt.dir==='LONG_SPREAD' ? sp <= _mt.stop : sp >= _mt.stop;
+                if (stopHit) { log(`MANUAL: STOP hit @ ${sp.toFixed(2)}`, 'log-warning'); mtClose(); return; }
+            }
+            if (_mt.exit != null) {
+                const exitHit = _mt.dir==='LONG_SPREAD' ? sp >= _mt.exit : sp <= _mt.exit;
+                if (exitHit) { log(`MANUAL: exit target hit @ ${sp.toFixed(2)}`, 'log-trade'); mtClose(); }
+            }
+        }
+    }
+
+    // ── Schedulers ───────────────────────────────────────────────────────────
+    pollPrices();   setInterval(pollPrices, REFRESH_MS);
+    pollSignal();   setInterval(pollSignal, 1000);
+    pollQuality();  setInterval(pollQuality, 2000);
     pollPosition(); setInterval(pollPosition, 2000);
-    pollLegInfo(); setInterval(pollLegInfo, 5000);
-    pollMode(); setInterval(pollMode, 3000);
+    pollRisk();     setInterval(pollRisk, 3000);
+    pollBroker();   setInterval(pollBroker, 3000);
+    pollLegInfo();  setInterval(pollLegInfo, 5000);
+    pollMarkets();  setInterval(pollMarkets, 5000);
+    pollMode();     setInterval(pollMode, 3000);
+    pollTrades();   setInterval(pollTrades, 3000);
+    pollHistory();  setInterval(pollHistory, 1000);
     pollAlgoState(); setInterval(pollAlgoState, 1000);
+    setInterval(mtWatch, 1000);
 </script>
 {% endblock %}

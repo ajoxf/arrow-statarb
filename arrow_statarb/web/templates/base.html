@@ -26,10 +26,17 @@
                 <i class="bi bi-arrow-left-right me-1"></i>Arrow StatArb
             </a>
             <div class="navbar-nav">
-                <a class="nav-link {% block nav_setup %}{% endblock %}" href="/">Setup</a>
                 <a class="nav-link {% block nav_dash %}{% endblock %}" href="/dashboard">Dashboard</a>
+                <a class="nav-link {% block nav_settings %}{% endblock %}" href="/settings">Settings</a>
+                <a class="nav-link {% block nav_setup %}{% endblock %}" href="/">Setup</a>
+                <a class="nav-link {% block nav_analysis %}{% endblock %}" href="/analysis">Analysis</a>
             </div>
             <div class="ms-auto d-flex align-items-center gap-2">
+                <span id="algo-pill" class="d-flex align-items-center gap-1 small">
+                    <span id="algo-dot" class="badge rounded-pill bg-secondary">&nbsp;</span>
+                    <span id="algo-pill-text" class="text-secondary">Stopped</span>
+                </span>
+                <button id="nav-algo-btn" class="btn btn-sm btn-outline-success" onclick="navToggleAlgo()">Start</button>
                 <span id="mode-badge" class="badge bg-secondary">—</span>
                 <span id="conn-badge" class="badge bg-secondary">Disconnected</span>
             </div>
@@ -58,8 +65,31 @@
                 mb.textContent = cfg.dry_run ? 'DRY-RUN' : 'LIVE';
             } catch (e) {}
         }
+        // Nav Start/Stop reflects the auto-trader, synced across pages.
+        async function refreshAlgoPill() {
+            try {
+                const s = await fetch('/api/algo/state').then(r => r.json());
+                const dot = document.getElementById('algo-dot');
+                const txt = document.getElementById('algo-pill-text');
+                const btn = document.getElementById('nav-algo-btn');
+                dot.className = 'badge rounded-pill ' + (s.running ? 'bg-success' : 'bg-secondary');
+                txt.textContent = s.running ? 'Running' : 'Stopped';
+                btn.textContent = s.running ? 'Stop' : 'Start';
+                btn.className = 'btn btn-sm ' + (s.running ? 'btn-outline-danger' : 'btn-outline-success');
+            } catch (e) {}
+        }
+        async function navToggleAlgo() {
+            const running = document.getElementById('nav-algo-btn').textContent === 'Stop';
+            const ep = running ? '/api/algo/stop' : '/api/algo/start';
+            const r = await fetch(ep, { method: 'POST', headers: {'Content-Type':'application/json'},
+                                       body: running ? null : JSON.stringify({}) }).then(x => x.json());
+            if (!running && !r.success) alert('Could not start: ' + (r.error || 'unknown'));
+            refreshAlgoPill();
+        }
         refreshBadges();
         setInterval(refreshBadges, 3000);
+        refreshAlgoPill();
+        setInterval(refreshAlgoPill, 2000);
     </script>
     {% block extra_js %}{% endblock %}
 </body>

@@ -30,23 +30,42 @@ instruments:
 
 # Signal — the single server-side source of truth (algo AND dashboard read it).
 signal:
-  window_minutes: 120        # time-based rolling window for mean/std/z
-  sample_interval_sec: 0.5   # how often the server samples the spread
-  display_refresh_ms: 50     # how often the dashboard polls live prices
-  min_signal_minutes: 10     # need this much history before the signal is "ready"
+  window_minutes: 120         # time-based rolling window for mean/std/z
+  sample_interval_sec: 0.5    # Tick Interval — how often the server samples
+  display_refresh_ms: 50      # how often the dashboard polls live prices
+  min_signal_minutes: 10      # need this much history before the signal is "ready"
+  lookback_period: 250        # ticks of price history before any trade
   entry_zscore: 2.0
   exit_zscore: 0.0
   stop_zscore: 4.0
-  confirmation_ticks: 3
+  confirmation_ticks: 3       # consecutive ticks beyond entry before firing
 
 # Probability / EV / cost gate (OU gambler's-ruin model).
 filters:
   enable_probability_filter: true
+  commission_basis: per_lot   # per_lot | per_order
   min_win_probability: 0.60
   min_expected_value: 0
-  brokerage_per_lot: 10      # INR per lot per leg, one way
-  slippage_per_lot: 5        # INR per lot per leg, one way
-  time_stop_half_lives: 3.0  # exit if held longer than this × half-life
+  brokerage_per_lot: 10       # INR per lot per leg, one way
+  slippage_per_lot: 5         # INR per lot per leg, one way
+  time_stop_half_lives: 3.0   # exit if held longer than this × half-life
+  half_life_min_sec: 0        # Allowed Range lower bound (0 = no lower bound)
+  half_life_max_sec: 0        # Allowed Range upper bound (0 = no upper bound)
+
+# Risk management.
+risk:
+  lots_per_trade: 1           # contracts placed on each entry signal
+  max_contracts_per_leg: 5    # hard position cap per leg
+  max_slippage_pct: 0.5       # reject fills beyond this slippage
+  max_daily_loss: 0           # INR; 0 = disabled
+
+# Only trade inside this window (exchange local / IST).
+trading_hours:
+  enabled: false
+  start_hour: 9
+  start_min: 15
+  end_hour: 15
+  end_min: 30
 
 execution:
   product: NRML
@@ -56,4 +75,6 @@ execution:
 
 # dry_run never transmits orders (Arrow has no sandbox — this is a local gate).
 # Fail-safe: anything unreadable / not "live" is treated as dry_run.
-mode: dry_run   # dry_run | live
+# The Settings page surfaces this as "Paper Trading Mode" (paper = dry_run).
+mode: dry_run          # dry_run | live
+algorithm_enabled: false   # whether the auto-trader is armed

@@ -30,11 +30,27 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional
 
 from loguru import logger
 
 from arrow_statarb.models.probability_filter import ProbabilityFilter
+
+# India Standard Time (UTC+5:30) — trading-hours window is evaluated in IST.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _within_trading_hours(p: Dict) -> bool:
+    th = p.get("trading_hours") or {}
+    if not th.get("enabled"):
+        return True
+    now = datetime.now(_IST)
+    start = now.replace(hour=int(th.get("start_hour", 9)), minute=int(th.get("start_min", 15)),
+                        second=0, microsecond=0)
+    end = now.replace(hour=int(th.get("end_hour", 15)), minute=int(th.get("end_min", 30)),
+                      second=0, microsecond=0)
+    return start <= now <= end
 
 
 class ArrowAutoTrader:
@@ -57,6 +73,8 @@ class ArrowAutoTrader:
 
         self._pos: Optional[Dict] = None          # open position, or None
         self._cooldown_until = 0.0
+        self._consec_above = 0                     # consecutive ticks z ≥ +entry
+        self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
         self.running = False
         self.last_error = ""
@@ -112,7 +130,7 @@ class ArrowAutoTrader:
         return ProbabilityFilter(
             commission_per_lot=float(p.get("brokerage_per_lot", 10.0)) * 2.0,
             slippage_per_lot=float(p.get("slippage_per_lot", 5.0)) * 2.0,
-            commission_basis="per_lot",
+            commission_basis=str(p.get("commission_basis", "per_lot")),
             lot_multiplier=float(p.get("lot_multiplier", 1.0)),
             min_win_probability=float(p.get("min_win_probability", 0.60)),
             min_expected_value=float(p.get("min_expected_value", 0.0)),
@@ -153,10 +171,24 @@ class ArrowAutoTrader:
         sample_interval = float(sig.get("sample_interval_sec", 0.5))
         now = time.time()
 
+        # Confirmation ticks: require N consecutive ticks beyond the threshold
+        # before an entry fires (filters out single-tick spikes).
+        confirm = max(1, int(p.get("confirmation_ticks", 1)))
+        if z >= entry_z:
+            self._consec_above += 1; self._consec_below = 0
+        elif z <= -entry_z:
+            self._consec_below += 1; self._consec_above = 0
+        else:
+            self._consec_above = self._consec_below = 0
+        confirmed_long = self._consec_below >= confirm   # z ≤ -entry
+        confirmed_short = self._consec_above >= confirm   # z ≥ +entry
+
         if self._pos is None:
             if now < self._cooldown_until:
                 snap["status"] = "cooldown"
-            elif abs(z) >= entry_z:
+            elif not _within_trading_hours(p):
+                snap["status"] = "outside trading hours"
+            elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
                 direction = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
                 pf = self._build_filter(p)
                 allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=lots)
@@ -172,6 +204,9 @@ class ArrowAutoTrader:
                 else:
                     snap["status"] = f"ENTRY {direction} (z={z:.2f})"
                     self._enter(direction, lots, z, sig.get("spread", 0.0))
+            elif abs(z) >= entry_z:
+                c = max(self._consec_above, self._consec_below)
+                snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
             else:
                 snap["status"] = "flat — watching"
         else:
@@ -206,6 +241,7 @@ class ArrowAutoTrader:
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }
+            self._consec_above = self._consec_below = 0
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
         else:
             self.last_error = f"entry failed: {res.get('error')}"
