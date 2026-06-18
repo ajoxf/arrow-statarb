@@ -1,0 +1,885 @@
+"""Arrow broker integration using the pyarrow-client Python SDK.
+
+Install:  pip install pyarrow-client
+
+Authentication flow
+-------------------
+Arrow uses a 3-step automated login (handled by ``client.auto_login``):
+  1. POST /auth/app/login  →  request_id
+  2. Generate TOTP from totp_secret, POST /auth/validate-2fa  →  redirect_url
+  3. Extract request_token from redirect_url, generate SHA-256 checksum
+     (app_id:api_secret:request_token), POST /auth/app/authenticate-token  →  session token
+
+All subsequent calls carry  ``{"token": session_token, "appID": app_id}``  headers.
+The session token is valid ~24h; reconnect daily. The installed SDK (1.4.0)
+``auto_login`` parameter is ``api_secret`` (the docs say ``app_secret`` — wrong).
+``totp_secret`` is the base32 seed, NOT the 6-digit code. Arrow also requires a
+registered static IP (SEBI), and has NO paper/sandbox — "dry-run" is enforced
+above this layer by simply not calling ``submit_order``.
+
+Exchange segment mapping (segment key → Arrow Exchange enum)
+  nse_cm → NSE ; nse_fo → NFO ; bse_cm → BSE ; bse_fo → BFO
+
+NOTE: Arrow does NOT support MCX commodity futures — MCX orders are rejected.
+"""
+
+from __future__ import annotations
+
+import re
+import threading
+from typing import Dict, List, Optional
+
+from loguru import logger
+
+try:
+    from pyarrow_client import (
+        ArrowClient,
+        Exchange,
+        OrderType,
+        ProductType,
+        QuoteMode,
+        Retention,
+        TransactionType,
+        Variety,
+    )
+    _SDK_AVAILABLE = True
+except ImportError:
+    _SDK_AVAILABLE = False
+    logger.warning(
+        "pyarrow-client SDK not found — ArrowBroker unavailable. "
+        "Install: pip install pyarrow-client"
+    )
+
+from arrow_statarb.brokers.base_broker import BaseBroker
+
+# ── Segment → Arrow Exchange ──────────────────────────────────────────────────
+# MCX is intentionally excluded — Arrow does not support MCX commodity futures.
+_SEGMENT_MAP: Dict[str, str] = {
+    "nse_cm": "NSE",
+    "nse_fo": "NFO",
+    "bse_cm": "BSE",
+    "bse_fo": "BFO",
+    "nse":    "NSE",
+    "nfo":    "NFO",
+    "bse":    "BSE",
+    "bfo":    "BFO",
+}
+
+# Segments this broker can actually trade.
+SUPPORTED_SEGMENTS = frozenset(_SEGMENT_MAP.keys())
+
+_ORDER_TYPE_MAP: Dict[str, str] = {
+    "market": "MKT",
+    "limit":  "LMT",
+    "sl":     "SL-LMT",
+    "sl-m":   "SL-MKT",
+}
+
+_PRODUCT_MAP: Dict[str, str] = {
+    "NRML": "M",
+    "MIS":  "I",
+    "CNC":  "C",
+    "nrml": "M",
+    "mis":  "I",
+    "cnc":  "C",
+}
+
+
+class ArrowBroker(BaseBroker):
+    """
+    Arrow broker — NSE, BSE, NFO, BFO instruments (MCX not supported).
+
+    Parameters
+    ----------
+    config : dict
+        Required:
+            app_id, user_id, password, api_secret, totp_secret (base32 seed)
+        Optional:
+            lot_sizes (dict)  ``{symbol: lot_size}`` overrides.
+            token (str)       Pre-existing session token to skip the login flow.
+    """
+
+    def __init__(self, config: Dict):
+        super().__init__(name="Arrow", config=config)
+
+        self.app_id:      str = config.get("app_id", "")
+        self.user_id:     str = config.get("user_id", "")
+        self.password:    str = config.get("password", "")
+        self.api_secret:  str = config.get("api_secret", "")
+        self.totp_secret: str = config.get("totp_secret", "")
+
+        # Optional manual lot-size overrides from config
+        self._lot_sizes: Dict[str, int] = {
+            k.upper(): int(v)
+            for k, v in (config.get("lot_sizes") or {}).items()
+        }
+
+        self._client: Optional[object] = None   # ArrowClient instance
+
+        # Last connect failure, surfaced to the UI so the user sees the real
+        # Arrow error (HTTP status + message + which auth step) instead of a
+        # generic "login failed".
+        self.last_error: str = ""
+
+        # Instrument master fetched lazily from Arrow's /all endpoint
+        self._instruments: List[Dict] = []
+        self._instruments_ready = threading.Event()
+
+        # Picker index, built once after the master loads (avoids scanning the
+        # full ~223k-row master on every dropdown request):
+        #   _idx_underlyings: {(exchange, kind): [underlying, ...]}
+        #   _idx_contracts:   {(exchange, kind, underlying): [contract dict, ...]}
+        # kind ∈ {"future", "option", "cash"}; exchange ∈ {NSE, NFO, BSE, BFO}.
+        self._idx_underlyings: Dict = {}
+        self._idx_contracts: Dict = {}
+        self._sym_token: Dict[str, int] = {}      # TradingSymbol(upper) → integer token
+
+        # Live price stream (Arrow WebSocket DataStream) → latest-LTP cache,
+        # keyed by integer token, fed by on_ticks at tick rate (~50ms or faster).
+        self._streams = None
+        self._stream_ltp: Dict[int, float] = {}
+        self._stream_tokens: set = set()
+        self._stream_lock = threading.Lock()
+
+        logger.info("ArrowBroker initialised (app_id={})", self.app_id[:8] + "…" if self.app_id else "")
+
+    # ── Connection ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_error(exc: Exception) -> str:
+        """Build a concise, user-facing message from an Arrow SDK exception.
+
+        ArrowException carries .code (HTTP status), .message, .method and .url.
+        We surface all of them so the UI shows the real reason *and* which auth
+        step failed (login vs 2FA vs authenticate-token).
+        """
+        code   = getattr(exc, "code", None)
+        msg    = getattr(exc, "message", None) or str(exc)
+        method = getattr(exc, "method", None)
+        url    = getattr(exc, "url", None)
+        head = f"HTTP {code}: {msg}" if code else str(msg)
+        if method and url:
+            # Keep just the path so the message stays short but still names the step
+            try:
+                from urllib.parse import urlparse
+                path = urlparse(url).path or url
+            except Exception:
+                path = url
+            head += f"  [{method} {path}]"
+        return head
+
+    def connect(self, totp_secret: str = "") -> bool:
+        """Authenticate with Arrow and download the instrument master.
+
+        Parameters
+        ----------
+        totp_secret : str
+            Base32 TOTP secret (overrides config if supplied).
+        """
+        self.last_error = ""
+
+        if not _SDK_AVAILABLE:
+            self.last_error = "pyarrow-client not installed — run: pip install pyarrow-client"
+            logger.error("ArrowBroker: {}", self.last_error)
+            return False
+
+        if not self.app_id:
+            self.last_error = "app_id is required"
+            logger.error("ArrowBroker: {}", self.last_error)
+            return False
+
+        secret = totp_secret or self.totp_secret
+        if not all([self.user_id, self.password, self.api_secret, secret]):
+            self.last_error = "user_id, password, api_secret, and totp_secret are all required"
+            logger.error("ArrowBroker: {}", self.last_error)
+            return False
+
+        try:
+            client = ArrowClient(app_id=self.app_id)
+
+            # Try with a pre-existing token first (avoids re-login within the session)
+            pre_token = self.config.get("token", "")
+            if pre_token:
+                client.set_token(pre_token)
+                try:
+                    client.get_user_details()
+                    self._client = client
+                    self.connected = True
+                    logger.info("ArrowBroker: reused existing session token")
+                    threading.Thread(
+                        target=self._fetch_instruments, daemon=True, name="ArrowInstruments"
+                    ).start()
+                    return True
+                except Exception:
+                    logger.debug("ArrowBroker: pre-existing token invalid — logging in fresh")
+
+            # NOTE: the installed SDK's parameter is api_secret (docs say
+            # app_secret — that is wrong for 1.4.0).
+            client.auto_login(
+                user_id=self.user_id,
+                password=self.password,
+                api_secret=self.api_secret,
+                totp_secret=secret,
+            )
+
+            self._client = client
+            self.connected = True
+            logger.info("ArrowBroker: authenticated — token={}", client.token[:12] + "…" if client.token else "?")
+
+            threading.Thread(
+                target=self._fetch_instruments, daemon=True, name="ArrowInstruments"
+            ).start()
+            return True
+
+        except Exception as exc:
+            self.last_error = self._format_error(exc)
+            logger.error("ArrowBroker: connect failed — {}", exc)
+            return False
+
+    def disconnect(self) -> None:
+        self.connected = False
+        self.stop_price_stream()
+        if self._client:
+            try:
+                self._client.invalidate_session()
+            except Exception:
+                pass
+            self._client = None
+        logger.info("ArrowBroker: disconnected")
+
+    def get_session_token(self) -> str:
+        """Return the current session token (useful for token reuse without re-login)."""
+        if self._client:
+            return self._client.token
+        return ""
+
+    # ── Instrument master ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_instruments(data) -> List[Dict]:
+        """Normalise Arrow's /all instruments response into a list of dicts.
+
+        The SDK returns whatever the endpoint sends. In practice /all comes
+        back as ``application/octet-stream`` so the SDK hands us raw ``bytes``;
+        depending on Arrow's CDN that payload is gzip-compressed and/or JSON or
+        CSV. Handle every plausible shape so lot sizes load regardless.
+        """
+        # Already structured
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("data", "instruments", "result", "items"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            return [data]
+
+        # Bytes / str → decode then sniff JSON vs CSV
+        if isinstance(data, (bytes, bytearray, str)):
+            raw = data.encode() if isinstance(data, str) else bytes(data)
+            # gzip magic number
+            if raw[:2] == b"\x1f\x8b":
+                import gzip
+                raw = gzip.decompress(raw)
+            text = raw.decode("utf-8", errors="replace").strip()
+            if not text:
+                return []
+            if text[0] in "[{":
+                import json
+                obj = json.loads(text)
+                return ArrowBroker._parse_instruments(obj)
+            # Otherwise assume delimited text (CSV/TSV)
+            import csv, io
+            sample = text[:4096]
+            delimiter = "\t" if sample.count("\t") > sample.count(",") else ","
+            reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+            return [dict(row) for row in reader]
+
+        return []
+
+    @staticmethod
+    def _extract_symbol_lot(inst: Dict):
+        """Pull (symbol, lot_size) from one instrument record, tolerant of the
+        many key/column spellings brokers use (symbol/tradingSymbol/…,
+        lotSize/lot_size/lotQty/…). Returns (symbol_upper, int|None)."""
+        # Case-insensitive key lookup
+        lower = {str(k).lower(): v for k, v in inst.items()}
+        sym = ""
+        # TradingSymbol is the actual tradeable symbol (HDFCBANK30JUN26C875);
+        # Symbol is only the underlying (HDFCBANK) — index lot size by the
+        # tradeable symbol so resolve_lot_size(order_symbol) hits (and the EQ
+        # row never poisons a derivative's lot size).
+        for k in ("tradingsymbol", "trading_symbol", "symbol", "tsym", "scrip"):
+            if lower.get(k):
+                sym = str(lower[k]).strip().upper()
+                break
+        ls = None
+        for k in ("lotsize", "lot_size", "lotqty", "lot_qty", "lot", "boardlotquantity", "marketlot"):
+            if lower.get(k) not in (None, "", "0"):
+                try:
+                    ls = max(1, int(float(lower[k])))
+                except (ValueError, TypeError):
+                    ls = None
+                if ls:
+                    break
+        return sym, ls
+
+    # ── Picker index (underlying / contract lookup) ───────────────────────────
+
+    @staticmethod
+    def _field(inst: Dict, *keys):
+        """Case-insensitive field lookup tolerant of Arrow's key spellings."""
+        low = {str(k).lower(): v for k, v in inst.items()}
+        for k in keys:
+            v = low.get(k.lower())
+            if v not in (None, ""):
+                return v
+        return None
+
+    @staticmethod
+    def _derive_underlying(symbol: str, name=None) -> str:
+        """Underlying for grouping. Arrow leaves `name` empty on most stock F&O,
+        so derive it from the symbol: the leading alphabetic run before the
+        first digit (expiry/strike). e.g. HDFCBANK26JUN25FUT → HDFCBANK,
+        NIFTY02JAN25C26000 → NIFTY, RELIANCE-EQ → RELIANCE. Falls back to
+        `name`, then the raw symbol."""
+        s = (symbol or "").upper().strip()
+        if s.endswith("-EQ"):
+            return s[:-3]
+        m = re.match(r"^([A-Z&]{2,})", s)
+        if m:
+            return m.group(1)
+        if name:
+            return str(name).upper().strip()
+        return s
+
+    _MONTHS = {m: i for i, m in enumerate(
+        ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
+
+    @classmethod
+    def _parse_date_tuple(cls, s):
+        """Best-effort (year, month, day) from an expiry/symbol string, so
+        contracts sort chronologically regardless of Arrow's format
+        (ISO 2025-06-26, DDMonYY 30JUN26, DD-Mon-YYYY, or epoch). None if no
+        date is found."""
+        s = str(s or "").strip().upper()
+        if not s:
+            return None
+        # epoch seconds / milliseconds
+        if s.isdigit() and len(s) >= 8:
+            try:
+                import datetime
+                v = int(s)
+                if v > 10 ** 11:
+                    v //= 1000
+                d = datetime.datetime.utcfromtimestamp(v)
+                return (d.year, d.month, d.day)
+            except Exception:
+                pass
+        m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)          # 2025-06-26
+        if m:
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.search(r"(\d{1,2})?-?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-?\s*(\d{2,4})", s)  # 30JUN26
+        if m:
+            day = int(m.group(1)) if m.group(1) else 1
+            yr = int(m.group(3))
+            yr += 2000 if yr < 100 else 0
+            return (yr, cls._MONTHS[m.group(2)], day)
+        m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})", s)          # 26-06-2025
+        if m:
+            return (int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        return None
+
+    @staticmethod
+    def _classify_kind(exch: str, is_opt: bool) -> str:
+        if exch in ("NFO", "BFO"):
+            return "option" if is_opt else "future"
+        if exch in ("NSE", "BSE"):
+            return "option" if is_opt else "cash"
+        return "other"
+
+    def _build_instrument_index(self) -> None:
+        """Index the master once into (exch_seg, kind) → underlyings and
+        (exch_seg, kind, underlying) → contracts, so the picker is O(1).
+
+        Arrow's /all master fields (TitleCase):
+          ExchSeg       NSECM / NSEFO / BSECM / BSEFO  (exchange + segment)
+          TradingSymbol the actual tradeable symbol (HDFCBANK30JUN26C875)
+          Symbol        the underlying (HDFCBANK)
+          OptionType    CE / PE  (empty ⇒ future)
+          Expiry        30-Jun-2026 ; StrikePrice ; LotSize ; Token
+        """
+        underlyings: Dict = {}
+        contracts: Dict = {}
+        sym_token: Dict[str, int] = {}
+        for inst in self._instruments:
+            if not isinstance(inst, dict):
+                continue
+            g = {str(k).lower(): v for k, v in inst.items()}
+            exch_seg = str(g.get("exchseg") or g.get("exch_seg") or "").upper()
+            tsym     = str(g.get("tradingsymbol") or g.get("trading_symbol") or "").strip()
+            if not exch_seg or not tsym:
+                continue
+            _tok = g.get("token") or g.get("instrument_token")
+            if _tok:
+                try:
+                    sym_token[tsym.upper()] = int(_tok)
+                except (ValueError, TypeError):
+                    pass
+            ot  = str(g.get("optiontype") or g.get("option_type") or "").upper()
+            und = str(g.get("symbol") or g.get("underlying") or "").strip().upper() \
+                  or self._derive_underlying(tsym)
+
+            if exch_seg.endswith("CM"):
+                kind = "cash"
+            elif ot in ("CE", "PE"):
+                kind = "option"
+            else:
+                kind = "future"
+
+            strike = g.get("strikeprice") or g.get("strike")
+            underlyings.setdefault((exch_seg, kind), set()).add(und)
+            contracts.setdefault((exch_seg, kind, und), []).append({
+                "trading_symbol": tsym,
+                "token":          str(g.get("token") or ""),
+                "expiry":         str(g.get("expiry") or ""),
+                "strike":         str(strike or ""),
+                "option_type":    ot,
+                "lot_size":       str(g.get("lotsize") or g.get("lot_size") or ""),
+            })
+
+        def _sort_key(r):
+            # Chronological by expiry (parsed from the expiry field, or the
+            # symbol if the field is empty), then strike, then symbol.
+            dt = self._parse_date_tuple(r["expiry"]) or self._parse_date_tuple(r["trading_symbol"]) or (9999, 99, 99)
+            try:
+                sk = float(r["strike"]) if r["strike"] else 0.0
+            except (ValueError, TypeError):
+                sk = 0.0
+            return (dt, sk, r["trading_symbol"])
+
+        for lst in contracts.values():
+            lst.sort(key=_sort_key)
+
+        self._idx_underlyings = {k: sorted(v) for k, v in underlyings.items()}
+        self._idx_contracts = contracts
+        self._sym_token = sym_token
+        logger.info(
+            "ArrowBroker: index built — {} (exchange,kind) groups, {} underlyings total",
+            len(self._idx_underlyings), sum(len(v) for v in self._idx_underlyings.values()),
+        )
+
+    def list_underlyings(self, exchange: str, kind: str) -> List[str]:
+        """Underlyings available for an exchange (NSE/NFO/BSE/BFO) and kind
+        (future/option/cash)."""
+        return self._idx_underlyings.get((exchange.upper(), kind), [])
+
+    def list_contracts(self, exchange: str, kind: str, underlying: str) -> List[Dict]:
+        """Contracts for a given underlying, sorted by expiry then strike."""
+        return self._idx_contracts.get((exchange.upper(), kind, underlying.upper()), [])
+
+    def _fetch_instruments(self) -> None:
+        """Background thread: download Arrow's instrument list and index lot sizes."""
+        try:
+            raw = self._client.get_instruments()
+            instruments = self._parse_instruments(raw)
+
+            if not instruments:
+                # Couldn't parse — log a fingerprint so we can see what arrived
+                rawb = raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("utf-8", "replace")
+                head = bytes(rawb[:80])
+                is_gzip = head[:2] == b"\x1f\x8b"
+                logger.warning(
+                    "ArrowBroker: could not parse instruments — type={}, len={}, gzip={}, head={!r}",
+                    type(raw).__name__, len(rawb), is_gzip, head,
+                )
+                return
+
+            self._instruments = instruments
+            for inst in instruments:
+                if not isinstance(inst, dict):
+                    continue
+                sym, ls = self._extract_symbol_lot(inst)
+                if sym and ls:
+                    self._lot_sizes.setdefault(sym, ls)
+
+            self._build_instrument_index()
+
+            logger.info(
+                "ArrowBroker: instruments ready — {} instruments, {} lot-sizes",
+                len(self._instruments), len(self._lot_sizes),
+            )
+        except Exception as exc:
+            logger.warning("ArrowBroker: instrument fetch failed (lot sizes unavailable) — {}", exc)
+        finally:
+            self._instruments_ready.set()
+
+    def resolve_lot_size(self, exchange_segment: str, symbol: str) -> int:
+        """Return the lot size for a symbol.
+
+        Checks (in order):
+        1. Exact symbol match in lot-size index
+        2. Iteratively strip trailing FUT / expiry tokens, checking the
+           lot-size index after each strip (e.g. RELIANCE25JULFUT →
+           RELIANCE25JUL → RELIANCE) so config overrides keyed by the base
+           symbol still match expiry-coded trading symbols
+        3. Falls back to 1 with a warning
+        """
+        sym = symbol.upper()
+
+        ls = self._lot_sizes.get(sym)
+        if ls:
+            return ls
+
+        # A single symbol like CRUDEOIL25JULFUT carries both an expiry (25JUL)
+        # and FUT, so strip one trailing token at a time until it stops
+        # shrinking, checking the index after each strip.
+        _suffix = re.compile(r'(FUT|\d{2}[A-Z]{3}\d{2}|\d{2}[A-Z]{3}|\d{6})$')
+        base = sym
+        prev = None
+        while base and base != prev:
+            prev = base
+            base = _suffix.sub('', base).rstrip(" -")
+            ls = self._lot_sizes.get(base)
+            if ls:
+                return ls
+
+        logger.warning(
+            "ArrowBroker: lot size unknown for {}/{} — using 1 (order may fail)",
+            exchange_segment, symbol,
+        )
+        return 1
+
+    # ── Quotes ────────────────────────────────────────────────────────────────
+
+    def get_ltp(self, instruments: List[Dict]) -> Dict[str, float]:
+        """
+        Fetch last traded prices.
+
+        Parameters
+        ----------
+        instruments : list of dict
+            Each must have ``exchange_segment`` and ``instrument_token`` (symbol string).
+
+        Returns
+        -------
+        dict
+            ``{symbol: ltp}`` for all instruments with a price.
+        """
+        if not self.connected or not self._client or not instruments:
+            return {}
+
+        pairs = []
+        for inst in instruments:
+            seg = inst.get("exchange_segment", "")
+            sym = inst.get("instrument_token") or inst.get("symbol", "")
+            exchange_str = _SEGMENT_MAP.get(seg.lower(), seg.upper())
+            try:
+                exchange_enum = Exchange(exchange_str)
+            except ValueError:
+                logger.warning("ArrowBroker: unknown exchange segment '{}' — skipping {}", seg, sym)
+                continue
+            pairs.append((sym, exchange_enum))
+
+        if not pairs:
+            return {}
+
+        def _ci(d: Dict, *keys):
+            """Case-insensitive get — Arrow responses are TitleCase
+            (TradingSymbol/Symbol/Ltp), so match regardless of casing."""
+            low = {str(k).lower(): v for k, v in d.items()}
+            for k in keys:
+                v = low.get(k.lower())
+                if v not in (None, ""):
+                    return v
+            return None
+
+        try:
+            response = self._client.get_quotes(QuoteMode.LTP, pairs)
+            result: Dict[str, float] = {}
+            if isinstance(response, list):
+                for item in response:
+                    if not isinstance(item, dict):
+                        continue
+                    sym = _ci(item, "tradingSymbol", "symbol", "tsym")
+                    ltp = _ci(item, "ltp", "lastPrice", "price", "last_traded_price")
+                    if sym and ltp is not None:
+                        try:
+                            result[str(sym).upper()] = float(ltp)
+                        except (ValueError, TypeError):
+                            pass
+            elif isinstance(response, dict):
+                for sym_key, val in response.items():
+                    if isinstance(val, (int, float, str)):
+                        ltp = val
+                    elif isinstance(val, dict):
+                        ltp = _ci(val, "ltp", "lastPrice", "price")
+                    else:
+                        ltp = None
+                    if ltp is not None:
+                        try:
+                            result[str(sym_key).upper()] = float(ltp)
+                        except (ValueError, TypeError):
+                            pass
+            return result
+        except Exception as exc:
+            logger.error("ArrowBroker: LTP fetch failed — {}", exc)
+            return {}
+
+    # ── Live price stream (WebSocket) ──────────────────────────────────────────
+
+    def start_price_stream(self, symbols: List[str]) -> bool:
+        """Subscribe the given trading symbols to Arrow's WebSocket DataStream
+        (LTP mode) so prices update at tick rate (~50ms or faster) without any
+        per-request REST calls. Idempotent — only subscribes new tokens.
+        """
+        if not _SDK_AVAILABLE or not self.connected:
+            return False
+        tokens = []
+        for s in symbols:
+            tok = self._sym_token.get(str(s).upper())
+            if tok:
+                tokens.append(int(tok))
+        if not tokens:
+            return False
+        try:
+            with self._stream_lock:
+                if self._streams is None:
+                    from pyarrow_client import ArrowStreams, DataMode
+                    self._DataMode = DataMode
+                    streams = ArrowStreams(appID=self.app_id, token=self.get_session_token(), debug=False)
+
+                    def _on_tick(tick):
+                        try:
+                            # Arrow's DataStream sends prices as integers in paise
+                            # (1 rupee = 100 paise) — convert to rupees.
+                            self._stream_ltp[int(tick.token)] = float(tick.ltp) / 100.0
+                        except Exception:
+                            pass
+
+                    streams.data_stream.on_ticks = _on_tick
+                    streams.connect_data_stream()
+                    self._streams = streams
+                    logger.info("ArrowBroker: price stream connected")
+
+                new = [t for t in tokens if t not in self._stream_tokens]
+                if new:
+                    self._streams.subscribe_market_data(self._DataMode.LTP, new)
+                    self._stream_tokens.update(new)
+                    logger.info("ArrowBroker: streaming {} token(s) (total {})", len(new), len(self._stream_tokens))
+            return True
+        except Exception as exc:
+            logger.warning("ArrowBroker: price stream start failed — {}", exc)
+            return False
+
+    def get_streamed_ltp(self, symbols: List[str]) -> Dict[str, float]:
+        """Return {symbol: ltp} from the live stream cache for symbols that
+        have received at least one tick."""
+        out: Dict[str, float] = {}
+        for s in symbols:
+            tok = self._sym_token.get(str(s).upper())
+            if tok is not None and int(tok) in self._stream_ltp:
+                out[str(s).upper()] = self._stream_ltp[int(tok)]
+        return out
+
+    def stop_price_stream(self) -> None:
+        with self._stream_lock:
+            if self._streams:
+                try:
+                    self._streams.disconnect_all()
+                except Exception:
+                    pass
+            self._streams = None
+            self._stream_tokens.clear()
+            self._stream_ltp.clear()
+
+    # ── Orders ────────────────────────────────────────────────────────────────
+
+    def submit_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        order_type: str = "market",
+        price: Optional[float] = None,
+        exchange_segment: str = "nse_fo",
+        product: str = "NRML",
+        validity: str = "DAY",
+        trigger_price: Optional[float] = None,
+        disclosed_qty: int = 0,
+        amo: bool = False,
+        token: str = "",
+    ) -> Dict:
+        """
+        Place an order via Arrow.
+
+        ``quantity`` is in UNITS (lots × lot_size) — the caller multiplies.
+        For a market order Arrow requires ``mpp=True`` and ``price=0`` (plain
+        MKT is disabled), so that path is enforced here.
+        """
+        if not self.connected or not self._client:
+            return {"order_id": None, "status": "error", "message": "Not connected"}
+
+        # Exchange — reject MCX immediately (Arrow does not support it)
+        if exchange_segment.lower() in ("mcx_fo", "mcx"):
+            return {
+                "order_id": None, "status": "error",
+                "message": "Arrow does not support MCX.",
+            }
+        exchange_str = _SEGMENT_MAP.get(exchange_segment.lower(), exchange_segment.upper())
+        try:
+            exchange_enum = Exchange(exchange_str)
+        except ValueError:
+            return {
+                "order_id": None, "status": "error",
+                "message": f"Unknown exchange segment: {exchange_segment}",
+            }
+
+        # Order type
+        ot_wire   = _ORDER_TYPE_MAP.get(order_type.lower(), "MKT")
+        try:
+            ot_enum = OrderType(ot_wire)
+        except ValueError:
+            ot_enum = OrderType.MARKET
+
+        # Transaction type
+        tt_enum = TransactionType.BUY if side.lower() == "buy" else TransactionType.SELL
+
+        # Product
+        prod_wire = _PRODUCT_MAP.get(product.upper(), "M")
+        try:
+            prod_enum = ProductType(prod_wire)
+        except ValueError:
+            prod_enum = ProductType.NRML
+
+        # Validity
+        try:
+            ret_enum = Retention(validity.upper())
+        except ValueError:
+            ret_enum = Retention.DAY
+
+        # Plain MKT orders are disabled by default on the Arrow API (regulatory).
+        # For a market order we send OrderType.MKT with mpp=True, which prices the
+        # order at the Upper Limit / DPR per instrument to mimic market execution.
+        is_market = order_type.lower() in ("market", "mkt")
+        mpp = is_market
+        order_price = 0.0 if is_market else float(price or 0)
+
+        logger.info(
+            "ArrowBroker: placing order — {} {} {} {} @ {} ({}{})",
+            side.upper(), quantity, symbol, exchange_segment,
+            "MKT(mpp)" if is_market else order_price, product,
+            ", mpp" if mpp else "",
+        )
+
+        try:
+            order_id = self._client.place_order(
+                exchange=exchange_enum,
+                symbol=symbol,
+                quantity=quantity,
+                disclosed_quantity=disclosed_qty,
+                product=prod_enum,
+                order_type=ot_enum,
+                variety=Variety.REGULAR,
+                transaction_type=tt_enum,
+                price=order_price,
+                validity=ret_enum,
+                mpp=mpp,
+            )
+            logger.info("ArrowBroker: order placed — id={}", order_id)
+            return {
+                "order_id":   str(order_id),
+                "status":     "submitted",
+                "symbol":     symbol,
+                "side":       side,
+                "quantity":   quantity,
+                "order_type": order_type,
+                "price":      price,
+                "raw":        {"orderNo": order_id},
+            }
+        except Exception as exc:
+            logger.error("ArrowBroker: order failed — {}", exc)
+            return {"order_id": None, "status": "error", "message": str(exc)}
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a pending order by order ID."""
+        if not self.connected or not self._client:
+            logger.error("ArrowBroker: not connected — cannot cancel order")
+            return False
+        try:
+            self._client.cancel_order(order_id)
+            logger.info("ArrowBroker: cancelled order {}", order_id)
+            return True
+        except Exception as exc:
+            logger.error("ArrowBroker: cancel order {} failed — {}", order_id, exc)
+            return False
+
+    # ── Positions ─────────────────────────────────────────────────────────────
+
+    def get_positions(self) -> List[Dict]:
+        """Return open positions from Arrow (field-name tolerant — the master
+        and quotes are TitleCase, so positions likely are too)."""
+        if not self.connected or not self._client:
+            return []
+
+        def _ci(p, *keys, cast=None, default=None):
+            low = {str(k).lower(): v for k, v in p.items()}
+            for k in keys:
+                v = low.get(k.lower())
+                if v not in (None, ""):
+                    if cast is None:
+                        return v
+                    try:
+                        return cast(float(v)) if cast is int else cast(v)
+                    except (ValueError, TypeError):
+                        continue
+            return default
+
+        try:
+            raw = self._client.get_positions()
+            positions = []
+            for p in (raw or []):
+                if not isinstance(p, dict):
+                    continue
+                sym  = _ci(p, "tradingSymbol", "tradingsymbol", "symbol", default="")
+                exch = _ci(p, "exchSeg", "exchange", default="")
+                bq   = _ci(p, "buyQty", "buyQuantity", "cfBuyQty", cast=int, default=0)
+                sq   = _ci(p, "sellQty", "sellQuantity", "cfSellQty", cast=int, default=0)
+                net  = _ci(p, "netQty", "netQuantity", "quantity", "netqty", cast=int, default=(bq - sq))
+                avg  = _ci(p, "avgPrice", "averagePrice", "netAvgPrice", "buyAvgPrice", cast=float, default=0.0)
+                ltp  = _ci(p, "ltp", "lastPrice", "lastTradedPrice", cast=float, default=0.0)
+                pnl  = _ci(p, "pnl", "unrealizedPnl", "mtm", "mtom", "netPnl", cast=float, default=0.0)
+                positions.append({
+                    "symbol":        str(sym),
+                    "exchange":      str(exch),
+                    "product":       str(_ci(p, "product", "productType", default="")),
+                    "net_quantity":  net,
+                    "buy_quantity":  bq,
+                    "sell_quantity": sq,
+                    "average_price": avg,
+                    "ltp":           ltp,
+                    "pnl":           pnl,
+                    "raw":           p,
+                })
+            return positions
+        except Exception as exc:
+            logger.error("ArrowBroker: get_positions failed — {}", exc)
+            return []
+
+    def get_account_info(self) -> Dict:
+        """Return account balance and margin info from Arrow."""
+        if not self.connected or not self._client:
+            return {}
+        try:
+            limits = self._client.get_user_limits()
+            if isinstance(limits, list) and limits:
+                return limits[0]
+            return limits or {}
+        except Exception as exc:
+            logger.warning("ArrowBroker: get_account_info failed — {}", exc)
+            return {}
+
+    # ── Token (for symbol lookup — Arrow uses symbols directly) ───────────────
+
+    def resolve_token(self, exchange_segment: str, symbol: str) -> str:
+        """Arrow uses symbol strings directly — returns the symbol as-is."""
+        return symbol
