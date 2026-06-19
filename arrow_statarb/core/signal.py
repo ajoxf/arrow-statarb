@@ -41,6 +41,22 @@ class SignalEngine:
         self.running = False
         self._last_error = ""
 
+        # ── z-score excursion counters (session-cumulative; manual reset) ─────
+        # Counts how often z stretches out to ±2σ / ±3σ and how often a stretch
+        # (|z| ≥ 2) reverts back through the mean — the mean-reversion frequency.
+        self._exc: Dict = self._fresh_exc()
+        self._z_prev: Optional[float] = None
+        # per-side arming so boundary chatter near a band isn't double-counted:
+        # a band only re-arms once z falls back inside the re-arm zone (|z|<1).
+        self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
+        self._active_up = self._active_dn = False   # a ≥2σ excursion is open
+
+    @staticmethod
+    def _fresh_exc() -> Dict:
+        return {"touch_2_up": 0, "touch_2_down": 0, "touch_3_up": 0,
+                "touch_3_down": 0, "reversions": 0, "max_z": 0.0, "min_z": 0.0,
+                "since": time.time()}
+
     # ── params ───────────────────────────────────────────────────────────────
     def _p(self) -> Dict:
         p = {
@@ -78,6 +94,67 @@ class SignalEngine:
     def reset(self) -> None:
         with self._lock:
             self._samples.clear()
+            self._reset_exc_state()       # series discontinues; counters preserved
+
+    def _reset_exc_state(self) -> None:
+        """Clear the transient crossing state (not the counters)."""
+        self._z_prev = None
+        self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
+        self._active_up = self._active_dn = False
+
+    def reset_excursions(self) -> None:
+        """Zero the session-cumulative z-score excursion counters (Reset button)."""
+        with self._lock:
+            self._exc = self._fresh_exc()
+            self._reset_exc_state()
+        logger.info("SignalEngine: excursion counters reset")
+
+    def get_excursions(self) -> Dict:
+        """Snapshot of the z-score excursion counters for the Analysis page."""
+        with self._lock:
+            e = dict(self._exc)
+        e["touch_2_total"] = e["touch_2_up"] + e["touch_2_down"]
+        e["touch_3_total"] = e["touch_3_up"] + e["touch_3_down"]
+        e["since_sec"] = round(max(0.0, time.time() - e.get("since", time.time())), 0)
+        e["max_z"] = round(e["max_z"], 2)
+        e["min_z"] = round(e["min_z"], 2)
+        return e
+
+    def _tally_z(self, z: float) -> None:
+        """Update excursion counters from the latest z. Called once per sample.
+
+        A 'touch' of ±2σ/±3σ is counted on the OUTWARD crossing of that band,
+        then disarmed until z returns inside |z|<1 (hysteresis). A 'reversion'
+        is counted when an open ≥2σ excursion crosses back through the mean (0)."""
+        e = self._exc
+        if z > e["max_z"]:
+            e["max_z"] = z
+        if z < e["min_z"]:
+            e["min_z"] = z
+
+        # Upper side
+        if z >= 2.0 and self._arm_2u:
+            e["touch_2_up"] += 1; self._arm_2u = False; self._active_up = True
+        if z >= 3.0 and self._arm_3u:
+            e["touch_3_up"] += 1; self._arm_3u = False
+        if z < 1.0:
+            self._arm_2u = self._arm_3u = True
+
+        # Lower side
+        if z <= -2.0 and self._arm_2d:
+            e["touch_2_down"] += 1; self._arm_2d = False; self._active_dn = True
+        if z <= -3.0 and self._arm_3d:
+            e["touch_3_down"] += 1; self._arm_3d = False
+        if z > -1.0:
+            self._arm_2d = self._arm_3d = True
+
+        # Reversion to the mean: an open ≥2σ excursion crossed back through 0.
+        if self._z_prev is not None:
+            crossed_zero = (self._z_prev > 0 >= z) or (self._z_prev < 0 <= z)
+            if crossed_zero and (self._active_up or self._active_dn):
+                e["reversions"] += 1
+                self._active_up = self._active_dn = False
+        self._z_prev = z
 
     # ── sampling loop ────────────────────────────────────────────────────────
     def _loop(self) -> None:
@@ -103,6 +180,7 @@ class SignalEngine:
         with self._lock:
             self._samples.append((now, float(la), float(lb), spread))
             self._trim(now, window_sec)
+            self._update_excursions_locked()
 
     def push(self, leg_a: float, leg_b: float, ts: Optional[float] = None) -> None:
         """Inject a sample directly (used by tests)."""
@@ -110,6 +188,18 @@ class SignalEngine:
         with self._lock:
             self._samples.append((ts, float(leg_a), float(leg_b), float(leg_a) - float(leg_b)))
             self._trim(ts, self._p()["window_minutes"] * 60.0)
+            self._update_excursions_locked()
+
+    def _update_excursions_locked(self) -> None:
+        """Compute the current z over the window and feed the excursion tally.
+        Must be called while holding ``self._lock``."""
+        if len(self._samples) < 2:
+            return
+        spreads = [s[3] for s in self._samples]
+        mean, std = self.compute_stats(spreads)
+        if std <= 1e-12:
+            return
+        self._tally_z((spreads[-1] - mean) / std)
 
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:

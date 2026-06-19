@@ -577,6 +577,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             n = 200
         return jsonify(signal_engine.get_series(n))
 
+    @app.route("/api/signal/excursions", methods=["GET"])
+    def api_signal_excursions():
+        """Session-cumulative z-score excursion counts (±2σ / ±3σ touches and
+        mean reversions) for the Analysis page."""
+        return jsonify(signal_engine.get_excursions())
+
+    @app.route("/api/signal/excursions/reset", methods=["POST"])
+    def api_signal_excursions_reset():
+        signal_engine.reset_excursions()
+        return jsonify({"success": True})
+
     @app.route("/api/positions", methods=["GET"])
     def api_positions():
         out = {"connected": False, "direction": "FLAT", "leg_a": 0, "leg_b": 0,

@@ -67,3 +67,37 @@ def test_half_life_mean_reverting():
     hl = SignalEngine.half_life(spreads)
     assert hl > 0
     assert math.isfinite(hl)
+
+
+def test_excursion_counts_touches_and_reversions():
+    # Drive the z-tally directly with a controlled z path. Hysteresis re-arms a
+    # band only after z returns inside |z|<1.
+    eng = SignalEngine(lambda: (None, None), lambda: _params())
+    for z in [0.0, 2.1, 1.0, 0.0, -2.2, 0.0, 3.1, 0.0]:
+        eng._tally_z(z)
+    e = eng.get_excursions()
+    assert e["touch_2_up"] == 2          # +2.1 and (later) +3.1 both cross +2
+    assert e["touch_2_down"] == 1        # -2.2
+    assert e["touch_3_up"] == 1          # +3.1
+    assert e["touch_3_down"] == 0
+    assert e["reversions"] == 3          # each ≥2σ stretch returned through 0
+    assert e["touch_2_total"] == 3
+    assert e["max_z"] == 3.1 and e["min_z"] == -2.2
+
+
+def test_excursion_hysteresis_no_double_count_near_band():
+    # Wobbling around +2 without returning inside |z|<1 counts as ONE touch.
+    eng = SignalEngine(lambda: (None, None), lambda: _params())
+    for z in [0.0, 2.1, 1.9, 2.2, 1.8, 2.3]:
+        eng._tally_z(z)
+    assert eng.get_excursions()["touch_2_up"] == 1
+
+
+def test_excursion_reset():
+    eng = SignalEngine(lambda: (None, None), lambda: _params())
+    for z in [0.0, 2.5, 0.0]:
+        eng._tally_z(z)
+    assert eng.get_excursions()["touch_2_up"] == 1
+    eng.reset_excursions()
+    e = eng.get_excursions()
+    assert e["touch_2_up"] == 0 and e["reversions"] == 0

@@ -16,6 +16,38 @@
     </div>
 </div>
 <div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-activity me-2"></i>Z-Score Excursions
+            <span class="text-secondary small ms-1">since <span id="x-since">—</span></span></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="resetExc()"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
+    </div>
+    <div class="card-body">
+        <div class="row text-center g-3">
+            <div class="col">
+                <div class="metric" id="x-2">0</div>
+                <div class="metric-label">Touched ±2σ</div>
+                <div class="small text-secondary">↑<span id="x-2u">0</span> &nbsp; ↓<span id="x-2d">0</span></div>
+            </div>
+            <div class="col">
+                <div class="metric" id="x-3">0</div>
+                <div class="metric-label">Touched ±3σ</div>
+                <div class="small text-secondary">↑<span id="x-3u">0</span> &nbsp; ↓<span id="x-3d">0</span></div>
+            </div>
+            <div class="col">
+                <div class="metric text-success" id="x-rev">0</div>
+                <div class="metric-label">Reverted to Mean</div>
+                <div class="small text-secondary">from ≥2σ → 0</div>
+            </div>
+            <div class="col">
+                <div class="metric" id="x-peak">0.00</div>
+                <div class="metric-label">Peak z (max / min)</div>
+                <div class="small text-secondary"><span id="x-max">0.00</span> / <span id="x-min">0.00</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-3">
     <div class="card-header"><i class="bi bi-table me-2"></i>Trade History</div>
     <div class="card-body p-0">
         <div class="table-responsive">
@@ -54,5 +86,30 @@
         }).join('');
     }
     load(); setInterval(load, 3000);
+
+    // ── Z-Score Excursions ───────────────────────────────────────────────────
+    function _t(id, v) { document.getElementById(id).textContent = v; }
+    function _dur(s) {
+        s = Math.max(0, Math.round(s));
+        const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+        return h ? `${h}h ${m}m` : `${m}m`;
+    }
+    async function loadExc() {
+        try {
+            const e = await fetch('/api/signal/excursions').then(r => r.json());
+            _t('x-2', e.touch_2_total); _t('x-2u', e.touch_2_up); _t('x-2d', e.touch_2_down);
+            _t('x-3', e.touch_3_total); _t('x-3u', e.touch_3_up); _t('x-3d', e.touch_3_down);
+            _t('x-rev', e.reversions);
+            _t('x-max', Number(e.max_z).toFixed(2)); _t('x-min', Number(e.min_z).toFixed(2));
+            _t('x-peak', Number(Math.max(Math.abs(e.max_z), Math.abs(e.min_z))).toFixed(2));
+            _t('x-since', _dur(e.since_sec));
+        } catch (e) {}
+    }
+    async function resetExc() {
+        if (!confirm('Reset the z-score excursion counters?')) return;
+        try { await fetch('/api/signal/excursions/reset', { method: 'POST' }); loadExc(); }
+        catch (e) { alert('Reset failed: ' + e); }
+    }
+    loadExc(); setInterval(loadExc, 2000);
 </script>
 {% endblock %}
