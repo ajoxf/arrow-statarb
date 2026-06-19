@@ -234,8 +234,8 @@ class ArrowAutoTrader:
                         extra = f" (P_win={wp*100:.0f}% EV=₹{ev:.0f})"
                     snap["status"] = f"blocked: {reason}{extra}"
                 else:
-                    snap["status"] = f"ENTRY {direction} (z={z:.2f})"
-                    self._enter(direction, lots, z, sig.get("spread", 0.0))
+                    refused = self._enter(direction, lots, z, sig.get("spread", 0.0))
+                    snap["status"] = refused or f"ENTRY {direction} (z={z:.2f})"
             elif abs(z) >= entry_z:
                 c = max(self._consec_above, self._consec_below)
                 snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
@@ -264,7 +264,25 @@ class ArrowAutoTrader:
         self._set_snap(snap)
 
     # ── actions (reuse the proven Arrow order path) ──────────────────────────
-    def _enter(self, direction: str, lots: int, z: float, spread: float) -> None:
+    def _enter(self, direction: str, lots: int, z: float, spread: float) -> Optional[str]:
+        # Stale-signal guard: re-sample the live signal at the moment of entry
+        # and refuse if the fill-time z has diverged from the DECISION z beyond
+        # a configurable threshold (so a live entry can't fire on a signal that
+        # has already snapped back). 0/absent ⇒ disabled. Returns a status string
+        # when the entry is refused (for the snapshot), else None.
+        p = self._params()
+        max_div = float(p.get("max_entry_z_divergence", 0) or 0)
+        if max_div > 0:
+            fill_z = (self._signal() or {}).get("zscore")
+            if fill_z is None or abs(float(fill_z) - z) > max_div:
+                shown = "n/a" if fill_z is None else f"{float(fill_z):.2f}"
+                msg = (f"stale signal: decision z={z:.2f} vs fill z={shown} "
+                       f"(Δ>{max_div:.2f}) — entry refused")
+                self._consec_above = self._consec_below = 0
+                self._cooldown_until = time.time() + float(p.get("cooldown", 300))
+                logger.warning("ArrowAlgo: {}", msg)
+                return msg
+
         # Pass the algo's DECISION z/spread (and source) so the journal records
         # the exact signal it acted on, not a re-sampled value at order time.
         try:

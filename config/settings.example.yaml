@@ -41,6 +41,9 @@ signal:
   exit_zscore: 0.0
   stop_zscore: 4.0
   confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+  max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
+                              # z re-sampled at order time has moved more than
+                              # this from the decision z. 0 = disabled.
 
 # Probability / EV / cost gate (OU gambler's-ruin model).
 filters:

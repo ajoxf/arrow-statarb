@@ -47,6 +47,52 @@ def test_confirmation_resets_on_drop():
     assert not calls["execute"]
 
 
+def _diverging_algo(decision_z, fill_z, max_div):
+    """Algo whose signal returns ``decision_z`` to the tick and ``fill_z`` to the
+    re-sample inside _enter (so the stale-signal guard can be exercised)."""
+    calls = {"execute": []}
+    seq = {"n": 0}
+
+    def sig():
+        seq["n"] += 1
+        return _sig(decision_z if seq["n"] == 1 else fill_z)
+
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "confirmation_ticks": 1, "enable_probability_filter": False, "cooldown": 300,
+              "max_entry_z_divergence": max_div}
+    a = ArrowAutoTrader(
+        signal_provider=sig,
+        params_provider=lambda: params,
+        execute_fn=lambda d, l: (calls["execute"].append((d, l)) or
+                                 {"success": True, "results": [{"order_id": "x"}]}),
+        close_fn=lambda d, l: {"success": True, "results": []},
+    )
+    return a, calls
+
+
+def test_entry_z_divergence_guard_refuses_stale_signal():
+    # Decision z=-2.5 but z re-sampled at order time is -0.5 (snapped back).
+    a, calls = _diverging_algo(-2.5, -0.5, max_div=1.0)
+    a._tick()
+    assert not calls["execute"]                       # entry refused
+    assert "stale signal" in a._snap["status"]
+    assert a._cooldown_until > time.time()            # cooldown armed
+
+
+def test_entry_z_divergence_guard_allows_within_threshold():
+    # Tiny drift (-2.5 → -2.4) is within tolerance → entry proceeds.
+    a, calls = _diverging_algo(-2.5, -2.4, max_div=1.0)
+    a._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_entry_z_divergence_guard_disabled_by_default():
+    # max_div=0 disables the guard even on a large divergence.
+    a, calls = _diverging_algo(-2.5, 0.0, max_div=0.0)
+    a._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
 def test_trading_hours_window():
     assert _within_trading_hours({"trading_hours": {"enabled": False}}) is True
     # A zero-width past window (00:00–00:00) is effectively always closed.

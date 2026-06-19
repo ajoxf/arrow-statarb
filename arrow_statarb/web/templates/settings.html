@@ -44,6 +44,11 @@
                         <input type="number" class="form-control" id="s-confirm">
                         <div class="form-text">Consecutive ticks above threshold before entry</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Entry Z Divergence (σ)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-zdiv">
+                        <div class="form-text">Refuse an entry if z re-sampled at order time moves more than this from the decision z. 0 = off.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -204,6 +209,7 @@
         _set('s-exit', s.signal.exit_zscore);
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
+        _set('s-zdiv', s.signal.max_entry_z_divergence);
 
         _set('r-lots', s.risk.lots_per_trade);
         _set('r-maxleg', s.risk.max_contracts_per_leg);
@@ -241,6 +247,7 @@
                 exit_zscore: +document.getElementById('s-exit').value,
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
+                max_entry_z_divergence: +document.getElementById('s-zdiv').value,
             },
             risk: {
                 lots_per_trade: +document.getElementById('r-lots').value,

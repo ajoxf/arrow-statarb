@@ -387,6 +387,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
+            "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "lots": lots,
@@ -929,6 +930,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "exit_zscore": s.get("exit_zscore", 0.0),
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
+                    "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -966,7 +968,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
-                     ("confirmation_ticks", 3)):
+                     ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0)):
             if k in (data.get("signal") or {}):
                 sig[k] = _num(data["signal"][k], d)
 
