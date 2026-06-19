@@ -255,6 +255,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         }
 
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params)
+    # Auto-start so the live signal + z-score chart always collect whenever prices
+    # are available — independent of connecting the broker or arming the algo. It
+    # simply no-ops while no prices are returned, so this is safe at startup.
+    signal_engine.start()
 
     _algo_lots = {"lots": int(cfg.get("execution.default_lots", 1))}
 

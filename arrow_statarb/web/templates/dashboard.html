@@ -78,7 +78,13 @@
                     <div id="dc-bar" class="progress-bar" style="width:0%"></div>
                 </div>
                 <div id="dc-warn" class="small text-warning mb-2"></div>
-                <div style="height: 200px;"><canvas id="zscore-canvas"></canvas></div>
+                <div style="height: 200px; position: relative;">
+                    <canvas id="zscore-canvas"></canvas>
+                    <div id="zscore-empty" class="position-absolute top-50 start-50 translate-middle text-secondary small text-center">
+                        <i class="bi bi-graph-up d-block fs-3 mb-1 opacity-50"></i>
+                        Waiting for price data…
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -306,6 +312,9 @@
         try {
             const h = await fetch('/api/signal/history?points=200').then(r => r.json());
             const pts = h.points || [];
+            // Show/hide the "waiting for data" overlay on the z-score chart.
+            const empty = document.getElementById('zscore-empty');
+            if (empty) empty.classList.toggle('d-none', pts.length > 0);
             const labels = pts.map((_, i) => i);
             const ez = h.entry_zscore ?? ENTRY_Z, sz = h.stop_zscore ?? STOP_Z;
             zscoreChart.data.labels = labels;
@@ -356,8 +365,9 @@
             document.getElementById('dc-bar').style.width = Math.min(100, 100*have/win) + '%';
             const badge = document.getElementById('dc-badge');
             const warn = document.getElementById('dc-warn');
-            if (!s.running) { badge.className='badge bg-secondary'; badge.textContent='offline';
-                warn.textContent='Broker not connected — prices unavailable'; }
+            const noData = (s.spread == null);   // engine runs always; gate on real prices
+            if (noData) { badge.className='badge bg-secondary'; badge.textContent='waiting';
+                warn.textContent='Waiting for price data — connect a broker to start the live z-score'; }
             else if (!s.ready) { badge.className='badge bg-info text-dark'; badge.textContent='collecting';
                 warn.textContent=`Collecting history — preliminary until ${s.min_signal_minutes} min`; }
             else { badge.className='badge bg-success'; badge.textContent='ready'; warn.textContent=''; }
