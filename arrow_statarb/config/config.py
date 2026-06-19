@@ -31,6 +31,18 @@ class Config:
 
     # ── loading ──────────────────────────────────────────────────────────────
     def reload(self) -> None:
+        # settings.yaml is a runtime/local file (gitignored, mutated by the UI).
+        # On first run, seed it from the tracked settings.example.yaml template so
+        # a fresh clone has working defaults and pulls never conflict on it.
+        if not self.path.exists():
+            example = self.path.with_name(self.path.stem + ".example" + self.path.suffix)
+            if example.exists():
+                try:
+                    import shutil
+                    shutil.copyfile(example, self.path)
+                    logger.info("Seeded {} from {}", self.path.name, example.name)
+                except Exception as exc:
+                    logger.warning("Could not seed {} from template — {}", self.path.name, exc)
         if self.path.exists():
             with open(self.path) as f:
                 self._data = yaml.safe_load(f) or {}

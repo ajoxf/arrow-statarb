@@ -2,6 +2,9 @@
 .env
 config/credentials.yaml
 config/leg_assignments.yaml
+# Runtime config — seeded from config/settings.example.yaml on first run, then
+# mutated by the Settings page / mode switch. Tracking it makes pulls conflict.
+config/settings.yaml
 
 # Python
 __pycache__/

@@ -1,0 +1,90 @@
+# Arrow StatArb — configuration TEMPLATE.
+#
+# This file is the tracked source of defaults. On first run the app copies it to
+# config/settings.yaml (which is gitignored and mutated at runtime by the
+# Settings page / mode switch), so your live settings never block a git pull.
+# Edit defaults here; edit your running config in the UI or in settings.yaml.
+#
+# Credentials are NEVER stored here — they come from environment variables
+# (ARROW_APP_ID, ARROW_USER_ID, ARROW_PASSWORD, ARROW_API_SECRET,
+# ARROW_TOTP_SECRET); see .env.example.
+
+broker:
+  name: arrow
+  # Segment key → Arrow ExchSeg (the master's exchange+segment field).
+  segments:
+    nse_cm: NSECM
+    nse_fo: NSEFO
+    bse_cm: BSECM
+    bse_fo: BSEFO
+  # Segment key → Arrow Exchange enum used on orders/quotes.
+  exchange_enum:
+    nse_cm: NSE
+    nse_fo: NFO
+    bse_cm: BSE
+    bse_fo: BFO
+  lot_overrides: {}
+
+# Default 2-leg spread. The dashboard picker overrides these into
+# config/leg_assignments.yaml.
+instruments:
+  leg_a: { segment: nse_fo, symbol: NIFTY30JUN26F, ratio: 1 }
+  leg_b: { segment: nse_fo, symbol: NIFTY28JUL26F, ratio: 1 }
+
+# Signal — the single server-side source of truth (algo AND dashboard read it).
+signal:
+  window_minutes: 120         # rolling window for mean/std/z (data-collection size)
+  sample_interval_sec: 0.5    # how often the server samples prices
+  display_refresh_ms: 50      # dashboard live-price poll cadence
+  min_signal_minutes: 10      # history required before any trade (ready gate)
+  entry_zscore: 2.0
+  exit_zscore: 0.0
+  stop_zscore: 4.0
+  confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+
+# Probability / EV / cost gate (OU gambler's-ruin model).
+filters:
+  enable_probability_filter: true
+  commission_basis: per_lot   # per_lot | per_order
+  min_win_probability: 0.6
+  min_expected_value: 0
+  brokerage_per_lot: 10       # INR per lot per leg, one way
+  slippage_per_lot: 5         # INR per lot per leg, one way
+  time_stop_half_lives: 3.0   # exit if held longer than this × half-life
+  half_life_min_sec: 0        # allowed-range lower bound (0 = none)
+  half_life_max_sec: 0        # allowed-range upper bound (0 = none)
+
+# Risk management.
+risk:
+  lots_per_trade: 1
+  max_contracts_per_leg: 5    # hard position cap per leg
+  max_slippage_pct: 0.5
+  max_daily_loss: 0           # INR; 0 = disabled. Halts new entries when today's
+                              # realized P&L ≤ −this.
+
+# Only trade inside this window (IST).
+trading_hours:
+  enabled: false
+  start_hour: 9
+  start_min: 15
+  end_hour: 15
+  end_min: 30
+
+# LIVE order execution (SpreadExecutor).
+execution:
+  product: NRML
+  order_type: limit
+  default_lots: 1
+  cooldown_sec: 300
+  use_limit_orders: true      # place legs as LIMIT (priced off LTP), not MARKET
+  limit_offset_pct: 0.05      # % through LTP for a marketable limit (caps slippage)
+  amend_step_pct: 0.05        # extra % added each amendment to chase the fill
+  amend_interval_sec: 1.5     # re-price the resting limit this often while waiting
+  fill_timeout_sec: 5         # wait this long for a limit before escalating
+  poll_interval_sec: 0.4      # order-status (fill) poll cadence
+  limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
+  verify_flat_before_entry: true   # skip entry if a leg already has a position
+
+# dry_run never transmits orders (Arrow has no sandbox — this is a local gate).
+# Fail-safe: anything not exactly "live" is treated as dry_run.
+mode: dry_run          # dry_run | live
