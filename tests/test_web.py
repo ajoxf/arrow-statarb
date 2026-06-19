@@ -133,3 +133,15 @@ def test_leg_info_lot_mismatch(tmp_path):
     info = client.get("/api/leg-info").get_json()
     assert info["lot_mismatch"] is True
     assert "NOT share-neutral" in info["message"]
+
+
+def test_preflight_checks(tmp_path):
+    app, broker = _app(tmp_path, mode="dry_run")
+    client = app.test_client()
+    p = client.get("/api/preflight").get_json()
+    keys = {c["key"] for c in p["checks"]}
+    assert keys == {"connected", "legs", "funds", "signal", "caps", "sdk"}
+    assert "ready" in p and isinstance(p["ready"], bool)
+    # FakeBroker has get_funds (returns None funds) → not connected-funds-ok → not ready
+    conn = next(c for c in p["checks"] if c["key"] == "connected")
+    assert conn["status"] == "ok"     # FakeBroker is "connected"

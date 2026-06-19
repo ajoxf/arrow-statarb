@@ -213,6 +213,17 @@
 
     <!-- ════════════════ RIGHT COLUMN ════════════════ -->
     <div class="col-lg-4">
+        <!-- Pre-Live Checklist -->
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-clipboard-check me-2"></i>Pre-Live Checklist</span>
+                <span id="pf-overall" class="badge bg-secondary">—</span>
+            </div>
+            <div class="card-body py-2">
+                <ul id="pf-list" class="list-unstyled mb-0 small"></ul>
+            </div>
+        </div>
+
         <!-- Algorithm Control -->
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -639,6 +650,29 @@
         } catch (e) {}
     }
 
+    // ── Pre-Live Checklist ───────────────────────────────────────────────────
+    const _PF_ICON = {
+        ok:      ['bi-check-circle-fill', 'text-success'],
+        warn:    ['bi-exclamation-triangle-fill', 'text-warning'],
+        fail:    ['bi-x-circle-fill', 'text-danger'],
+        pending: ['bi-dash-circle', 'text-secondary'],
+    };
+    async function pollPreflight() {
+        try {
+            const p = await fetch('/api/preflight').then(r => r.json());
+            const ov = document.getElementById('pf-overall');
+            ov.className = 'badge ' + (p.ready ? 'bg-success' : 'bg-secondary');
+            ov.textContent = p.ready ? 'Ready for live' : 'Not ready';
+            document.getElementById('pf-list').innerHTML = (p.checks || []).map(c => {
+                const ic = _PF_ICON[c.status] || _PF_ICON.pending;
+                return `<li class="d-flex align-items-start mb-1">
+                    <i class="bi ${ic[0]} ${ic[1]} me-2 mt-1"></i>
+                    <span><strong>${c.label}</strong>
+                        <span class="text-secondary d-block" style="font-size:.85em">${c.detail||''}</span></span></li>`;
+            }).join('');
+        } catch (e) {}
+    }
+
     // ── Trade Journal (round-trips) ──────────────────────────────────────────
     function _arrow2(a, b, d) { const f = v => (v==null?'—':Number(v).toFixed(d)); return `${f(a)}→${f(b)}`; }
     function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
@@ -838,6 +872,7 @@
     pollReconcile(); setInterval(pollReconcile, 4000);
     pollMarkets();  setInterval(pollMarkets, 5000);
     pollMode();     setInterval(pollMode, 3000);
+    pollPreflight(); setInterval(pollPreflight, 3000);
     pollJournal();  setInterval(pollJournal, 3000);
     pollExecution(); setInterval(pollExecution, 2000);
     pollTrades();   setInterval(pollTrades, 3000);

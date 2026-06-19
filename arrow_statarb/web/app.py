@@ -793,6 +793,91 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return jsonify({"mode": cfg.mode, "dry_run": _is_dry_run(),
                         "broker": cfg.get("broker.name", "arrow")})
 
+    @app.route("/api/preflight", methods=["GET"])
+    def api_preflight():
+        """Aggregated go-live readiness checks for the dashboard checklist."""
+        broker = active.get()
+        legs = _read_legs()
+        sig = signal_engine.get_signal()
+        r = cfg.section("risk")
+        checks: list = []
+
+        def add(key, label, status, detail):
+            checks.append({"key": key, "label": label, "status": status, "detail": detail})
+
+        # 1 — broker connected (+ instruments loaded)
+        if broker:
+            ev = getattr(broker, "_instruments_ready", None)
+            instr_ok = ev.is_set() if (ev is not None and hasattr(ev, "is_set")) else True
+            add("connected", "Arrow connected", "ok" if instr_ok else "warn",
+                "Connected" if instr_ok else "Connected — loading instruments…")
+        else:
+            add("connected", "Arrow connected", "fail", "Not connected — Setup → Connect")
+
+        # 2 — both legs assigned & share-neutral
+        both = _have_both_legs(legs)
+        la = lb = None
+        if both and broker:
+            try:
+                la = int(broker.resolve_lot_size(legs["leg_a"]["segment"], legs["leg_a"]["symbol"]))
+                lb = int(broker.resolve_lot_size(legs["leg_b"]["segment"], legs["leg_b"]["symbol"]))
+            except Exception:
+                pass
+        if not both:
+            add("legs", "Both legs assigned", "fail", "Assign Leg A and Leg B in Setup")
+        elif la and lb and la != lb:
+            add("legs", "Both legs assigned", "warn", f"Lot mismatch {la} vs {lb} — not share-neutral")
+        else:
+            add("legs", "Both legs assigned", "ok",
+                f"{legs['leg_a']['symbol']} − {legs['leg_b']['symbol']}")
+
+        # 3 — account funded
+        funds = {}
+        try:
+            funds = broker.get_funds() if (broker and hasattr(broker, "get_funds")) else {}
+        except Exception:
+            funds = {}
+        avail = funds.get("available")
+        if not broker:
+            add("funds", "Account funded", "fail", "Connect to read funds")
+        elif avail is None:
+            add("funds", "Account funded", "warn", "Broker did not report funds — verify margin manually")
+        elif avail > 0:
+            add("funds", "Account funded", "ok", f"Available ₹{avail:,.0f} — verify ≥ position margin")
+        else:
+            add("funds", "Account funded", "fail", "No available margin")
+
+        # 4 — risk caps set (advisory)
+        cap = int(r.get("max_contracts_per_leg", 0) or 0)
+        mdl = float(r.get("max_daily_loss", 0) or 0)
+        lots = int(r.get("lots_per_trade", _algo_lots["lots"]))
+        add("caps", "Risk caps set", "ok" if (cap > 0 and mdl > 0) else "warn",
+            f"{lots} lot(s) · per-leg cap {cap or '∞'} · daily loss {('₹%.0f' % mdl) if mdl else 'off'}")
+
+        # 5 — signal ready to trade
+        if sig.get("ready"):
+            add("signal", "Signal ready", "ok", f"z = {sig.get('zscore')}")
+        elif sig.get("spread") is None:
+            add("signal", "Signal ready", "fail", "No price data yet")
+        else:
+            add("signal", "Signal ready", "warn",
+                f"collecting {float(sig.get('span_minutes', 0)):.1f}/"
+                f"{float(sig.get('min_signal_minutes', 0)):.0f} min")
+
+        # 6 — fill confirmation verified on a real (live) fill
+        live_evs = [e for e in execution_log.all() if e.get("mode") == "live"]
+        if not live_evs:
+            add("sdk", "Fill confirmation (live)", "pending", "Confirmed on your first live fill")
+        elif any(l.get("unconfirmed") for e in live_evs for l in e.get("legs", [])):
+            add("sdk", "Fill confirmation (live)", "fail",
+                "Broker returned UNKNOWN — get_order_status not wired; orphan detection blind")
+        else:
+            add("sdk", "Fill confirmation (live)", "ok", "get_order_status returning real fills")
+
+        critical = {"connected", "legs", "funds", "signal"}
+        ready = all(c["status"] == "ok" for c in checks if c["key"] in critical)
+        return jsonify({"mode": _mode(), "ready": ready, "checks": checks})
+
     @app.route("/api/trading-mode", methods=["POST"])
     def api_trading_mode():
         data = request.get_json(force=True) or {}
