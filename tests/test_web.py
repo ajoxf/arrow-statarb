@@ -135,6 +135,29 @@ def test_leg_info_lot_mismatch(tmp_path):
     assert "NOT share-neutral" in info["message"]
 
 
+def test_session_token_persist_reuse_and_clear(tmp_path):
+    import time
+    import arrow_statarb.web.app as appmod
+    appmod.SESSION_FILE = tmp_path / "arrow_session.json"
+
+    # Nothing saved yet.
+    assert appmod._load_session_token("APP1") == ""
+
+    # Save then reuse for the SAME app_id.
+    appmod._save_session_token("APP1", "TOKEN-XYZ")
+    assert appmod._load_session_token("APP1") == "TOKEN-XYZ"
+
+    # A different app_id must not reuse another account's token.
+    assert appmod._load_session_token("APP2") == ""
+
+    # Too old → not reused (Arrow tokens last ~24h).
+    assert appmod._load_session_token("APP1", max_age_h=0.0) == ""
+
+    # Clear drops it.
+    appmod._clear_session_token()
+    assert appmod._load_session_token("APP1") == ""
+
+
 def test_preflight_checks(tmp_path):
     app, broker = _app(tmp_path, mode="dry_run")
     client = app.test_client()

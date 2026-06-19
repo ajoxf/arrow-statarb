@@ -34,3 +34,5 @@ htmlcov/
 
 # Runtime data
 data/trades.json
+# Cached Arrow session token (a credential — never commit)
+data/arrow_session.json

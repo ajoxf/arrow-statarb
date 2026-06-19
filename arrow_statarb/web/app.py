@@ -15,9 +15,11 @@ mpp market orders, gated by the dry-run/live mode.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -44,6 +46,49 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # Trade-log location. Module-level so tests can redirect it to a temp file and
 # never write into the shipped data/trades.json.
 TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
+
+# Cached Arrow session token (valid ~24h). Persisted locally and gitignored so a
+# restart within the validity window reuses it instead of running 2FA again.
+# Module-level so tests can redirect it away from a real session file.
+SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
+
+
+def _save_session_token(app_id: str, token: str) -> None:
+    """Persist the live session token for reuse on the next start. Best-effort —
+    a failure here never blocks a connection."""
+    if not app_id or not token:
+        return
+    try:
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SESSION_FILE.write_text(json.dumps(
+            {"app_id": app_id, "token": token, "saved_at": time.time()}))
+    except Exception as exc:
+        logger.debug("session token save failed — {}", exc)
+
+
+def _load_session_token(app_id: str, max_age_h: float = 23.0) -> str:
+    """Return a saved token for this app_id if present and younger than
+    ``max_age_h`` hours (Arrow tokens last ~24h), else ""."""
+    if not app_id:
+        return ""
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+    except Exception:
+        return ""
+    if str(data.get("app_id", "")) != str(app_id):
+        return ""
+    if (time.time() - float(data.get("saved_at", 0))) > max_age_h * 3600:
+        return ""
+    return str(data.get("token", "") or "")
+
+
+def _clear_session_token() -> None:
+    try:
+        SESSION_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.debug("session token clear failed — {}", exc)
 
 
 def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
@@ -487,6 +532,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                             "error": f"Missing credentials: {', '.join(missing)} "
                                      f"(send in form or set ARROW_* env vars)"})
         creds["lot_sizes"] = cfg.get("broker.lot_overrides") or {}
+        # Reuse a still-valid session token from a previous run so a restart
+        # skips the 2FA login (the broker validates it and re-logs in if dead).
+        persist = bool(cfg.get("broker.persist_session", True))
+        if persist and not str(data.get("token", "")).strip():
+            saved = _load_session_token(creds["app_id"])
+            if saved:
+                creds["token"] = saved
         try:
             broker = create_broker(cfg.get("broker.name", "arrow"), creds)
             ok = broker.connect()
@@ -494,6 +546,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 active.set(broker)
                 signal_engine.reset()
                 signal_engine.start()
+                if persist and hasattr(broker, "get_session_token"):
+                    _save_session_token(creds["app_id"], broker.get_session_token())
             return jsonify({
                 "success": ok,
                 "message": "Connected" if ok else "Login failed",
@@ -508,6 +562,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_arrow_disconnect():
         arrow_algo.stop()
         signal_engine.stop()
+        # An explicit disconnect ends the session — drop the cached token so the
+        # next connect logs in fresh. active.clear() invalidates the live session.
+        _clear_session_token()
         active.clear()
         return jsonify({"success": True})
 
