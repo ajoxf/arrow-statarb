@@ -13,6 +13,9 @@ flask
 flask-socketio
 python-socketio
 python-engineio
+# Production WSGI server (run_arrow.py --server waitress; recommended over the
+# Werkzeug dev server, which can exhaust memory under the dashboard's polling).
+waitress
 
 # Config / env / logging
 pyyaml
