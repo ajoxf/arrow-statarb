@@ -133,6 +133,7 @@
                 <div>
                     <span class="badge bg-secondary me-1"><span id="tr-count">0</span> trades</span>
                     <button class="btn btn-sm btn-outline-secondary" onclick="pollTrades()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="clearTrades()"><i class="bi bi-trash"></i> Clear</button>
                 </div>
             </div>
             <div class="card-body p-0">
@@ -273,6 +274,16 @@
     }
     function clearLog() { document.getElementById('system-log').innerHTML =
         '<div class="log-entry log-info">Log cleared.</div>'; }
+
+    // Clear the trade log (resets the Trades table, Total P&L and Win Rate).
+    async function clearTrades() {
+        if (!confirm('Clear all recorded trades? This resets Total P&L and Win Rate.')) return;
+        try {
+            await fetch('/api/trades/clear', { method: 'POST' });
+            pollTrades(); pollMode();
+            log('Trade log cleared', 'log-warning');
+        } catch (e) { alert('Clear failed: ' + e); }
+    }
 
     // ── Charts (server signal series) ────────────────────────────────────────
     const _noAnim = { responsive: true, maintainAspectRatio: false, animation: false,

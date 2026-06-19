@@ -62,9 +62,11 @@ def _app(tmp_path, mode="dry_run"):
         "leg_a:\n  mapping_id: nse_fo|NIFTY30JUN26F\n  ratio: 1\n"
         "leg_b:\n  mapping_id: nse_fo|NIFTY28JUL26F\n  ratio: 1\n"
     )
-    # Point the app's leg-assignments path at our temp file.
+    # Point the app's leg-assignments + trade-log paths at temp files so tests
+    # never read or write the shipped config/data files.
     import pytest as _pt  # noqa
     appmod.LEG_ASSIGNMENTS_FILE = legs
+    appmod.TRADES_FILE = tmp_path / "trades.json"
 
     cfg = Config(settings)
     app, _sio = appmod.create_app(cfg)

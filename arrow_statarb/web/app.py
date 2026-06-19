@@ -37,6 +37,10 @@ from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
+# Trade-log location. Module-level so tests can redirect it to a temp file and
+# never write into the shipped data/trades.json.
+TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
+
 
 def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     cfg = config or Config()
@@ -46,7 +50,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     active = ActiveBroker()
     _ltp_cache: Dict[str, Any] = {}
-    trade_log = TradeLog(PROJECT_ROOT / "data" / "trades.json",
+    trade_log = TradeLog(TRADES_FILE,
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 10)))
 
     # ── config helpers ───────────────────────────────────────────────────────
