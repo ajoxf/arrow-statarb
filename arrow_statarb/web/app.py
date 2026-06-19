@@ -291,6 +291,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "lots": lots,
             "lot_multiplier": _lot_multiplier(),
+            "max_daily_loss": float(r.get("max_daily_loss", 0) or 0),
+            "day_pnl": trade_log.day_pnl(),
             "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
             "commission_basis": str(f.get("commission_basis", "per_lot")),
             "min_win_probability": float(f.get("min_win_probability", 0.60)),
@@ -851,8 +853,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # ── risk metrics (leg notionals + max daily loss) ────────────────────────
     @app.route("/api/risk", methods=["GET"])
     def api_risk():
+        mdl = float(cfg.get("risk.max_daily_loss", 0) or 0)
+        day = trade_log.day_pnl()
         out = {"leg_a_notional": 0.0, "leg_b_notional": 0.0,
-               "max_daily_loss": float(cfg.get("risk.max_daily_loss", 0) or 0)}
+               "max_daily_loss": mdl, "day_pnl": day,
+               "daily_loss_hit": bool(mdl > 0 and day <= -mdl)}
         broker = active.get()
         legs = _read_legs()
         if not broker or not _have_both_legs(legs):

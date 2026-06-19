@@ -17,6 +17,10 @@
 <div id="position-mismatch" class="alert alert-danger d-none">
     <i class="bi bi-exclamation-triangle-fill me-1"></i><span id="position-mismatch-msg"></span>
 </div>
+<div id="daily-loss-banner" class="alert alert-danger d-none">
+    <i class="bi bi-shield-fill-exclamation me-1"></i><strong>Daily loss limit reached.</strong>
+    <span id="daily-loss-msg"></span> New entries are halted until the trade log is reset or the limit is raised.
+</div>
 
 <!-- ── Live Prices ─────────────────────────────────────────────────────────── -->
 <div class="card mb-3">
@@ -231,8 +235,10 @@
             <div class="card-body">
                 <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg A Notional</span><span class="fw-bold" id="rk-a">₹0.00</span></div>
                 <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg B Notional</span><span class="fw-bold" id="rk-b">₹0.00</span></div>
+                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Today's P&amp;L</span><span class="fw-bold" id="rk-day">₹0.00</span></div>
                 <div class="d-flex justify-content-between bg-body-secondary rounded px-2 py-1">
                     <span class="fw-bold">Max Daily Loss</span><span class="fw-bold text-danger" id="rk-mdl">₹0.00</span></div>
+                <div class="form-text" id="rk-mdl-note">0 = no daily-loss limit</div>
             </div>
         </div>
 
@@ -419,6 +425,16 @@
             document.getElementById('rk-a').textContent = _rs(r.leg_a_notional);
             document.getElementById('rk-b').textContent = _rs(r.leg_b_notional);
             document.getElementById('rk-mdl').textContent = _rs(r.max_daily_loss);
+            const day = Number(r.day_pnl || 0);
+            const dayEl = document.getElementById('rk-day');
+            dayEl.textContent = _rs(day);
+            dayEl.className = 'fw-bold ' + (day > 0 ? 'text-success' : (day < 0 ? 'text-danger' : ''));
+            document.getElementById('rk-mdl-note').textContent =
+                r.max_daily_loss > 0 ? 'Entries halt if Today’s P&L drops below −' + _rs(r.max_daily_loss)
+                                     : '0 = no daily-loss limit';
+            document.getElementById('daily-loss-banner').classList.toggle('d-none', !r.daily_loss_hit);
+            document.getElementById('daily-loss-msg').textContent =
+                r.daily_loss_hit ? `Today's P&L ${_rs(day)} ≤ −${_rs(r.max_daily_loss)}.` : '';
         } catch (e) {}
     }
 

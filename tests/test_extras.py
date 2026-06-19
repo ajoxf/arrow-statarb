@@ -99,3 +99,12 @@ def test_trade_log_open_position_tracks_unmatched_open(tmp_path):
     tl.record(action="CLOSE", direction="LONG_SPREAD", lots=3, spread=110.0,
               dry_run=False, status="LIVE")
     assert tl.open_position() is None
+
+def test_trade_log_day_pnl_scopes_to_today(tmp_path):
+    import time as _t
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    # A trade from two days ago must NOT count toward today's P&L.
+    tl._trades.append({"ts": _t.time() - 2*86400, "action": "CLOSE", "net_pnl": -500.0})
+    tl._trades.append({"ts": _t.time(), "action": "CLOSE", "net_pnl": -120.0})
+    tl._trades.append({"ts": _t.time(), "action": "CLOSE", "net_pnl": 30.0})
+    assert tl.day_pnl() == -90.0       # only today's -120 + 30

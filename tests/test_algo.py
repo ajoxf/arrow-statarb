@@ -150,3 +150,25 @@ def test_restored_position_can_exit_on_revert():
     state["sig"] = _sig(0.2)                          # reverted through exit_z (0.0)
     algo._tick()
     assert calls["close"] == [("LONG_SPREAD", 1)]
+
+
+def test_daily_loss_limit_blocks_entry():
+    algo, state, calls = _make({"max_daily_loss": 1000.0, "day_pnl": -1000.0})
+    state["sig"] = _sig(-2.5)          # would normally enter LONG_SPREAD
+    algo._tick()
+    assert not calls["execute"]
+    assert "daily loss limit" in algo.get_state()["status"]
+
+
+def test_daily_loss_limit_allows_when_within():
+    algo, state, calls = _make({"max_daily_loss": 1000.0, "day_pnl": -200.0})
+    state["sig"] = _sig(-2.5)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_daily_loss_zero_means_disabled():
+    algo, state, calls = _make({"max_daily_loss": 0.0, "day_pnl": -999999.0})
+    state["sig"] = _sig(-2.5)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]   # 0 = no limit

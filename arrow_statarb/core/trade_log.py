@@ -11,10 +11,14 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
+
+# Trading day boundary is evaluated in IST (the app's exchange-local timezone).
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class TradeLog:
@@ -96,6 +100,19 @@ class TradeLog:
                             "ts": float(rec.get("ts", 0.0)),
                             "dry_run": bool(rec.get("dry_run", False))}
         return None
+
+    def day_pnl(self, now_ts: Optional[float] = None) -> float:
+        """Realized net P&L (sum of ``net_pnl``) for the current IST trading day.
+        Used to enforce the daily-loss limit. Includes brokerage; counts every
+        recorded trade since IST midnight regardless of mode."""
+        now_ts = time.time() if now_ts is None else now_ts
+        midnight = datetime.fromtimestamp(now_ts, _IST).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        start = midnight.timestamp()
+        with self._lock:
+            return round(sum(float(r.get("net_pnl", 0) or 0)
+                             for r in self._trades
+                             if float(r.get("ts", 0) or 0) >= start), 2)
 
     def all(self) -> List[Dict]:
         with self._lock:

@@ -212,7 +212,11 @@ class ArrowAutoTrader:
         confirmed_short = self._consec_above >= confirm   # z ≥ +entry
 
         if self._pos is None:
-            if now < self._cooldown_until:
+            mdl = float(p.get("max_daily_loss", 0) or 0)
+            day_pnl = float(p.get("day_pnl", 0.0))
+            if mdl > 0 and day_pnl <= -mdl:
+                snap["status"] = f"daily loss limit reached (₹{day_pnl:.0f} ≤ −₹{mdl:.0f}) — entries halted"
+            elif now < self._cooldown_until:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
                 snap["status"] = "outside trading hours"
