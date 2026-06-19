@@ -13,14 +13,19 @@
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-6">
-                        <label class="form-label">Lookback Period <span class="badge bg-secondary">ticks</span></label>
-                        <input type="number" class="form-control" id="s-lookback">
-                        <div class="form-text" id="s-lookback-help">price history before any trade</div>
+                        <label class="form-label">Signal Window <span class="badge bg-secondary">min</span></label>
+                        <input type="number" step="1" class="form-control" id="s-window">
+                        <div class="form-text">Rolling window for mean / std / z (data-collection size)</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Tick Interval (sec)</label>
                         <input type="number" step="0.1" class="form-control" id="s-tick">
                         <div class="form-text">Price update rate (0.5 s default)</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Min History Before Trading <span class="badge bg-secondary">min</span></label>
+                        <input type="number" step="1" class="form-control" id="s-minhist">
+                        <div class="form-text">Signal must collect this much history before any trade</div>
                     </div>
                     <div class="col-md-4">
                         <label class="form-label">Entry Z-Score (σ)</label>
@@ -192,9 +197,8 @@
 
     async function loadSettings() {
         const s = await fetch('/api/settings').then(r => r.json());
-        _set('s-lookback', s.signal.lookback_period);
-        document.getElementById('s-lookback-help').textContent =
-            `≈ ${(s.signal.lookback_period * s.signal.sample_interval_sec / 60).toFixed(1)} min of history before any trade`;
+        _set('s-window', s.signal.window_minutes);
+        _set('s-minhist', s.signal.min_signal_minutes);
         _set('s-tick', s.signal.sample_interval_sec);
         _set('s-entry', s.signal.entry_zscore);
         _set('s-exit', s.signal.exit_zscore);
@@ -230,7 +234,8 @@
     async function saveSettings() {
         const payload = {
             signal: {
-                lookback_period: +document.getElementById('s-lookback').value,
+                window_minutes: +document.getElementById('s-window').value,
+                min_signal_minutes: +document.getElementById('s-minhist').value,
                 sample_interval_sec: +document.getElementById('s-tick').value,
                 entry_zscore: +document.getElementById('s-entry').value,
                 exit_zscore: +document.getElementById('s-exit').value,

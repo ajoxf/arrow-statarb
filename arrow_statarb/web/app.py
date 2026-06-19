@@ -723,7 +723,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                            cfg.section("risk"), cfg.section("trading_hours"))
             return jsonify({
                 "signal": {
-                    "lookback_period": s.get("lookback_period", 250),
+                    "window_minutes": s.get("window_minutes", 120),
+                    "min_signal_minutes": s.get("min_signal_minutes", 10),
                     "sample_interval_sec": s.get("sample_interval_sec", 0.5),
                     "entry_zscore": s.get("entry_zscore", 2.0),
                     "exit_zscore": s.get("exit_zscore", 0.0),
@@ -763,7 +764,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         raw = cfg.raw
         sig = raw.setdefault("signal", {})
-        for k, d in (("lookback_period", 250), ("sample_interval_sec", 0.5),
+        for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
+                     ("sample_interval_sec", 0.5),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3)):
             if k in (data.get("signal") or {}):
