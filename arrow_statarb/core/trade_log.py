@@ -49,7 +49,8 @@ class TradeLog:
                spread: Optional[float], dry_run: bool, status: str,
                source: str = "manual", lot_size: int = 1,
                zscore: Optional[float] = None, leg_a_price: Optional[float] = None,
-               leg_b_price: Optional[float] = None, name: str = "") -> Dict:
+               leg_b_price: Optional[float] = None, name: str = "",
+               exit_reason: str = "") -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
         matching OPEN to fill in spread/net P&L plus full round-trip detail
         (entry/exit z, per-leg prices, spreads, time-in-trade).
@@ -76,8 +77,9 @@ class TradeLog:
             "spread_pnl": 0.0,
             "brokerage": brokerage,
             "net_pnl": 0.0,
-            "status": status,          # DRY-RUN | LIVE | rejected
+            "status": status,          # DRY-RUN | LIVE-SIM | LIVE | rejected
             "dry_run": dry_run,
+            "exit_reason": exit_reason if action == "CLOSE" else "",  # target|stop|time_stop
             # round-trip detail (filled on CLOSE)
             "entry_zscore": None, "exit_zscore": None,
             "entry_leg_a": None, "entry_leg_b": None,

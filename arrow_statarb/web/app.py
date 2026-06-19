@@ -29,11 +29,15 @@ from loguru import logger
 
 from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE, PROJECT_ROOT
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
+from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
 from arrow_statarb.core.algo import ArrowAutoTrader
 from arrow_statarb.core.executor import SpreadExecutor, LegOrder
+from arrow_statarb.core.execution_log import ExecutionLog
 from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.models.probability_filter import ProbabilityFilter
+
+_MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -52,6 +56,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     _ltp_cache: Dict[str, Any] = {}
     trade_log = TradeLog(TRADES_FILE,
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 10)))
+    execution_log = ExecutionLog()
 
     # ── config helpers ───────────────────────────────────────────────────────
     def _is_dry_run() -> bool:
@@ -60,6 +65,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception:
             return True
         return cfg.is_dry_run
+
+    def _mode() -> str:
+        """Current order-routing mode: ``dry_run`` | ``live`` | ``live_sim``."""
+        try:
+            cfg.reload()
+        except Exception:
+            return "dry_run"
+        m = str(cfg.mode).lower()
+        return m if m in ("live", "live_sim") else "dry_run"
 
     def _seg_to_exch_seg() -> Dict[str, str]:
         return {k: str(v).upper() for k, v in (cfg.get("broker.segments") or {}).items()}
@@ -112,16 +126,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return [(sa, ya, "buy", qa), (sb, yb, "sell", qb)]
         return [(sa, ya, "sell", qa), (sb, yb, "buy", qb)]
 
-    def _spread_order(legs, dry_run: bool, label: str, verify_flat: bool = False) -> Dict:
-        """Execute both legs through the active broker (lot-multiplied,
-        segment-aware). Simulated when ``dry_run``; otherwise routed through the
-        safe :class:`SpreadExecutor` (limit orders, fill confirmation, orphan
-        recovery). Shared by the manual endpoints AND the auto-trader."""
+    def _spread_order(legs, label: str, verify_flat: bool = False) -> Dict:
+        """Execute both legs according to the current mode:
+          dry_run   → simulated, nothing leaves the process;
+          live_sim  → real SpreadExecutor against a SimBroker (no real orders);
+          live      → real SpreadExecutor against the connected broker.
+        Shared by the manual endpoints AND the auto-trader."""
+        mode = _mode()
         broker = active.get()
-        if not broker:
-            return {"success": False, "error": "No broker connected"}
 
-        if dry_run:
+        if mode == "dry_run":
+            if not broker:
+                return {"success": False, "error": "No broker connected"}
             results = []
             for seg, sym, side, qty in legs:
                 lot_size = broker.resolve_lot_size(seg, sym)
@@ -135,14 +151,21 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return {"success": True, "message": f"[DRY-RUN] Simulated: {', '.join(ids)}",
                     "results": results, "dry_run": True}
 
-        # LIVE — resolve each leg to units + token, then hand to the executor.
+        if mode == "live" and not broker:
+            return {"success": False, "error": "No broker connected"}
+
+        # live / live_sim → run the real executor (against the sim broker for sim).
+        executor = sim_executor if mode == "live_sim" else spread_executor
+        resolver = sim_broker if mode == "live_sim" else broker
         leg_orders = []
         for seg, sym, side, qty in legs:
-            lot_size = broker.resolve_lot_size(seg, sym)
-            tok = broker.resolve_token(seg, sym)
+            lot_size = resolver.resolve_lot_size(seg, sym)
+            tok = resolver.resolve_token(seg, sym)
             leg_orders.append(LegOrder(segment=seg, symbol=sym, side=side,
                                        units=qty * lot_size, token=tok))
-        return spread_executor.execute(leg_orders, label=label, verify_flat=verify_flat)
+        res = executor.execute(leg_orders, label=label, verify_flat=verify_flat)
+        execution_log.record(res, label, mode)        # telemetry
+        return res
 
     def _current_spread() -> Optional[float]:
         return signal_engine.get_signal().get("spread")
@@ -152,7 +175,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         per-leg prices (live: actual fills from the executor; dry-run: current
         LTP proxy), the resulting spread, the live z-score, and the trade name."""
         legs = _read_legs()
-        broker = active.get()
+        broker = sim_broker if _mode() == "live_sim" else active.get()
         meta: Dict = {"lot_size": 1, "leg_a_price": None, "leg_b_price": None,
                       "spread": _current_spread(), "zscore": None, "name": ""}
         if not _have_both_legs(legs):
@@ -183,40 +206,43 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return meta
 
     def _spread_execute(direction: str, lots: int, source: str = "manual") -> Dict:
-        if not active.get():
+        mode = _mode()
+        if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
         try:
             legs = _order_legs(direction, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _spread_order(legs, _is_dry_run(), "Order", verify_flat=True)
+        res = _spread_order(legs, "Order", verify_flat=True)
         if res.get("success"):
             m = _trade_meta(res)
             trade_log.record(action="OPEN", direction=direction, lots=lots,
-                             spread=m["spread"], dry_run=_is_dry_run(),
-                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source,
+                             spread=m["spread"], dry_run=(mode != "live"),
+                             status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"], zscore=m["zscore"],
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              name=m["name"])
         return res
 
-    def _spread_close(direction: str, lots: int, source: str = "manual") -> Dict:
-        if not active.get():
+    def _spread_close(direction: str, lots: int, source: str = "manual",
+                      reason: str = "") -> Dict:
+        mode = _mode()
+        if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
         close_dir = "SHORT_SPREAD" if direction == "LONG_SPREAD" else "LONG_SPREAD"
         try:
             legs = _order_legs(close_dir, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _spread_order(legs, _is_dry_run(), "Close")
+        res = _spread_order(legs, "Close")
         if res.get("success"):
             m = _trade_meta(res)
             trade_log.record(action="CLOSE", direction=direction, lots=lots,
-                             spread=m["spread"], dry_run=_is_dry_run(),
-                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source,
+                             spread=m["spread"], dry_run=(mode != "live"),
+                             status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"], zscore=m["zscore"],
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
-                             name=m["name"])
+                             name=m["name"], exit_reason=reason)
         return res
 
     # ── live leg prices (stream first, REST fallback) ────────────────────────
@@ -284,6 +310,30 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     spread_executor = SpreadExecutor(broker_fn=active.get, price_fn=_one_ltp,
                                      params_fn=_exec_params)
+
+    # ── live-sim: the real executor against a simulated broker (no real orders) ─
+    _sim = cfg.section("execution")
+
+    def _sim_lot_size(seg: str, sym: str) -> int:
+        b = active.get()
+        try:
+            return int(b.resolve_lot_size(seg, sym)) if b else 0
+        except Exception:
+            return 0
+
+    sim_broker = SimBroker(
+        real_price_fn=_one_ltp, lot_size_fn=_sim_lot_size,
+        slippage_pct=float(_sim.get("sim_slippage_pct", 0.03)),
+        slow_prob=float(_sim.get("sim_slow_prob", 0.25)),
+        reject_prob=float(_sim.get("sim_reject_prob", 0.0)),
+        orphan_prob=float(_sim.get("sim_orphan_prob", 0.0)),
+        orphan_symbols=set(_sim.get("sim_orphan_symbols", []) or []),
+        default_lot_size=int(_sim.get("sim_default_lot_size", 75)),
+    )
+    sim_executor = SpreadExecutor(
+        broker_fn=lambda: sim_broker,
+        price_fn=lambda seg, sym: sim_broker.get_streamed_ltp([sym]).get(sym.upper()),
+        params_fn=_exec_params)
 
     # ── signal + algo wiring ─────────────────────────────────────────────────
     def _signal_params() -> Dict:
@@ -746,10 +796,22 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     @app.route("/api/trading-mode", methods=["POST"])
     def api_trading_mode():
         data = request.get_json(force=True) or {}
-        mode = "live" if str(data.get("mode", "")).lower() == "live" else "dry_run"
+        m = str(data.get("mode", "")).lower()
+        mode = m if m in ("live", "live_sim") else "dry_run"
         cfg.set_mode(mode)
         logger.warning("Trading mode set to {}", mode.upper())
         return jsonify({"success": True, "mode": mode, "dry_run": _is_dry_run()})
+
+    @app.route("/api/execution", methods=["GET"])
+    def api_execution():
+        """Execution telemetry — recent live/live-sim executions with per-leg
+        fill vs reference, slippage, amendments, escalation and orphan recovery."""
+        return jsonify({"events": execution_log.all(), "stats": execution_log.stats()})
+
+    @app.route("/api/execution/clear", methods=["POST"])
+    def api_execution_clear():
+        execution_log.clear()
+        return jsonify({"success": True})
 
     # ── settings page + API ──────────────────────────────────────────────────
     @app.route("/settings")

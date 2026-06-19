@@ -282,7 +282,10 @@ class ArrowAutoTrader:
     def _exit(self, reason: str, z: float) -> None:
         if not self._pos:
             return
-        res = self._close(self._pos["direction"], self._pos["lots"]) or {}
+        try:
+            res = self._close(self._pos["direction"], self._pos["lots"], reason=reason) or {}
+        except TypeError:                       # close_fn without a reason kwarg
+            res = self._close(self._pos["direction"], self._pos["lots"]) or {}
         if res.get("success"):
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))
             self._pos = None

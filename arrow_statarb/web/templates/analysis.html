@@ -82,11 +82,12 @@
                     <th class="text-end">Leg A (entry→exit)</th>
                     <th class="text-end">Leg B (entry→exit)</th>
                     <th class="text-end">Held</th>
+                    <th>Exit</th>
                     <th class="text-end">Net P&amp;L</th>
                     <th class="text-end">Cum P&amp;L</th>
                     <th class="text-end pe-3">Mode</th>
                 </tr></thead>
-                <tbody id="j-body"><tr><td colspan="12" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
+                <tbody id="j-body"><tr><td colspan="13" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -124,7 +125,7 @@
         totEl.textContent = _rs(j.total_pnl); totEl.className = _pnlCls(Number(j.total_pnl||0));
         const body = document.getElementById('j-body');
         if (!trips.length) {
-            body.innerHTML = '<tr><td colspan="12" class="text-center text-secondary py-3">No completed trades yet</td></tr>';
+            body.innerHTML = '<tr><td colspan="13" class="text-center text-secondary py-3">No completed trades yet</td></tr>';
             return;
         }
         body.innerHTML = trips.map(x => {
@@ -139,6 +140,7 @@
                 <td class="text-end font-monospace">${_arrow(x.entry_leg_a, x.exit_leg_a)}</td>
                 <td class="text-end font-monospace">${_arrow(x.entry_leg_b, x.exit_leg_b)}</td>
                 <td class="text-end">${_held(x.held_sec)}</td>
+                <td><span class="badge ${({target:'bg-success',stop:'bg-danger',time_stop:'bg-warning text-dark'}[x.exit_reason])||'bg-secondary'}">${(x.exit_reason||'—').replace('_',' ')}</span></td>
                 <td class="text-end fw-bold ${_pnlCls(np)}">${_rs(np)}</td>
                 <td class="text-end font-monospace ${_pnlCls(Number(x.cum_pnl||0))}">${_rs(x.cum_pnl)}</td>
                 <td class="text-end pe-3"><span class="badge ${x.dry_run?'bg-warning text-dark':'bg-success'}">${x.status}</span></td></tr>`;

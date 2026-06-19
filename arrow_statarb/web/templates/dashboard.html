@@ -165,6 +165,50 @@
                 </div>
             </div>
         </div>
+
+        <!-- Trade Journal (round-trips, with exit reason) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-journal-text me-2"></i>Trade Journal</span>
+                <span class="small">Realized P&amp;L: <strong id="dj-total" class="text-secondary">₹0.00</strong>
+                    <span class="badge bg-secondary ms-1"><span id="dj-count">0</span></span></span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm mb-0 align-middle">
+                        <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
+                            <th class="ps-3">Closed</th><th>Dir</th><th class="text-end">Z in→out</th>
+                            <th class="text-end">Spread in→out</th><th class="text-end">Held</th>
+                            <th>Exit</th><th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Cum</th>
+                        </tr></thead>
+                        <tbody id="dj-body"><tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Execution Monitor (live / live-sim order execution telemetry) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-speedometer2 me-2"></i>Execution Monitor</span>
+                <span class="small text-secondary">
+                    avg slip <strong id="em-slip">—</strong> · avg fill <strong id="em-fill">—</strong> ·
+                    orphans <strong id="em-orphans">0</strong>
+                    <button class="btn btn-sm btn-outline-secondary ms-1" onclick="clearExecution()"><i class="bi bi-trash"></i></button></span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm mb-0 align-middle">
+                        <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
+                            <th class="ps-3">Time</th><th>Mode</th><th>Order</th><th>Leg</th><th>Type</th>
+                            <th class="text-end">Ref→Fill</th><th class="text-end">Slippage</th>
+                            <th class="text-center">Amend</th><th class="text-end pe-3">Status</th>
+                        </tr></thead>
+                        <tbody id="em-body"><tr><td colspan="9" class="text-center text-secondary py-3">No executions yet (live / live-sim only)</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- ════════════════ RIGHT COLUMN ════════════════ -->
@@ -187,6 +231,8 @@
                 <hr>
                 <div id="mode-help" class="text-center small text-primary mb-2">
                     Dry-run mode — signals fire but no real orders are placed</div>
+                <button class="btn btn-outline-info w-100 mb-2" id="to-sim" onclick="setMode('live_sim')">
+                    <i class="bi bi-cpu me-1"></i>Live-Sim (exercise real executor, no money)</button>
                 <button class="btn btn-outline-danger w-100" id="to-live" onclick="goLive()">
                     <i class="bi bi-lightning-charge me-1"></i>Go Live</button>
                 <button class="btn btn-outline-warning w-100 d-none" id="to-dryrun" onclick="setMode('dry_run')">
@@ -546,14 +592,17 @@
     async function pollMode() {
         try {
             const c = await fetch('/api/config').then(r => r.json());
+            const m = c.mode;
             const b = document.getElementById('algo-mode-badge');
-            b.className = 'badge ' + (c.dry_run ? 'bg-warning text-dark' : 'bg-danger');
-            b.textContent = c.dry_run ? 'DRY-RUN' : 'LIVE';
-            document.getElementById('mode-help').textContent = c.dry_run
-                ? 'Dry-run mode — signals fire but no real orders are placed'
-                : 'LIVE mode — real orders are transmitted to Arrow';
-            document.getElementById('to-live').classList.toggle('d-none', !c.dry_run);
-            document.getElementById('to-dryrun').classList.toggle('d-none', c.dry_run);
+            const meta = m === 'live' ? ['bg-danger', 'LIVE', 'LIVE mode — real orders are transmitted to Arrow']
+                : m === 'live_sim' ? ['bg-info text-dark', 'LIVE-SIM', 'Live-Sim — the real executor runs against a simulated broker (no real orders)']
+                : ['bg-warning text-dark', 'DRY-RUN', 'Dry-run mode — signals fire but no real orders are placed'];
+            b.className = 'badge ' + meta[0]; b.textContent = meta[1];
+            document.getElementById('mode-help').textContent = meta[2];
+            // Offer the two non-current modes; hide the active one.
+            document.getElementById('to-live').classList.toggle('d-none', m === 'live');
+            document.getElementById('to-sim').classList.toggle('d-none', m === 'live_sim');
+            document.getElementById('to-dryrun').classList.toggle('d-none', m === 'dry_run');
         } catch (e) {}
     }
     async function setMode(mode) {
@@ -588,6 +637,71 @@
                     <td class="text-end pe-3"><span class="badge ${x.dry_run?'bg-warning text-dark':'bg-success'}">${x.status}</span></td></tr>`;
             }).join('');
         } catch (e) {}
+    }
+
+    // ── Trade Journal (round-trips) ──────────────────────────────────────────
+    function _arrow2(a, b, d) { const f = v => (v==null?'—':Number(v).toFixed(d)); return `${f(a)}→${f(b)}`; }
+    function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
+    const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark', manual:'bg-secondary' };
+    async function pollJournal() {
+        try {
+            const j = await fetch('/api/trades/journal').then(x => x.json());
+            const trips = j.trips || [];
+            document.getElementById('dj-count').textContent = j.count || 0;
+            const tot = document.getElementById('dj-total');
+            tot.textContent = _rs(j.total_pnl); tot.className = Number(j.total_pnl)>0?'text-success':(Number(j.total_pnl)<0?'text-danger':'text-secondary');
+            const body = document.getElementById('dj-body');
+            if (!trips.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr>'; return; }
+            body.innerHTML = trips.map(x => {
+                const np = Number(x.net_pnl||0), npc = np>0?'text-success':(np<0?'text-danger':'');
+                const ex = x.exit_reason || '—';
+                return `<tr class="small"><td class="ps-3 font-monospace">${x.time}</td>
+                    <td><span class="badge ${x.direction==='LONG_SPREAD'?'bg-success':'bg-danger'}">${(x.direction||'').replace('_SPREAD','')}</span></td>
+                    <td class="text-end font-monospace">${_arrow2(x.entry_zscore, x.exit_zscore, 2)}</td>
+                    <td class="text-end font-monospace">${_arrow2(x.entry_spread, x.exit_spread, 1)}</td>
+                    <td class="text-end">${_held2(x.held_sec)}</td>
+                    <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}">${ex.replace('_',' ')}</span></td>
+                    <td class="text-end fw-bold ${npc}">${_rs(np)}</td>
+                    <td class="text-end pe-3 font-monospace">${_rs(x.cum_pnl)}</td></tr>`;
+            }).join('');
+        } catch (e) {}
+    }
+
+    // ── Execution Monitor (live / live-sim telemetry) ────────────────────────
+    async function pollExecution() {
+        try {
+            const r = await fetch('/api/execution').then(x => x.json());
+            const evs = r.events || [], st = r.stats || {};
+            document.getElementById('em-slip').textContent = st.avg_slippage_pct==null?'—':st.avg_slippage_pct.toFixed(3)+'%';
+            document.getElementById('em-fill').textContent = st.avg_fill_sec==null?'—':st.avg_fill_sec.toFixed(1)+'s';
+            document.getElementById('em-orphans').textContent = st.orphans || 0;
+            const body = document.getElementById('em-body');
+            if (!evs.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-secondary py-3">No executions yet (live / live-sim only)</td></tr>'; return; }
+            const rows = [];
+            evs.forEach(e => {
+                const modeBadge = e.mode==='live'?'bg-danger':(e.mode==='live_sim'?'bg-info text-dark':'bg-secondary');
+                (e.legs||[]).forEach((l, i) => {
+                    const slip = l.slippage_pct==null ? '—'
+                        : `<span class="${l.slippage_pct>0?'text-danger':'text-success'}">${l.slippage_pct>0?'+':''}${l.slippage_pct.toFixed(3)}%</span>`;
+                    const stat = e.orphan ? `<span class="badge bg-danger">orphan${e.recovered?'→recovered':'!'}</span>`
+                        : (l.status==='COMPLETE' ? `<span class="badge bg-success">filled</span>` : `<span class="badge bg-secondary">${l.status}</span>`);
+                    rows.push(`<tr class="small">
+                        <td class="ps-3 font-monospace">${i===0?e.time:''}</td>
+                        <td>${i===0?`<span class="badge ${modeBadge}">${e.mode==='live_sim'?'SIM':e.mode.toUpperCase()}</span>`:''}</td>
+                        <td>${i===0?(e.label||''):''}</td>
+                        <td class="font-monospace">${l.symbol} <span class="text-secondary">${l.side}</span></td>
+                        <td>${l.order_type||''}${l.escalated?' <span class="badge bg-warning text-dark">→MKT</span>':''}</td>
+                        <td class="text-end font-monospace">${l.ref_price==null?'—':Number(l.ref_price).toFixed(2)}→${l.fill_price==null?'—':Number(l.fill_price).toFixed(2)}</td>
+                        <td class="text-end">${slip}</td>
+                        <td class="text-center">${l.amend_count||0}</td>
+                        <td class="text-end pe-3">${stat}</td></tr>`);
+                });
+            });
+            body.innerHTML = rows.join('');
+        } catch (e) {}
+    }
+    async function clearExecution() {
+        try { await fetch('/api/execution/clear', { method:'POST' }); pollExecution(); } catch (e) {}
     }
 
     // ── Algorithm toggle + state ─────────────────────────────────────────────
@@ -724,6 +838,8 @@
     pollReconcile(); setInterval(pollReconcile, 4000);
     pollMarkets();  setInterval(pollMarkets, 5000);
     pollMode();     setInterval(pollMode, 3000);
+    pollJournal();  setInterval(pollJournal, 3000);
+    pollExecution(); setInterval(pollExecution, 2000);
     pollTrades();   setInterval(pollTrades, 3000);
     pollHistory();  setInterval(pollHistory, 1000);
     pollAlgoState(); setInterval(pollAlgoState, 1000);

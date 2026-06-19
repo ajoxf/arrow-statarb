@@ -83,8 +83,9 @@ class Config:
         return self.mode != "live"
 
     def set_mode(self, mode: str) -> None:
-        """Persist the trading mode back to settings.yaml."""
-        self._data["mode"] = "live" if str(mode).lower() == "live" else "dry_run"
+        """Persist the trading mode back to settings.yaml (dry_run | live_sim | live)."""
+        m = str(mode).lower()
+        self._data["mode"] = m if m in ("live", "live_sim") else "dry_run"
         self.save()
 
     def save(self) -> None:

@@ -42,7 +42,8 @@ class LegOrder:
 
     __slots__ = ("segment", "symbol", "side", "units", "token",
                  "order_id", "status", "order_type", "filled", "avg_price",
-                 "limit_price", "error", "unconfirmed", "amend_count", "recovery")
+                 "limit_price", "ref_price", "error", "unconfirmed", "amend_count",
+                 "recovery", "escalated")
 
     def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = ""):
         self.segment = segment
@@ -56,10 +57,12 @@ class LegOrder:
         self.filled = 0
         self.avg_price = 0.0
         self.limit_price: Optional[float] = None
+        self.ref_price: Optional[float] = None   # LTP at placement (slippage baseline)
         self.error = ""
         self.unconfirmed = False          # filled assumed (broker has no status API)
         self.amend_count = 0
         self.recovery: Optional[Dict] = None
+        self.escalated = False            # limit timed out → re-sent as MARKET
 
     @property
     def working(self) -> bool:
@@ -72,7 +75,9 @@ class LegOrder:
     def view(self) -> Dict:
         return {"order_id": self.order_id, "symbol": self.symbol, "side": self.side,
                 "status": self.status, "filled": self.filled, "avg_price": self.avg_price,
-                "limit_price": self.limit_price, "unconfirmed": self.unconfirmed,
+                "limit_price": self.limit_price, "ref_price": self.ref_price,
+                "order_type": self.order_type, "amend_count": self.amend_count,
+                "escalated": self.escalated, "unconfirmed": self.unconfirmed,
                 "error": self.error}
 
 
@@ -102,12 +107,13 @@ class SpreadExecutor:
         if broker is None:
             return self._fail(legs, "No broker connected")
         p = self._params_fn()
+        start = self._clock()
 
         if verify_flat and p.get("verify_flat_before_entry", True):
             clash = self._verify_flat(broker, legs)
             if clash:
                 logger.warning("{}: blocked — {}", label, clash)
-                return self._fail(legs, clash)
+                return dict(self._fail(legs, clash), elapsed_sec=0.0)
 
         for leg in legs:
             self._place(broker, leg, p)
@@ -115,6 +121,7 @@ class SpreadExecutor:
         self._await_fills(broker, legs, p)
         self._escalate(broker, legs, p)
 
+        elapsed = round(self._clock() - start, 2)
         filled = [l for l in legs if l.complete]
         failed = [l for l in legs if not l.complete]
 
@@ -123,12 +130,12 @@ class SpreadExecutor:
             unconf = any(l.unconfirmed for l in legs)
             tag = " (fills unconfirmed)" if unconf else ""
             logger.info("{}: both legs filled — {}{}", label, ids, tag)
-            return self._ok(legs, f"[LIVE] Filled: {ids}{tag}")
+            return dict(self._ok(legs, f"[LIVE] Filled: {ids}{tag}"), elapsed_sec=elapsed)
 
         if not filled:
             err = "; ".join(l.error or f"{l.symbol} not filled" for l in failed)
             logger.error("{}: no legs filled — {}", label, err)
-            return self._fail(legs, err)
+            return dict(self._fail(legs, err), elapsed_sec=elapsed)
 
         # ── ORPHAN: at least one leg filled, at least one did not ────────────
         recovered = self._recover_orphan(broker, filled, p)
@@ -137,7 +144,7 @@ class SpreadExecutor:
                f"{stuck}. " + ("Flattened filled leg(s)." if recovered
                                else "RECOVERY FAILED — check positions NOW."))
         logger.error("{}", msg)
-        return self._fail(legs, msg, orphan=True, recovered=recovered)
+        return dict(self._fail(legs, msg, orphan=True, recovered=recovered), elapsed_sec=elapsed)
 
     # ── placement / pricing ──────────────────────────────────────────────────
     @staticmethod
@@ -151,13 +158,18 @@ class SpreadExecutor:
     def _place(self, broker, leg: LegOrder, p: Dict, force_market: bool = False) -> None:
         use_limit = bool(p.get("use_limit_orders", True)) and not force_market
         order_type = "limit" if use_limit else "market"
+        # Reference price (slippage baseline) is captured on every placement.
+        ltp = self._price_fn(leg.segment, leg.symbol)
+        if ltp is not None:
+            leg.ref_price = ltp
         price = None
         if order_type == "limit":
-            ltp = self._price_fn(leg.segment, leg.symbol)
             price = self._limit_price(leg.side, ltp, float(p.get("limit_offset_pct", 0.05)) / 100.0)
             if price is None:                       # no live price → market fallback
                 order_type = "market"
                 logger.warning("Executor: no LTP for {} — placing MARKET", leg.symbol)
+        if force_market:
+            leg.escalated = True
 
         res = broker.submit_order(
             symbol=leg.symbol, side=leg.side, quantity=leg.units,

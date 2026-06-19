@@ -152,8 +152,10 @@
             try {
                 const cfg = await fetch('/api/config').then(r => r.json());
                 const mb = document.getElementById('mode-badge');
-                mb.className = 'badge ' + (cfg.dry_run ? 'bg-warning text-dark' : 'bg-danger');
-                mb.textContent = cfg.dry_run ? 'DRY-RUN' : 'LIVE';
+                const m = cfg.mode;
+                if (m === 'live') { mb.className = 'badge bg-danger'; mb.textContent = 'LIVE'; }
+                else if (m === 'live_sim') { mb.className = 'badge bg-info text-dark'; mb.textContent = 'LIVE-SIM'; }
+                else { mb.className = 'badge bg-warning text-dark'; mb.textContent = 'DRY-RUN'; }
             } catch (e) {}
         }
         // Nav Start/Stop reflects the auto-trader, synced across pages.

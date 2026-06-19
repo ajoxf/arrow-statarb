@@ -84,7 +84,14 @@ execution:
   poll_interval_sec: 0.4      # order-status (fill) poll cadence
   limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
   verify_flat_before_entry: true   # skip entry if a leg already has a position
+  # ── live_sim: simulated broker the real executor runs against (no real orders) ─
+  sim_slippage_pct: 0.03      # max adverse slippage on simulated fills (%)
+  sim_slow_prob: 0.25         # chance a limit needs a couple polls/amendment to fill
+  sim_reject_prob: 0.0        # chance a leg is rejected at placement
+  sim_orphan_prob: 0.0        # chance a leg never fills → exercise orphan recovery
+  sim_default_lot_size: 75    # lot size when no live broker is connected
 
-# dry_run never transmits orders (Arrow has no sandbox — this is a local gate).
-# Fail-safe: anything not exactly "live" is treated as dry_run.
-mode: dry_run          # dry_run | live
+# Order routing. dry_run never reaches a broker; live_sim runs the REAL executor
+# against a simulated broker (no real orders); live transmits to Arrow.
+# Fail-safe: anything not exactly "live"/"live_sim" is treated as dry_run.
+mode: dry_run          # dry_run | live_sim | live
