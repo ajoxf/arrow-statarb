@@ -739,8 +739,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "min_expected_value": f.get("min_expected_value", 0),
                     "time_stop_half_lives": f.get("time_stop_half_lives", 3.0),
                 },
-                "mode": {"paper_trading": cfg.is_dry_run,
-                         "algorithm_enabled": bool(cfg.get("algorithm_enabled", False))},
+                "mode": {"paper_trading": cfg.is_dry_run},
             })
 
         data = request.get_json(force=True) or {}
@@ -788,8 +787,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         md = data.get("mode") or {}
         if "paper_trading" in md:
             raw["mode"] = "dry_run" if md["paper_trading"] else "live"
-        if "algorithm_enabled" in md:
-            raw["algorithm_enabled"] = bool(md["algorithm_enabled"])
 
         cfg.save()
         # keep the running lot size in sync with lots_per_trade

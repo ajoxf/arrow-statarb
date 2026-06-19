@@ -104,12 +104,9 @@
                     <input class="form-check-input" type="checkbox" id="m-paper" role="switch">
                     <label class="form-check-label fw-bold" for="m-paper">Paper Trading Mode</label>
                 </div>
-                <div class="form-text mb-3">Orders are simulated without real execution (dry-run)</div>
-                <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" id="m-algo" role="switch">
-                    <label class="form-check-label fw-bold" for="m-algo">Algorithm Enabled</label>
-                </div>
-                <div class="form-text">Enable / disable automatic order placement</div>
+                <div class="form-text mb-2">Orders are simulated without real execution (dry-run)</div>
+                <div class="form-text">The auto-trader is started/stopped from the dashboard
+                    (the <strong>Start / Stop</strong> control), not here.</div>
             </div>
         </div>
     </div>
@@ -214,7 +211,6 @@
         _set('th-eh', s.trading_hours.end_hour);   _set('th-em', s.trading_hours.end_min);
 
         _setChk('m-paper', s.mode.paper_trading);
-        _setChk('m-algo', s.mode.algorithm_enabled);
 
         document.getElementById(s.filters.commission_basis === 'per_order' ? 'b-perorder' : 'b-perlot').checked = true;
         _set('b-brk', s.filters.brokerage_per_lot);
@@ -263,7 +259,6 @@
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,
-                algorithm_enabled: document.getElementById('m-algo').checked,
             },
         };
         const res = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'},
