@@ -50,8 +50,96 @@
         {% block content %}{% endblock %}
     </div>
 
+    <!-- ── Toasts (transient notifications) ─────────────────────────────────── -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index:1090">
+        <div id="ui-toast" class="toast align-items-center border-0" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body d-flex align-items-center gap-2">
+                    <i id="ui-toast-icon" class="bi"></i><span id="ui-toast-msg"></span>
+                </div>
+                <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Reusable confirm / prompt dialog ─────────────────────────────────── -->
+    <div class="modal fade" id="ui-dialog" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content shadow">
+                <div class="modal-header">
+                    <h5 class="modal-title d-flex align-items-center gap-2">
+                        <i id="ui-dialog-icon" class="bi"></i><span id="ui-dialog-title">Confirm</span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="ui-dialog-body" class="mb-2"></p>
+                    <input id="ui-dialog-input" type="text" class="form-control d-none" autocomplete="off">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" id="ui-dialog-cancel" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="ui-dialog-ok">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // ── Professional dialogs (toast + confirm/prompt modal) ──────────────
+        // Drop-in replacements for window.alert / confirm / prompt, shared by
+        // every page. uiConfirm/uiPrompt return Promises.
+        const _UI_VARIANT = {
+            success: { cls: 'text-bg-success', icon: 'bi-check-circle-fill', btn: 'btn-success' },
+            danger:  { cls: 'text-bg-danger',  icon: 'bi-exclamation-octagon-fill', btn: 'btn-danger' },
+            warning: { cls: 'text-bg-warning', icon: 'bi-exclamation-triangle-fill', btn: 'btn-warning' },
+            info:    { cls: 'text-bg-secondary', icon: 'bi-info-circle-fill', btn: 'btn-primary' },
+        };
+        function uiToast(message, variant = 'info') {
+            const v = _UI_VARIANT[variant] || _UI_VARIANT.info;
+            const el = document.getElementById('ui-toast');
+            el.className = 'toast align-items-center border-0 ' + v.cls;
+            document.getElementById('ui-toast-icon').className = 'bi ' + v.icon;
+            document.getElementById('ui-toast-msg').textContent = message;
+            bootstrap.Toast.getOrCreateInstance(el, { delay: 4000 }).show();
+        }
+        function _uiDialog({ title, body, confirmText = 'Confirm', variant = 'info',
+                            withInput = false, placeholder = '', match = null }) {
+            const v = _UI_VARIANT[variant] || _UI_VARIANT.info;
+            const el = document.getElementById('ui-dialog');
+            document.getElementById('ui-dialog-title').textContent = title;
+            document.getElementById('ui-dialog-body').innerHTML = body;
+            const icon = document.getElementById('ui-dialog-icon');
+            icon.className = 'bi ' + v.icon + ' text-' + (variant === 'info' ? 'primary' : variant);
+            const ok = document.getElementById('ui-dialog-ok');
+            ok.textContent = confirmText;
+            ok.className = 'btn ' + v.btn;
+            const input = document.getElementById('ui-dialog-input');
+            input.classList.toggle('d-none', !withInput);
+            input.value = ''; input.placeholder = placeholder;
+            if (match) ok.disabled = true;
+            const modal = bootstrap.Modal.getOrCreateInstance(el);
+            return new Promise(resolve => {
+                let done = false;
+                const finish = (val) => { if (!done) { done = true; resolve(val); } };
+                const onInput = () => { if (match) ok.disabled = (input.value.trim() !== match); };
+                const onOk = () => { finish(withInput ? input.value.trim() : true); modal.hide(); };
+                const onHide = () => {
+                    ok.removeEventListener('click', onOk);
+                    input.removeEventListener('input', onInput);
+                    el.removeEventListener('hidden.bs.modal', onHide);
+                    finish(withInput ? null : false);
+                };
+                ok.addEventListener('click', onOk);
+                input.addEventListener('input', onInput);
+                el.addEventListener('hidden.bs.modal', onHide);
+                modal.show();
+                if (withInput) setTimeout(() => input.focus(), 300);
+            });
+        }
+        function uiConfirm(opts) { return _uiDialog({ ...opts, withInput: false }); }
+        function uiPrompt(opts)  { return _uiDialog({ ...opts, withInput: true }); }
+
         // Shared: connection + mode badges (every page).
         async function refreshBadges() {
             try {
@@ -86,7 +174,7 @@
             const ep = running ? '/api/algo/stop' : '/api/algo/start';
             const r = await fetch(ep, { method: 'POST', headers: {'Content-Type':'application/json'},
                                        body: running ? null : JSON.stringify({}) }).then(x => x.json());
-            if (!running && !r.success) alert('Could not start: ' + (r.error || 'unknown'));
+            if (!running && !r.success) uiToast('Could not start: ' + (r.error || 'unknown'), 'danger');
             refreshAlgoPill();
         }
         refreshBadges();

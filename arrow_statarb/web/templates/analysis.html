@@ -106,9 +106,13 @@
         } catch (e) {}
     }
     async function resetExc() {
-        if (!confirm('Reset the z-score excursion counters?')) return;
-        try { await fetch('/api/signal/excursions/reset', { method: 'POST' }); loadExc(); }
-        catch (e) { alert('Reset failed: ' + e); }
+        const ok = await uiConfirm({ title: 'Reset excursion counters?', variant: 'warning',
+            body: 'This zeroes the session-cumulative ±2σ / ±3σ touch and reversion counts.',
+            confirmText: 'Reset' });
+        if (!ok) return;
+        try { await fetch('/api/signal/excursions/reset', { method: 'POST' }); loadExc();
+              uiToast('Excursion counters reset', 'success'); }
+        catch (e) { uiToast('Reset failed: ' + e, 'danger'); }
     }
     loadExc(); setInterval(loadExc, 2000);
 </script>

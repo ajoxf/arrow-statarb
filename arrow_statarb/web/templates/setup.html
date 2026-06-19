@@ -234,7 +234,7 @@
     function assignLeg(leg) {
         const seg = document.getElementById('p-segment').value;
         const sym = document.getElementById('p-contract').value;
-        if (!sym) { alert('Select a contract first.'); return; }
+        if (!sym) { uiToast('Select a contract first.', 'warning'); return; }
         document.getElementById(leg + '-sym').value = sym;
         document.getElementById(leg + '-mapping').value = seg + '|' + sym;
         updateSummary();
@@ -256,7 +256,7 @@
     async function saveLegAssignments() {
         const mA = document.getElementById('leg_a-mapping').value;
         const mB = document.getElementById('leg_b-mapping').value;
-        if (!mA || !mB) { alert('Assign both Leg A and Leg B first.'); return; }
+        if (!mA || !mB) { uiToast('Assign both Leg A and Leg B first.', 'warning'); return; }
         const payload = {
             leg_a: { mapping_id: mA, ratio: parseFloat(document.getElementById('leg_a-ratio').value) || 1 },
             leg_b: { mapping_id: mB, ratio: parseFloat(document.getElementById('leg_b-ratio').value) || 1 },
@@ -264,8 +264,8 @@
         const res = await fetch('/api/leg-assignments', {
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
         }).then(r => r.json());
-        if (res.success) { updateSummary(); alert('Leg assignments saved.'); }
-        else alert('Error: ' + res.error);
+        if (res.success) { updateSummary(); uiToast('Leg assignments saved.', 'success'); }
+        else uiToast('Error: ' + res.error, 'danger');
     }
 
     async function loadExisting() {

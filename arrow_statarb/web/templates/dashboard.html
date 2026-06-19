@@ -283,12 +283,16 @@
 
     // Clear the trade log (resets the Trades table, Total P&L and Win Rate).
     async function clearTrades() {
-        if (!confirm('Clear all recorded trades? This resets Total P&L and Win Rate.')) return;
+        const ok = await uiConfirm({ title: 'Clear all trades?', variant: 'danger',
+            body: 'This permanently clears the trade log and resets Total P&amp;L and Win Rate.',
+            confirmText: 'Clear trades' });
+        if (!ok) return;
         try {
             await fetch('/api/trades/clear', { method: 'POST' });
             pollTrades(); pollMode();
             log('Trade log cleared', 'log-warning');
-        } catch (e) { alert('Clear failed: ' + e); }
+            uiToast('Trade log cleared', 'success');
+        } catch (e) { uiToast('Clear failed: ' + e, 'danger'); }
     }
 
     // ── Charts (server signal series) ────────────────────────────────────────
@@ -482,7 +486,13 @@
         await fetch('/api/trading-mode', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode}) });
         pollMode(); refreshBadges();
     }
-    function goLive() { if (prompt('Type LIVE to enable real order transmission to Arrow:') === 'LIVE') setMode('live'); }
+    async function goLive() {
+        const val = await uiPrompt({ title: 'Enable LIVE trading', variant: 'danger',
+            body: '<strong>This transmits REAL orders to Arrow.</strong> Type '
+                + '<code>LIVE</code> below to confirm.',
+            placeholder: 'Type LIVE', match: 'LIVE', confirmText: 'Go Live' });
+        if (val === 'LIVE') { setMode('live'); uiToast('LIVE mode enabled — real orders will transmit', 'warning'); }
+    }
 
     // ── Trades table ─────────────────────────────────────────────────────────
     async function pollTrades() {
@@ -513,9 +523,9 @@
         const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('mt-lots').value) || 1 }) : null;
         try {
             const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body }).then(x=>x.json());
-            if (enabled && !r.success) { this.checked=false; alert('Could not start algo: ' + (r.error||'unknown')); return; }
+            if (enabled && !r.success) { this.checked=false; uiToast('Could not start algo: ' + (r.error||'unknown'), 'danger'); return; }
             log('Algorithm ' + (enabled?'STARTED':'STOPPED'), 'log-warning');
-        } catch (e) { this.checked=false; alert('Algo toggle failed: ' + e); }
+        } catch (e) { this.checked=false; uiToast('Algo toggle failed: ' + e, 'danger'); }
     });
     let _lastAlgoStatus = '';
     async function pollAlgoState() {
