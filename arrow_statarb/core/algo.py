@@ -248,15 +248,16 @@ class ArrowAutoTrader:
             held_sec = now - self._pos["entry_time"]
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
+            spread_now = sig.get("spread")
             if abs(z) >= stop_z:
                 snap["status"] = f"STOP (z={z:.2f})"
-                self._exit("stop", z)
+                self._exit("stop", z, spread_now)
             elif reverted:
                 snap["status"] = f"EXIT target (z={z:.2f})"
-                self._exit("target", z)
+                self._exit("target", z, spread_now)
             elif max_hold_sec > 0 and held_sec >= max_hold_sec:
                 snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s)"
-                self._exit("time_stop", z)
+                self._exit("time_stop", z, spread_now)
             else:
                 snap["status"] = f"holding {self._pos['direction']} (z={z:.2f})"
 
@@ -264,7 +265,13 @@ class ArrowAutoTrader:
 
     # ── actions (reuse the proven Arrow order path) ──────────────────────────
     def _enter(self, direction: str, lots: int, z: float, spread: float) -> None:
-        res = self._execute(direction, lots) or {}
+        # Pass the algo's DECISION z/spread (and source) so the journal records
+        # the exact signal it acted on, not a re-sampled value at order time.
+        try:
+            res = self._execute(direction, lots, source="algo",
+                                z=round(z, 4), spread=round(spread, 4)) or {}
+        except TypeError:                        # execute_fn without the kwargs (tests)
+            res = self._execute(direction, lots) or {}
         if res.get("success"):
             self._pos = {
                 "direction": direction, "lots": lots,
@@ -279,12 +286,15 @@ class ArrowAutoTrader:
             self.last_error = f"entry failed: {res.get('error')}"
             logger.error("ArrowAlgo: ENTER failed — {}", res.get("error"))
 
-    def _exit(self, reason: str, z: float) -> None:
+    def _exit(self, reason: str, z: float, spread: Optional[float] = None) -> None:
         if not self._pos:
             return
+        kw = {"source": "algo", "reason": reason, "z": round(z, 4)}
+        if spread is not None:
+            kw["spread"] = round(spread, 4)
         try:
-            res = self._close(self._pos["direction"], self._pos["lots"], reason=reason) or {}
-        except TypeError:                       # close_fn without a reason kwarg
+            res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
+        except TypeError:                       # close_fn without the extra kwargs (tests)
             res = self._close(self._pos["direction"], self._pos["lots"]) or {}
         if res.get("success"):
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))

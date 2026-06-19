@@ -689,8 +689,10 @@
             body.innerHTML = trips.map(x => {
                 const np = Number(x.net_pnl||0), npc = np>0?'text-success':(np<0?'text-danger':'');
                 const ex = x.exit_reason || '—';
+                const src = x.source==='algo' ? '<span class="badge bg-primary ms-1" style="font-size:.7em">algo</span>'
+                    : '<span class="badge bg-secondary ms-1" style="font-size:.7em">man</span>';
                 return `<tr class="small"><td class="ps-3 font-monospace">${x.time}</td>
-                    <td><span class="badge ${x.direction==='LONG_SPREAD'?'bg-success':'bg-danger'}">${(x.direction||'').replace('_SPREAD','')}</span></td>
+                    <td><span class="badge ${x.direction==='LONG_SPREAD'?'bg-success':'bg-danger'}">${(x.direction||'').replace('_SPREAD','')}</span>${src}</td>
                     <td class="text-end font-monospace">${_arrow2(x.entry_zscore, x.exit_zscore, 2)}</td>
                     <td class="text-end font-monospace">${_arrow2(x.entry_spread, x.exit_spread, 1)}</td>
                     <td class="text-end">${_held2(x.held_sec)}</td>

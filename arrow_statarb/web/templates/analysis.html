@@ -133,7 +133,8 @@
             return `<tr class="small">
                 <td class="ps-3 font-monospace">${x.time}</td>
                 <td>${x.name || '—'}</td>
-                <td><span class="badge ${x.direction==='LONG_SPREAD'?'bg-success':'bg-danger'}">${(x.direction||'').replace('_SPREAD','')}</span></td>
+                <td><span class="badge ${x.direction==='LONG_SPREAD'?'bg-success':'bg-danger'}">${(x.direction||'').replace('_SPREAD','')}</span>
+                    <span class="badge ${x.source==='algo'?'bg-primary':'bg-secondary'} ms-1" style="font-size:.7em">${x.source==='algo'?'algo':'man'}</span></td>
                 <td>${x.lots}×${x.lot_size||1}</td>
                 <td class="text-end font-monospace">${_arrow(x.entry_zscore, x.exit_zscore)}</td>
                 <td class="text-end font-monospace">${_arrow(x.entry_spread, x.exit_spread)}</td>

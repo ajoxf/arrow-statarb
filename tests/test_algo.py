@@ -172,3 +172,29 @@ def test_daily_loss_zero_means_disabled():
     state["sig"] = _sig(-2.5)
     algo._tick()
     assert calls["execute"] == [("LONG_SPREAD", 1)]   # 0 = no limit
+
+
+def test_entry_records_decision_z_and_source():
+    # The journal should capture the z/spread the algo ACTED on, via execute_fn
+    # kwargs — not a value re-sampled later.
+    seen = {}
+
+    def execute_fn(direction, lots, source=None, z=None, spread=None):
+        seen.update(direction=direction, source=source, z=z, spread=spread)
+        return {"success": True, "dry_run": True, "results": []}
+
+    def close_fn(direction, lots, source=None, reason=None, z=None, spread=None):
+        return {"success": True, "results": []}
+
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "tick_interval": 0.5, "cooldown": 300, "lot_multiplier": 75.0,
+              "enable_probability_filter": False, "time_stop_half_lives": 3.0}
+    state = {"sig": None}
+    algo = ArrowAutoTrader(signal_provider=lambda: state["sig"],
+                           params_provider=lambda: params,
+                           execute_fn=execute_fn, close_fn=close_fn)
+    state["sig"] = _sig(-2.6)         # z below -entry → LONG_SPREAD at z=-2.6
+    algo._tick()
+    assert seen["source"] == "algo"
+    assert seen["z"] == -2.6          # exact decision z, not re-sampled
+    assert seen["direction"] == "LONG_SPREAD"

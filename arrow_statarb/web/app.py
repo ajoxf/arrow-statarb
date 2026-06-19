@@ -205,7 +205,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         meta["zscore"] = signal_engine.get_signal().get("zscore")
         return meta
 
-    def _spread_execute(direction: str, lots: int, source: str = "manual") -> Dict:
+    def _spread_execute(direction: str, lots: int, source: str = "manual",
+                        z: Optional[float] = None, spread: Optional[float] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -216,16 +217,20 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         res = _spread_order(legs, "Order", verify_flat=True)
         if res.get("success"):
             m = _trade_meta(res)
+            # Prefer the caller's (algo's) decision z/spread over a re-sample.
             trade_log.record(action="OPEN", direction=direction, lots=lots,
-                             spread=m["spread"], dry_run=(mode != "live"),
+                             spread=(spread if spread is not None else m["spread"]),
+                             dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
-                             lot_size=m["lot_size"], zscore=m["zscore"],
+                             lot_size=m["lot_size"],
+                             zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              name=m["name"])
         return res
 
     def _spread_close(direction: str, lots: int, source: str = "manual",
-                      reason: str = "") -> Dict:
+                      reason: str = "", z: Optional[float] = None,
+                      spread: Optional[float] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -238,9 +243,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if res.get("success"):
             m = _trade_meta(res)
             trade_log.record(action="CLOSE", direction=direction, lots=lots,
-                             spread=m["spread"], dry_run=(mode != "live"),
+                             spread=(spread if spread is not None else m["spread"]),
+                             dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
-                             lot_size=m["lot_size"], zscore=m["zscore"],
+                             lot_size=m["lot_size"],
+                             zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              name=m["name"], exit_reason=reason)
         return res
