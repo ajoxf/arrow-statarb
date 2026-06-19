@@ -44,6 +44,25 @@
                 <div class="small text-secondary"><span id="x-max">0.00</span> / <span id="x-min">0.00</span></div>
             </div>
         </div>
+        <hr class="my-3">
+        <div style="height: 220px;"><canvas id="exc-canvas"></canvas></div>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clock-history me-2"></i>Excursion Log</span>
+        <span class="badge bg-secondary"><span id="x-evcount">0</span> events</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 360px; overflow-y: auto;">
+            <table class="table table-sm mb-0 align-middle">
+                <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
+                    <th class="ps-3">Time</th><th>Event</th><th>Band</th><th class="text-end pe-3">Z</th>
+                </tr></thead>
+                <tbody id="x-evbody"><tr><td colspan="4" class="text-center text-secondary py-3">No excursions yet</td></tr></tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -65,6 +84,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
     function _rs(v) { return '₹' + Number(v || 0).toFixed(2); }
     async function load() {
@@ -94,6 +114,25 @@
         const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
         return h ? `${h}h ${m}m` : `${m}m`;
     }
+    const _EXC_LABEL = {
+        touch_2_up: 'Touched +2σ', touch_2_down: 'Touched −2σ',
+        touch_3_up: 'Touched +3σ', touch_3_down: 'Touched −3σ',
+        reversion: 'Reverted to mean',
+    };
+    const _EXC_BADGE = {
+        touch_2_up: 'bg-primary', touch_2_down: 'bg-primary',
+        touch_3_up: 'bg-danger', touch_3_down: 'bg-danger', reversion: 'bg-success',
+    };
+    const excChart = new Chart(document.getElementById('exc-canvas'), {
+        type: 'bar',
+        data: { labels: ['↑ +2σ', '↓ −2σ', '↑ +3σ', '↓ −3σ', 'Reversions'],
+            datasets: [{ data: [0,0,0,0,0],
+                backgroundColor: ['#0d6efd','#0d6efd','#dc3545','#dc3545','#198754'],
+                borderRadius: 4 }] },
+        options: { responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+    });
     async function loadExc() {
         try {
             const e = await fetch('/api/signal/excursions').then(r => r.json());
@@ -103,6 +142,24 @@
             _t('x-max', Number(e.max_z).toFixed(2)); _t('x-min', Number(e.min_z).toFixed(2));
             _t('x-peak', Number(Math.max(Math.abs(e.max_z), Math.abs(e.min_z))).toFixed(2));
             _t('x-since', _dur(e.since_sec));
+            excChart.data.datasets[0].data = [e.touch_2_up, e.touch_2_down,
+                e.touch_3_up, e.touch_3_down, e.reversions];
+            excChart.update();
+            _t('x-evcount', e.event_count || 0);
+            const body = document.getElementById('x-evbody');
+            const evs = e.events || [];
+            if (!evs.length) {
+                body.innerHTML = '<tr><td colspan="4" class="text-center text-secondary py-3">No excursions yet</td></tr>';
+            } else {
+                body.innerHTML = evs.map(ev => {
+                    const band = ev.type === 'reversion' ? '—'
+                        : (ev.type.indexOf('_3_') >= 0 ? '3σ' : '2σ');
+                    const zc = ev.z > 0 ? 'text-danger' : (ev.z < 0 ? 'text-success' : '');
+                    return `<tr class="small"><td class="ps-3 font-monospace">${ev.time}</td>
+                        <td><span class="badge ${_EXC_BADGE[ev.type]||'bg-secondary'}">${_EXC_LABEL[ev.type]||ev.type}</span></td>
+                        <td>${band}</td><td class="text-end pe-3 font-monospace ${zc}">${Number(ev.z).toFixed(2)}</td></tr>`;
+                }).join('');
+            }
         } catch (e) {}
     }
     async function resetExc() {

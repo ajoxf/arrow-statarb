@@ -272,7 +272,9 @@
 {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
-    const REFRESH_MS = {{ display_refresh_ms }};
+    // Floor the price-poll interval: sub-second HTTP polling floods the dev
+    // server (each request allocates a large read buffer) and can exhaust memory.
+    const REFRESH_MS = Math.max(500, {{ display_refresh_ms }});
     const ENTRY_Z = {{ entry_zscore }};
     const STOP_Z  = {{ stop_zscore }};
 

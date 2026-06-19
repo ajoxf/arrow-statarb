@@ -45,6 +45,7 @@ class SignalEngine:
         # Counts how often z stretches out to ±2σ / ±3σ and how often a stretch
         # (|z| ≥ 2) reverts back through the mean — the mean-reversion frequency.
         self._exc: Dict = self._fresh_exc()
+        self._exc_events: Deque[Dict] = deque(maxlen=500)   # timestamped event log
         self._z_prev: Optional[float] = None
         # per-side arming so boundary chatter near a band isn't double-counted:
         # a band only re-arms once z falls back inside the re-arm zone (|z|<1).
@@ -106,26 +107,33 @@ class SignalEngine:
         """Zero the session-cumulative z-score excursion counters (Reset button)."""
         with self._lock:
             self._exc = self._fresh_exc()
+            self._exc_events.clear()
             self._reset_exc_state()
         logger.info("SignalEngine: excursion counters reset")
 
-    def get_excursions(self) -> Dict:
-        """Snapshot of the z-score excursion counters for the Analysis page."""
+    def get_excursions(self, max_events: int = 100) -> Dict:
+        """Snapshot of the z-score excursion counters + recent timestamped events
+        (newest first) for the Analysis page."""
         with self._lock:
             e = dict(self._exc)
+            events = list(self._exc_events)
         e["touch_2_total"] = e["touch_2_up"] + e["touch_2_down"]
         e["touch_3_total"] = e["touch_3_up"] + e["touch_3_down"]
         e["since_sec"] = round(max(0.0, time.time() - e.get("since", time.time())), 0)
         e["max_z"] = round(e["max_z"], 2)
         e["min_z"] = round(e["min_z"], 2)
+        e["event_count"] = len(events)
+        e["events"] = list(reversed(events))[:max_events]   # newest first, capped
         return e
 
-    def _tally_z(self, z: float) -> None:
+    def _tally_z(self, z: float, ts: Optional[float] = None) -> None:
         """Update excursion counters from the latest z. Called once per sample.
 
         A 'touch' of ±2σ/±3σ is counted on the OUTWARD crossing of that band,
         then disarmed until z returns inside |z|<1 (hysteresis). A 'reversion'
-        is counted when an open ≥2σ excursion crosses back through the mean (0)."""
+        is counted when an open ≥2σ excursion crosses back through the mean (0).
+        Each counted event is appended to the timestamped event log."""
+        ts = time.time() if ts is None else ts
         e = self._exc
         if z > e["max_z"]:
             e["max_z"] = z
@@ -135,16 +143,20 @@ class SignalEngine:
         # Upper side
         if z >= 2.0 and self._arm_2u:
             e["touch_2_up"] += 1; self._arm_2u = False; self._active_up = True
+            self._log_event("touch_2_up", z, ts)
         if z >= 3.0 and self._arm_3u:
             e["touch_3_up"] += 1; self._arm_3u = False
+            self._log_event("touch_3_up", z, ts)
         if z < 1.0:
             self._arm_2u = self._arm_3u = True
 
         # Lower side
         if z <= -2.0 and self._arm_2d:
             e["touch_2_down"] += 1; self._arm_2d = False; self._active_dn = True
+            self._log_event("touch_2_down", z, ts)
         if z <= -3.0 and self._arm_3d:
             e["touch_3_down"] += 1; self._arm_3d = False
+            self._log_event("touch_3_down", z, ts)
         if z > -1.0:
             self._arm_2d = self._arm_3d = True
 
@@ -154,7 +166,13 @@ class SignalEngine:
             if crossed_zero and (self._active_up or self._active_dn):
                 e["reversions"] += 1
                 self._active_up = self._active_dn = False
+                self._log_event("reversion", z, ts)
         self._z_prev = z
+
+    def _log_event(self, etype: str, z: float, ts: float) -> None:
+        self._exc_events.append({"ts": ts,
+                                 "time": time.strftime("%H:%M:%S", time.localtime(ts)),
+                                 "type": etype, "z": round(z, 2)})
 
     # ── sampling loop ────────────────────────────────────────────────────────
     def _loop(self) -> None:
@@ -180,7 +198,7 @@ class SignalEngine:
         with self._lock:
             self._samples.append((now, float(la), float(lb), spread))
             self._trim(now, window_sec)
-            self._update_excursions_locked()
+            self._update_excursions_locked(now)
 
     def push(self, leg_a: float, leg_b: float, ts: Optional[float] = None) -> None:
         """Inject a sample directly (used by tests)."""
@@ -188,9 +206,9 @@ class SignalEngine:
         with self._lock:
             self._samples.append((ts, float(leg_a), float(leg_b), float(leg_a) - float(leg_b)))
             self._trim(ts, self._p()["window_minutes"] * 60.0)
-            self._update_excursions_locked()
+            self._update_excursions_locked(ts)
 
-    def _update_excursions_locked(self) -> None:
+    def _update_excursions_locked(self, ts: Optional[float] = None) -> None:
         """Compute the current z over the window and feed the excursion tally.
         Must be called while holding ``self._lock``."""
         if len(self._samples) < 2:
@@ -199,7 +217,7 @@ class SignalEngine:
         mean, std = self.compute_stats(spreads)
         if std <= 1e-12:
             return
-        self._tally_z((spreads[-1] - mean) / std)
+        self._tally_z((spreads[-1] - mean) / std, ts)
 
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:

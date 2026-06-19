@@ -35,7 +35,7 @@ instruments:
 signal:
   window_minutes: 120         # rolling window for mean/std/z (data-collection size)
   sample_interval_sec: 0.5    # how often the server samples prices
-  display_refresh_ms: 50      # dashboard live-price poll cadence
+  display_refresh_ms: 500     # dashboard live-price poll cadence (min 500ms)
   min_signal_minutes: 10      # history required before any trade (ready gate)
   entry_zscore: 2.0
   exit_zscore: 0.0

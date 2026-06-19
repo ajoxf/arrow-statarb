@@ -101,3 +101,18 @@ def test_excursion_reset():
     eng.reset_excursions()
     e = eng.get_excursions()
     assert e["touch_2_up"] == 0 and e["reversions"] == 0
+
+
+def test_excursion_event_log_has_timestamps():
+    eng = SignalEngine(lambda: (None, None), lambda: _params())
+    eng._tally_z(0.0, ts=1000.0)
+    eng._tally_z(2.5, ts=1001.0)     # touch +2σ
+    eng._tally_z(0.0, ts=1002.0)     # reversion
+    e = eng.get_excursions()
+    assert e["event_count"] == 2
+    types = [ev["type"] for ev in e["events"]]   # newest first
+    assert types == ["reversion", "touch_2_up"]
+    assert e["events"][-1]["ts"] == 1001.0
+    assert "time" in e["events"][0] and e["events"][0]["z"] == 0.0
+    eng.reset_excursions()
+    assert eng.get_excursions()["event_count"] == 0
