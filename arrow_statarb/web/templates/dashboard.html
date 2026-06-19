@@ -76,11 +76,13 @@
                 <div class="d-flex justify-content-between align-items-center mb-1">
                     <span><i class="bi bi-hourglass-split me-1"></i>Data Collection
                         <span id="dc-badge" class="badge bg-secondary">offline</span></span>
-                    <span class="small text-secondary"><span id="dc-have">0</span> / <span id="dc-window">{{ window_minutes }}</span> min</span>
+                    <span class="small text-secondary"><span id="dc-have">0</span> / <span id="dc-gate">—</span> min to trade-ready</span>
                 </div>
-                <div class="progress mb-2" style="height:6px;">
+                <div class="progress mb-1" style="height:6px;">
                     <div id="dc-bar" class="progress-bar" style="width:0%"></div>
                 </div>
+                <div class="small text-secondary mb-2">Rolling window: <span id="dc-window">{{ window_minutes }}</span> min ·
+                    trades begin at the trade-ready gate (Settings → Min History Before Trading)</div>
                 <div id="dc-warn" class="small text-warning mb-2"></div>
                 <div style="height: 200px; position: relative;">
                     <canvas id="zscore-canvas"></canvas>
@@ -370,11 +372,17 @@
             document.getElementById('zm-std').textContent = _fmt(s.std, 4);
             document.getElementById('mt-spread').textContent = _fmt(s.spread);
             document.getElementById('mt-z').textContent = _fmt(s.zscore);
-            // Data Collection
-            const have = Number(s.span_minutes || 0), win = Number(s.window_minutes || {{ window_minutes }});
+            // Data Collection — progress is toward the trade-ready GATE
+            // (signal.min_signal_minutes), not the full rolling window.
+            const have = Number(s.span_minutes || 0);
+            const gate = Number(s.min_signal_minutes || 0);
+            const win = Number(s.window_minutes || {{ window_minutes }});
             document.getElementById('dc-have').textContent = have.toFixed(1);
+            document.getElementById('dc-gate').textContent = gate;
             document.getElementById('dc-window').textContent = win;
-            document.getElementById('dc-bar').style.width = Math.min(100, 100*have/win) + '%';
+            const bar = document.getElementById('dc-bar');
+            bar.style.width = Math.min(100, gate > 0 ? 100*have/gate : 0) + '%';
+            bar.className = 'progress-bar' + (s.ready ? ' bg-success' : '');
             const badge = document.getElementById('dc-badge');
             const warn = document.getElementById('dc-warn');
             const noData = (s.spread == null);   // engine runs always; gate on real prices

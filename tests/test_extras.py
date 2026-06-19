@@ -108,3 +108,37 @@ def test_trade_log_day_pnl_scopes_to_today(tmp_path):
     tl._trades.append({"ts": _t.time(), "action": "CLOSE", "net_pnl": -120.0})
     tl._trades.append({"ts": _t.time(), "action": "CLOSE", "net_pnl": 30.0})
     assert tl.day_pnl() == -90.0       # only today's -120 + 30
+
+def test_trade_log_pnl_scales_with_lot_size(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0,
+              dry_run=False, status="LIVE", lot_size=75)
+    rec = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=110.0,
+                    dry_run=False, status="LIVE", lot_size=75)
+    # +10 spread move × 1 lot × 75 units = 750 (not 10).
+    assert rec["spread_pnl"] == 750.0
+    assert rec["net_pnl"] == 750.0
+
+
+def test_trade_log_round_trips_detail(tmp_path):
+    import time as _t
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="SHORT_SPREAD", lots=2, spread=50.0,
+              dry_run=True, status="DRY-RUN", lot_size=25, zscore=2.4,
+              leg_a_price=500.0, leg_b_price=450.0, name="A − B")
+    _t.sleep(0.01)
+    tl.record(action="CLOSE", direction="SHORT_SPREAD", lots=2, spread=40.0,
+              dry_run=True, status="DRY-RUN", lot_size=25, zscore=0.1,
+              leg_a_price=495.0, leg_b_price=455.0, name="A − B")
+    j = tl.round_trips()
+    assert j["count"] == 1
+    trip = j["trips"][0]
+    assert trip["name"] == "A − B"
+    assert trip["entry_zscore"] == 2.4 and trip["exit_zscore"] == 0.1
+    assert trip["entry_leg_a"] == 500.0 and trip["exit_leg_b"] == 455.0
+    assert trip["entry_spread"] == 50.0 and trip["exit_spread"] == 40.0
+    # SHORT profits when spread falls: (50-40) × 2 × 25 = 500
+    assert trip["spread_pnl"] == 500.0
+    assert trip["held_sec"] is not None and trip["held_sec"] >= 0
+    assert trip["cum_pnl"] == trip["net_pnl"]
+    assert j["total_pnl"] == 500.0

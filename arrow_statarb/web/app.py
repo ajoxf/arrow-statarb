@@ -147,6 +147,41 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def _current_spread() -> Optional[float]:
         return signal_engine.get_signal().get("spread")
 
+    def _trade_meta(res: Dict) -> Dict:
+        """Capture per-trade journal detail: the contract lot size, the EXECUTED
+        per-leg prices (live: actual fills from the executor; dry-run: current
+        LTP proxy), the resulting spread, the live z-score, and the trade name."""
+        legs = _read_legs()
+        broker = active.get()
+        meta: Dict = {"lot_size": 1, "leg_a_price": None, "leg_b_price": None,
+                      "spread": _current_spread(), "zscore": None, "name": ""}
+        if not _have_both_legs(legs):
+            return meta
+        meta["name"] = f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
+        try:
+            meta["lot_size"] = int(broker.resolve_lot_size(
+                legs["leg_a"]["segment"], legs["leg_a"]["symbol"]))
+        except Exception:
+            pass
+        # Executed fill prices from the live executor results, keyed by symbol.
+        by_sym: Dict[str, float] = {}
+        for r in (res.get("results") or []):
+            ap = r.get("avg_price")
+            if ap:
+                by_sym[str(r.get("symbol", "")).upper()] = float(ap)
+        a = by_sym.get(legs["leg_a"]["symbol"].upper())
+        b = by_sym.get(legs["leg_b"]["symbol"].upper())
+        if a is None or b is None:               # dry-run / no fill price → live LTP
+            la, lb = _leg_prices()
+            a = a if a is not None else la
+            b = b if b is not None else lb
+        meta["leg_a_price"] = a
+        meta["leg_b_price"] = b
+        if a is not None and b is not None:
+            meta["spread"] = round(a - b, 4)
+        meta["zscore"] = signal_engine.get_signal().get("zscore")
+        return meta
+
     def _spread_execute(direction: str, lots: int, source: str = "manual") -> Dict:
         if not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -156,9 +191,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return {"success": False, "error": str(exc)}
         res = _spread_order(legs, _is_dry_run(), "Order", verify_flat=True)
         if res.get("success"):
+            m = _trade_meta(res)
             trade_log.record(action="OPEN", direction=direction, lots=lots,
-                             spread=_current_spread(), dry_run=_is_dry_run(),
-                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source)
+                             spread=m["spread"], dry_run=_is_dry_run(),
+                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source,
+                             lot_size=m["lot_size"], zscore=m["zscore"],
+                             leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
+                             name=m["name"])
         return res
 
     def _spread_close(direction: str, lots: int, source: str = "manual") -> Dict:
@@ -171,9 +210,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return {"success": False, "error": str(exc)}
         res = _spread_order(legs, _is_dry_run(), "Close")
         if res.get("success"):
+            m = _trade_meta(res)
             trade_log.record(action="CLOSE", direction=direction, lots=lots,
-                             spread=_current_spread(), dry_run=_is_dry_run(),
-                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source)
+                             spread=m["spread"], dry_run=_is_dry_run(),
+                             status="DRY-RUN" if _is_dry_run() else "LIVE", source=source,
+                             lot_size=m["lot_size"], zscore=m["zscore"],
+                             leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
+                             name=m["name"])
         return res
 
     # ── live leg prices (stream first, REST fallback) ────────────────────────
@@ -890,6 +933,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     @app.route("/api/trades", methods=["GET"])
     def api_trades():
         return jsonify({"trades": trade_log.all(), "stats": trade_log.stats()})
+
+    @app.route("/api/trades/journal", methods=["GET"])
+    def api_trades_journal():
+        """Round-trip trades with full entry/exit detail for the Trade Journal."""
+        return jsonify(trade_log.round_trips())
 
     @app.route("/api/trades/clear", methods=["POST"])
     def api_trades_clear():
