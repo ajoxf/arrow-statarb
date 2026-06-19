@@ -930,6 +930,60 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return jsonify(out)
 
     # ── trades table ─────────────────────────────────────────────────────────
+    @app.route("/api/funds", methods=["GET"])
+    def api_funds():
+        """Funds / margin / notional for the dashboard's Funds & Margin card.
+        Margin utilized, available and equity come straight from the broker
+        (Arrow sets the real SPAN+exposure margin); notional comes from the open
+        exchange position, or a prospective estimate (LTP × lot × lots) when flat."""
+        out = {"connected": False, "currency": "INR",
+               "available": None, "used": None, "equity": None, "cash": None,
+               "margin_ratio": None, "lots": int(_algo_lots["lots"]),
+               "leg_a_notional": 0.0, "leg_b_notional": 0.0, "notional": 0.0,
+               "notional_prospective": True}
+        broker = active.get()
+        if not broker:
+            return jsonify(out)
+        out["connected"] = True
+        try:
+            f = broker.get_funds() if hasattr(broker, "get_funds") else {}
+        except Exception:
+            f = {}
+        for k in ("available", "used", "equity", "cash"):
+            out[k] = f.get(k)
+        if out["used"] is not None and out["equity"]:
+            try:
+                out["margin_ratio"] = round(100.0 * out["used"] / out["equity"], 2)
+            except ZeroDivisionError:
+                pass
+        legs = _read_legs()
+        if _have_both_legs(legs):
+            positions = {}
+            try:
+                positions = {str(p.get("symbol", "")).upper(): p
+                             for p in (broker.get_positions() or [])}
+            except Exception:
+                positions = {}
+            la, lb = _leg_prices()
+            any_open = False
+            for lk, ltp in (("leg_a", la), ("leg_b", lb)):
+                sym = legs[lk]["symbol"]
+                p = positions.get(sym.upper())
+                qty = abs(int(p.get("net_quantity") or 0)) if p else 0
+                if qty:
+                    any_open = True
+                    price = float(p.get("ltp") or ltp or 0)
+                else:                      # flat → prospective size for the configured lots
+                    try:
+                        qty = int(broker.resolve_lot_size(legs[lk]["segment"], sym)) * int(_algo_lots["lots"])
+                    except Exception:
+                        qty = 0
+                    price = float(ltp or 0)
+                out[f"{lk}_notional"] = round(price * qty, 2)
+            out["notional"] = round(out["leg_a_notional"] + out["leg_b_notional"], 2)
+            out["notional_prospective"] = not any_open
+        return jsonify(out)
+
     @app.route("/api/trades", methods=["GET"])
     def api_trades():
         return jsonify({"trades": trade_log.all(), "stats": trade_log.stats()})

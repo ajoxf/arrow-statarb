@@ -121,3 +121,20 @@ def test_positions_parse_titlecase(arrow_broker):
     assert pos[0]["net_quantity"] == 75
     assert pos[0]["average_price"] == pytest.approx(25000.0)
     assert pos[0]["pnl"] == pytest.approx(750.0)
+
+
+def test_get_funds_normalizes_user_limits(arrow_broker):
+    arrow_broker._client.get_user_limits = lambda: {
+        "AvailableMargin": "50000.5", "MarginUsed": "12000", "Net": "62000",
+    }
+    f = arrow_broker.get_funds()
+    assert f["available"] == pytest.approx(50000.5)
+    assert f["used"] == pytest.approx(12000.0)
+    assert f["equity"] is None or isinstance(f["equity"], float)
+
+
+def test_get_funds_empty_when_not_connected():
+    from arrow_statarb.brokers.arrow_broker import ArrowBroker
+    b = ArrowBroker(config={"app_id": "x"})
+    f = b.get_funds()
+    assert f["available"] is None and f["used"] is None

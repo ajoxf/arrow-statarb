@@ -99,6 +99,12 @@ class BaseBroker(ABC):
     def get_account_info(self) -> Dict:
         """Account balance, margin, etc."""
 
+    def get_funds(self) -> Dict:
+        """Normalized funds/margin pulled from the broker:
+        ``{available, used, equity, cash, raw}`` (₹). Each value is ``None`` when
+        the broker doesn't report it. Brokers override to map their own fields."""
+        return {"available": None, "used": None, "equity": None, "cash": None, "raw": {}}
+
     # ── instrument resolution / picker ───────────────────────────────────────
     @abstractmethod
     def resolve_lot_size(self, exchange_segment: str, symbol: str) -> int:

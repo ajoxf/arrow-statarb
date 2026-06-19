@@ -1001,6 +1001,28 @@ class ArrowBroker(BaseBroker):
             logger.warning("ArrowBroker: get_account_info failed — {}", exc)
             return {}
 
+    def get_funds(self) -> Dict:
+        """Normalized funds/margin from Arrow's user limits. Field names vary by
+        build, so this is tolerant — anything it can't read is ``None``."""
+        raw = self.get_account_info() or {}
+
+        def _f(*keys):
+            v = _dig(raw, *keys)
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "available": _f("availableMargin", "availablecash", "cashAvailable",
+                            "marginAvailable", "availableBalance", "available", "net"),
+            "used": _f("marginUsed", "usedMargin", "utilizedMargin", "marginUtilized",
+                       "utilisedMargin", "marginused", "spanMargin", "span"),
+            "equity": _f("equity", "netWorth", "collateral", "balance", "cashBalance"),
+            "cash": _f("cash", "cashBalance", "openingBalance", "payin"),
+            "raw": raw,
+        }
+
     # ── Token (for symbol lookup — Arrow uses symbols directly) ───────────────
 
     def resolve_token(self, exchange_segment: str, symbol: str) -> str:
