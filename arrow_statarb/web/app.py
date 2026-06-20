@@ -100,7 +100,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     active = ActiveBroker()
     _ltp_cache: Dict[str, Any] = {}
     trade_log = TradeLog(TRADES_FILE,
-                         brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 10)))
+                         brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 20)))
     execution_log = ExecutionLog()
 
     # ── config helpers ───────────────────────────────────────────────────────
@@ -447,7 +447,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "commission_basis": str(f.get("commission_basis", "per_lot")),
             "min_win_probability": float(f.get("min_win_probability", 0.60)),
             "min_expected_value": float(f.get("min_expected_value", 0.0)),
-            "brokerage_per_lot": float(f.get("brokerage_per_lot", 10.0)),
+            "brokerage_per_lot": float(f.get("brokerage_per_lot", 20.0)),
             "slippage_per_lot": float(f.get("slippage_per_lot", 5.0)),
             "time_stop_half_lives": float(f.get("time_stop_half_lives", 3.0)),
             "trading_hours": cfg.section("trading_hours"),
@@ -1044,7 +1044,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "filters": {
                     "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
                     "commission_basis": f.get("commission_basis", "per_lot"),
-                    "brokerage_per_lot": f.get("brokerage_per_lot", 10),
+                    "brokerage_per_lot": f.get("brokerage_per_lot", 20),
                     "slippage_per_lot": f.get("slippage_per_lot", 5),
                     "min_win_probability": f.get("min_win_probability", 0.60),
                     "min_expected_value": f.get("min_expected_value", 0),
@@ -1095,7 +1095,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             fl["enable_probability_filter"] = bool(fd["enable_probability_filter"])
         if "commission_basis" in fd:
             fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
-        for k, d in (("brokerage_per_lot", 10.0), ("slippage_per_lot", 5.0),
+        for k, d in (("brokerage_per_lot", 20.0), ("slippage_per_lot", 5.0),
                      ("min_win_probability", 0.60), ("min_expected_value", 0.0),
                      ("time_stop_half_lives", 3.0)):
             if k in fd:
@@ -1129,7 +1129,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if z is None or std is None or not sig.get("ready"):
             return jsonify(out)
         pf = ProbabilityFilter(
-            commission_per_lot=float(f.get("brokerage_per_lot", 10)) * 2.0,
+            commission_per_lot=float(f.get("brokerage_per_lot", 20)) * 2.0,
             slippage_per_lot=float(f.get("slippage_per_lot", 5)) * 2.0,
             commission_basis=str(f.get("commission_basis", "per_lot")),
             lot_multiplier=_lot_multiplier(),

@@ -22,7 +22,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class TradeLog:
-    def __init__(self, path: Path, brokerage_per_lot: float = 10.0):
+    def __init__(self, path: Path, brokerage_per_lot: float = 20.0):
         self.path = Path(path)
         self.brokerage_per_lot = brokerage_per_lot
         self._lock = threading.Lock()

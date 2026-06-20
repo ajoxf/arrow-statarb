@@ -178,7 +178,7 @@ class ArrowAutoTrader:
         per lot PER LEG, one-way → ×2 legs (the filter's own ×2 covers
         entry+exit). lot_multiplier converts σ (₹/unit) to ₹ per lot."""
         return ProbabilityFilter(
-            commission_per_lot=float(p.get("brokerage_per_lot", 10.0)) * 2.0,
+            commission_per_lot=float(p.get("brokerage_per_lot", 20.0)) * 2.0,
             slippage_per_lot=float(p.get("slippage_per_lot", 5.0)) * 2.0,
             commission_basis=str(p.get("commission_basis", "per_lot")),
             lot_multiplier=float(p.get("lot_multiplier", 1.0)),
