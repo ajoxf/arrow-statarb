@@ -117,13 +117,14 @@ def test_max_entry_zscore_cap_disabled_by_default():
     assert calls["execute"] == [("LONG_SPREAD", 1)]
 
 
-def _failing_exit_algo(ceiling):
+def _failing_exit_algo(ceiling, backoff=0.0):
     """Algo whose close always fails, to exercise the exit-failure ceiling."""
     counts = {"close": 0}
     holder = {"sig": _sig(-2.5)}
     params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
               "confirmation_ticks": 1, "enable_probability_filter": False,
-              "cooldown": 300, "max_exit_failures": ceiling}
+              "cooldown": 300, "max_exit_failures": ceiling,
+              "exit_retry_backoff": backoff, "exit_retry_backoff_max": 60}
     a = ArrowAutoTrader(
         signal_provider=lambda: holder["sig"],
         params_provider=lambda: params,
@@ -159,6 +160,57 @@ def test_exit_failure_ceiling_unlimited_when_zero():
     a._tick(); a._tick(); a._tick()
     assert not a._exit_halted                    # 0 = never halts
     assert counts["close"] >= 3                  # keeps retrying every tick
+
+
+def test_exit_retry_backoff_spaces_attempts():
+    a, holder, counts = _failing_exit_algo(ceiling=0, backoff=10)
+    a._tick()                                    # enter
+    holder["sig"] = _sig(-5.0)                   # stop condition
+    a._tick()                                    # 1st exit attempt → fails, backoff armed
+    assert counts["close"] == 1
+    assert a._exit_retry_at > time.time()
+    a._tick()                                    # inside backoff window → skipped
+    assert counts["close"] == 1
+    assert "exit retry in" in a._snap["status"]
+    a._exit_retry_at = 0.0                        # simulate the backoff elapsing
+    a._tick()
+    assert counts["close"] == 2                  # retried after backoff
+
+
+def test_exit_retry_backoff_grows_exponentially():
+    a, holder, counts = _failing_exit_algo(ceiling=0, backoff=4)
+    a._tick(); holder["sig"] = _sig(-5.0)
+    a._tick()                                    # failure 1 → delay 4 × 2^0 = 4s
+    d1 = a._exit_retry_at - time.time()
+    a._exit_retry_at = 0.0
+    a._tick()                                    # failure 2 → delay 4 × 2^1 = 8s
+    d2 = a._exit_retry_at - time.time()
+    assert d2 > d1                               # backoff grows with each failure
+
+
+def test_restore_cooldown_blocks_entry_after_restart():
+    a, calls = _algo({"confirmation_ticks": 1})
+    a.restore_cooldown(time.time() + 120)
+    assert a.get_state()["cooldown_s"] > 0
+    _algo.sig = _sig(-2.5)                        # would normally enter
+    a._tick()
+    assert not calls["execute"]                  # cooldown blocks the entry
+    assert a._snap["status"] == "cooldown"
+    # a past timestamp is ignored
+    b, _ = _algo()
+    assert b.restore_cooldown(time.time() - 5) is False
+
+
+def test_trade_log_last_close_time(tmp_path):
+    tl = TradeLog(tmp_path / "t.json")
+    assert tl.last_close_time() is None
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0,
+              dry_run=True, status="DRY-RUN", source="algo")
+    tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=101.0,
+              dry_run=True, status="DRY-RUN", source="algo")
+    assert tl.last_close_time() is not None
+    assert tl.last_close_time(source="algo") is not None
+    assert tl.last_close_time(source="manual") is None
 
 
 def test_trading_hours_window():

@@ -130,6 +130,18 @@ class TradeLog:
                             "dry_run": bool(rec.get("dry_run", False))}
         return None
 
+    def last_close_time(self, source: Optional[str] = None) -> Optional[float]:
+        """Timestamp of the most recent CLOSE event (optionally filtered by
+        ``source``, e.g. ``"algo"``). Used to restore the algo's entry cooldown
+        across a restart. Returns ``None`` if there is no matching close."""
+        with self._lock:
+            for rec in reversed(self._trades):
+                if rec.get("action") == "CLOSE" and (source is None
+                                                     or rec.get("source") == source):
+                    ts = rec.get("ts")
+                    return float(ts) if ts is not None else None
+        return None
+
     def day_pnl(self, now_ts: Optional[float] = None) -> float:
         """Realized net P&L (sum of ``net_pnl``) for the current IST trading day.
         Used to enforce the daily-loss limit. Includes brokerage; counts every

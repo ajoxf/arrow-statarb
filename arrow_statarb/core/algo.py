@@ -77,6 +77,7 @@ class ArrowAutoTrader:
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._exit_failures = 0                    # consecutive failed exit attempts
         self._exit_halted = False                  # ceiling hit → stop auto-exit retries
+        self._exit_retry_at = 0.0                  # don't re-attempt an exit before this (backoff)
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
         self.running = False
         self.last_error = ""
@@ -127,6 +128,22 @@ class ArrowAutoTrader:
                        direction, self._pos["lots"])
         return True
 
+    def restore_cooldown(self, until_ts: float) -> bool:
+        """Re-arm the entry cooldown after a restart so a stop/exit right before
+        shutdown doesn't allow an immediate re-entry. ``until_ts`` is an absolute
+        epoch time (last close + cooldown_sec); ignored if already in the past."""
+        try:
+            until = float(until_ts)
+        except (TypeError, ValueError):
+            return False
+        if until <= time.time():
+            return False
+        with self._lock:
+            self._cooldown_until = max(self._cooldown_until, until)
+        logger.info("ArrowAlgo: restored cooldown — {:.0f}s remaining",
+                    self._cooldown_until - time.time())
+        return True
+
     def get_state(self) -> Dict:
         with self._lock:
             return {
@@ -137,6 +154,7 @@ class ArrowAutoTrader:
                 "cooldown_s": max(0.0, round(self._cooldown_until - time.time(), 1)),
                 "exit_failures": self._exit_failures,
                 "exit_halted": self._exit_halted,
+                "exit_retry_s": max(0.0, round(self._exit_retry_at - time.time(), 1)),
                 "last_error": self.last_error,
             }
 
@@ -274,6 +292,11 @@ class ArrowAutoTrader:
                 snap["status"] = (f"EXIT HALTED ({exit_reason}, z={z:.2f}) — "
                                   f"{self._exit_failures} consecutive failures; "
                                   f"close manually")
+            elif exit_reason and now < self._exit_retry_at:
+                # Backoff window after a failed exit — wait before re-attempting.
+                wait = self._exit_retry_at - now
+                snap["status"] = (f"exit retry in {wait:.0f}s (backoff after "
+                                  f"{self._exit_failures} failure(s); {exit_reason}, z={z:.2f})")
             elif exit_reason == "stop":
                 snap["status"] = f"STOP (z={z:.2f})"
                 self._exit("stop", z, spread_now)
@@ -326,6 +349,7 @@ class ArrowAutoTrader:
             self._consec_above = self._consec_below = 0
             self._exit_failures = 0                 # fresh position → clean exit slate
             self._exit_halted = False
+            self._exit_retry_at = 0.0
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
         else:
             self.last_error = f"entry failed: {res.get('error')}"
@@ -346,18 +370,31 @@ class ArrowAutoTrader:
             self._pos = None
             self._exit_failures = 0
             self._exit_halted = False
+            self._exit_retry_at = 0.0
             cooldown = float(self._params().get("cooldown", 300))
             self._cooldown_until = time.time() + cooldown
         else:
             # Track consecutive failures; after the ceiling, halt auto-exit retries
             # so we alert the human instead of cancel-spamming the broker forever.
             self._exit_failures += 1
-            ceiling = int(self._params().get("max_exit_failures", 0) or 0)
+            p = self._params()
+            ceiling = int(p.get("max_exit_failures", 0) or 0)
             if ceiling > 0 and self._exit_failures >= ceiling:
                 self._exit_halted = True
+            # Exponential backoff before the next attempt: base × 2^(n-1), capped.
+            base = float(p.get("exit_retry_backoff", 0) or 0)
+            delay = 0.0
+            if base > 0 and not self._exit_halted:
+                cap = float(p.get("exit_retry_backoff_max", 60) or 60)
+                delay = min(base * (2 ** (self._exit_failures - 1)), cap)
+                self._exit_retry_at = time.time() + delay
             self.last_error = f"exit failed (x{self._exit_failures}): {res.get('error')}"
-            plan = ("HALTING auto-exit — manual intervention required"
-                    if self._exit_halted else "will retry next tick (position still open)")
+            if self._exit_halted:
+                plan = "HALTING auto-exit — manual intervention required"
+            elif delay > 0:
+                plan = f"retry in {delay:.0f}s (backoff; position still open)"
+            else:
+                plan = "will retry next tick (position still open)"
             logger.error(
                 "ArrowAlgo: EXIT FAILED — reason={} attempt={} ceiling={} orphan={} "
                 "recovered={} err={} → {}",

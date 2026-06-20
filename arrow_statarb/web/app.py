@@ -437,6 +437,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
+            "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
+            "exit_retry_backoff_max": float(cfg.get("execution.exit_retry_backoff_max_sec", 60) or 60),
             "lots": lots,
             "lot_multiplier": _lot_multiplier(),
             "max_daily_loss": float(r.get("max_daily_loss", 0) or 0),
@@ -466,6 +468,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             arrow_algo.restore_position(_open)
     except Exception as exc:        # never block startup on recovery
         logger.warning("Position recovery skipped — {}", exc)
+
+    # Cooldown recovery: re-arm the entry cooldown from the last algo close so a
+    # stop right before shutdown doesn't allow an instant re-entry on restart.
+    try:
+        _cdsec = float(cfg.get("execution.cooldown_sec", 300) or 0)
+        _last_close = trade_log.last_close_time(source="algo")
+        if _cdsec > 0 and _last_close:
+            arrow_algo.restore_cooldown(_last_close + _cdsec)
+    except Exception as exc:
+        logger.warning("Cooldown recovery skipped — {}", exc)
 
     def _reconcile() -> Dict:
         """Compare engine belief (algo position) against the broker's actual

@@ -95,6 +95,9 @@ execution:
   max_exit_failures: 3        # after N consecutive failed auto-exits, HALT further
                               # retries and alert (position kept) instead of
                               # cancel-spamming the broker. 0 = retry indefinitely.
+  exit_retry_backoff_sec: 5   # exponential backoff between failed exit retries:
+                              # base × 2^(n-1). 0 = retry every tick (no backoff).
+  exit_retry_backoff_max_sec: 60  # cap on the backoff delay.
   verify_flat_before_entry: true   # skip entry if a leg already has a position
   # ── live_sim: simulated broker the real executor runs against (no real orders) ─
   sim_slippage_pct: 0.03      # max adverse slippage on simulated fills (%)
