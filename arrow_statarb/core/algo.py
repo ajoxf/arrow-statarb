@@ -75,6 +75,8 @@ class ArrowAutoTrader:
         self._cooldown_until = 0.0
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
+        self._exit_failures = 0                    # consecutive failed exit attempts
+        self._exit_halted = False                  # ceiling hit → stop auto-exit retries
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
         self.running = False
         self.last_error = ""
@@ -133,6 +135,8 @@ class ArrowAutoTrader:
                 "in_position": self._pos is not None,
                 "position": dict(self._pos) if self._pos else None,
                 "cooldown_s": max(0.0, round(self._cooldown_until - time.time(), 1)),
+                "exit_failures": self._exit_failures,
+                "exit_halted": self._exit_halted,
                 "last_error": self.last_error,
             }
 
@@ -194,6 +198,9 @@ class ArrowAutoTrader:
         entry_z = float(p.get("entry_zscore", sig.get("entry_zscore", 2.0)))
         exit_z  = float(p.get("exit_zscore", sig.get("exit_zscore", 0.0)))
         stop_z  = float(p.get("stop_zscore", sig.get("stop_zscore", 4.0)))
+        # Upper bound on entry |z|: an extremely deep z usually signals a regime
+        # shift, not a reversion opportunity. 0 = disabled.
+        max_entry_z = float(p.get("max_entry_zscore", 0) or 0)
         lots    = max(1, int(p.get("lots", 1)))
         half_life = float(sig.get("half_life", 0.0))
         sample_interval = float(sig.get("sample_interval_sec", 0.5))
@@ -220,6 +227,10 @@ class ArrowAutoTrader:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
                 snap["status"] = "outside trading hours"
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
+                  and max_entry_z > 0 and abs(z) > max_entry_z):
+                snap["status"] = (f"blocked: |z|={abs(z):.2f} exceeds entry cap "
+                                  f"{max_entry_z:.2f} (regime-shift guard)")
             elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
                 direction = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
                 pf = self._build_filter(p)
@@ -250,12 +261,26 @@ class ArrowAutoTrader:
                             * half_life * sample_interval) if half_life > 0 else 0.0
             spread_now = sig.get("spread")
             if abs(z) >= stop_z:
+                exit_reason = "stop"
+            elif reverted:
+                exit_reason = "target"
+            elif max_hold_sec > 0 and held_sec >= max_hold_sec:
+                exit_reason = "time_stop"
+            else:
+                exit_reason = None
+
+            if exit_reason and self._exit_halted:
+                # Ceiling reached — stop hammering the broker; demand attention.
+                snap["status"] = (f"EXIT HALTED ({exit_reason}, z={z:.2f}) — "
+                                  f"{self._exit_failures} consecutive failures; "
+                                  f"close manually")
+            elif exit_reason == "stop":
                 snap["status"] = f"STOP (z={z:.2f})"
                 self._exit("stop", z, spread_now)
-            elif reverted:
+            elif exit_reason == "target":
                 snap["status"] = f"EXIT target (z={z:.2f})"
                 self._exit("target", z, spread_now)
-            elif max_hold_sec > 0 and held_sec >= max_hold_sec:
+            elif exit_reason == "time_stop":
                 snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s)"
                 self._exit("time_stop", z, spread_now)
             else:
@@ -299,6 +324,8 @@ class ArrowAutoTrader:
                 "dry_run": bool(res.get("dry_run")),
             }
             self._consec_above = self._consec_below = 0
+            self._exit_failures = 0                 # fresh position → clean exit slate
+            self._exit_halted = False
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
         else:
             self.last_error = f"entry failed: {res.get('error')}"
@@ -317,11 +344,25 @@ class ArrowAutoTrader:
         if res.get("success"):
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))
             self._pos = None
+            self._exit_failures = 0
+            self._exit_halted = False
             cooldown = float(self._params().get("cooldown", 300))
             self._cooldown_until = time.time() + cooldown
         else:
-            self.last_error = f"exit failed: {res.get('error')}"
-            logger.error("ArrowAlgo: EXIT failed — {} (position still open!)", res.get("error"))
+            # Track consecutive failures; after the ceiling, halt auto-exit retries
+            # so we alert the human instead of cancel-spamming the broker forever.
+            self._exit_failures += 1
+            ceiling = int(self._params().get("max_exit_failures", 0) or 0)
+            if ceiling > 0 and self._exit_failures >= ceiling:
+                self._exit_halted = True
+            self.last_error = f"exit failed (x{self._exit_failures}): {res.get('error')}"
+            plan = ("HALTING auto-exit — manual intervention required"
+                    if self._exit_halted else "will retry next tick (position still open)")
+            logger.error(
+                "ArrowAlgo: EXIT FAILED — reason={} attempt={} ceiling={} orphan={} "
+                "recovered={} err={} → {}",
+                reason, self._exit_failures, ceiling or "∞",
+                res.get("orphan"), res.get("recovered"), res.get("error"), plan)
 
     def _set_snap(self, snap: Dict) -> None:
         with self._lock:

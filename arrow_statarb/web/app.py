@@ -433,8 +433,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
+            "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
+            "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "lots": lots,
             "lot_multiplier": _lot_multiplier(),
             "max_daily_loss": float(r.get("max_daily_loss", 0) or 0),
@@ -939,6 +941,29 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         else:
             add("sdk", "Fill confirmation (live)", "ok", "get_order_status returning real fills")
 
+        # 7 — entry guards armed (advisory): regime-shift cap, stale-signal
+        # divergence, and confirmation ticks all configured.
+        s = cfg.section("signal")
+        zcap = float(s.get("max_entry_zscore", 0) or 0)
+        zdiv = float(s.get("max_entry_z_divergence", 0) or 0)
+        conf = int(s.get("confirmation_ticks", 0) or 0)
+        gbits = [f"|z| cap {zcap:.1f}" if zcap > 0 else "no |z| cap",
+                 f"divergence {zdiv:.1f}" if zdiv > 0 else "no divergence guard",
+                 f"{conf} confirm tick(s)" if conf > 0 else "no confirmation"]
+        add("entry_guards", "Entry guards armed",
+            "ok" if (zcap > 0 and zdiv > 0 and conf > 0) else "warn", " · ".join(gbits))
+
+        # 8 — exit safety armed (advisory): MARKET fallback on + a failure ceiling.
+        ex = cfg.section("execution")
+        l2m = bool(ex.get("limit_to_market", True))
+        ceil_n = int(ex.get("max_exit_failures", 0) or 0)
+        ebits = ["MARKET fallback on" if l2m else "MARKET fallback OFF",
+                 f"exit ceiling {ceil_n}" if ceil_n > 0 else "no exit ceiling"]
+        add("exit_safety", "Exit safety armed",
+            "ok" if (l2m and ceil_n > 0) else "warn", " · ".join(ebits))
+
+        # Advisory checks (entry_guards, exit_safety, caps, sdk) inform but do not
+        # block go-live; only the critical four gate `ready`.
         critical = {"connected", "legs", "funds", "signal"}
         ready = all(c["status"] == "ok" for c in checks if c["key"] in critical)
         return jsonify({"mode": _mode(), "ready": ready, "checks": checks})
@@ -988,6 +1013,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
+                    "max_entry_zscore": s.get("max_entry_zscore", 0),
+                },
+                "execution": {
+                    "max_exit_failures": cfg.section("execution").get("max_exit_failures", 0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -1025,9 +1054,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
-                     ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0)):
+                     ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
+                     ("max_entry_zscore", 0.0)):
             if k in (data.get("signal") or {}):
                 sig[k] = _num(data["signal"][k], d)
+
+        ex = raw.setdefault("execution", {})
+        if "max_exit_failures" in (data.get("execution") or {}):
+            ex["max_exit_failures"] = _num(data["execution"]["max_exit_failures"], 0)
 
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),

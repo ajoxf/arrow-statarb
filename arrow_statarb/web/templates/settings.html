@@ -49,6 +49,11 @@
                         <input type="number" step="0.1" class="form-control" id="s-zdiv">
                         <div class="form-text">Refuse an entry if z re-sampled at order time moves more than this from the decision z. 0 = off.</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Entry Z (σ)</label>
+                        <input type="number" step="0.1" class="form-control" id="s-zmax">
+                        <div class="form-text">Regime-shift guard: refuse an entry when |z| exceeds this. 0 = off; keep below the stop.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -79,6 +84,11 @@
                         <label class="form-label">Max Daily Loss (₹)</label>
                         <input type="number" class="form-control" id="r-mdl">
                         <div class="form-text">0 = disabled</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max Exit Failures</label>
+                        <input type="number" class="form-control" id="x-maxfail">
+                        <div class="form-text">Halt auto-exit retries & alert after this many consecutive failed exits. 0 = retry indefinitely.</div>
                     </div>
                 </div>
             </div>
@@ -210,11 +220,13 @@
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
         _set('s-zdiv', s.signal.max_entry_z_divergence);
+        _set('s-zmax', s.signal.max_entry_zscore);
 
         _set('r-lots', s.risk.lots_per_trade);
         _set('r-maxleg', s.risk.max_contracts_per_leg);
         _set('r-slip', s.risk.max_slippage_pct);
         _set('r-mdl', s.risk.max_daily_loss);
+        _set('x-maxfail', (s.execution || {}).max_exit_failures);
 
         _setChk('th-enabled', s.trading_hours.enabled);
         _set('th-sh', s.trading_hours.start_hour); _set('th-sm', s.trading_hours.start_min);
@@ -248,6 +260,10 @@
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
+                max_entry_zscore: +document.getElementById('s-zmax').value,
+            },
+            execution: {
+                max_exit_failures: +document.getElementById('x-maxfail').value,
             },
             risk: {
                 lots_per_trade: +document.getElementById('r-lots').value,

@@ -93,6 +93,74 @@ def test_entry_z_divergence_guard_disabled_by_default():
     assert calls["execute"] == [("LONG_SPREAD", 1)]
 
 
+def test_max_entry_zscore_cap_blocks_deep_z():
+    # |z|=5 exceeds the 3.0 cap → entry refused (likely regime shift).
+    a, calls = _algo({"confirmation_ticks": 1, "max_entry_zscore": 3.0})
+    _algo.sig = _sig(-5.0)
+    a._tick()
+    assert not calls["execute"]
+    assert "exceeds entry cap" in a._snap["status"]
+
+
+def test_max_entry_zscore_cap_allows_within_band():
+    # |z|=2.5 is above entry (2.0) but below the cap (3.0) → entry proceeds.
+    a, calls = _algo({"confirmation_ticks": 1, "max_entry_zscore": 3.0})
+    _algo.sig = _sig(-2.5)
+    a._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_max_entry_zscore_cap_disabled_by_default():
+    a, calls = _algo({"confirmation_ticks": 1})           # no cap configured
+    _algo.sig = _sig(-9.0)
+    a._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def _failing_exit_algo(ceiling):
+    """Algo whose close always fails, to exercise the exit-failure ceiling."""
+    counts = {"close": 0}
+    holder = {"sig": _sig(-2.5)}
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "confirmation_ticks": 1, "enable_probability_filter": False,
+              "cooldown": 300, "max_exit_failures": ceiling}
+    a = ArrowAutoTrader(
+        signal_provider=lambda: holder["sig"],
+        params_provider=lambda: params,
+        execute_fn=lambda d, l, **k: {"success": True, "results": [{"order_id": "x"}]},
+        close_fn=lambda d, l, **k: (counts.__setitem__("close", counts["close"] + 1)
+                                    or {"success": False, "error": "reject"}),
+    )
+    return a, holder, counts
+
+
+def test_exit_failure_ceiling_halts_and_stops_retrying():
+    a, holder, counts = _failing_exit_algo(ceiling=2)
+    a._tick()                                   # enter LONG_SPREAD
+    assert a._pos is not None
+
+    holder["sig"] = _sig(-5.0)                  # |z|=5 ≥ stop (4) → exit fires, fails
+    a._tick()
+    assert a._exit_failures == 1 and not a._exit_halted and a._pos is not None
+    a._tick()
+    assert a._exit_failures == 2 and a._exit_halted   # ceiling reached
+
+    before = counts["close"]
+    a._tick()                                   # halted → no further close attempts
+    assert counts["close"] == before
+    assert "EXIT HALTED" in a._snap["status"]
+    assert a._pos is not None                    # position kept, awaiting manual close
+
+
+def test_exit_failure_ceiling_unlimited_when_zero():
+    a, holder, counts = _failing_exit_algo(ceiling=0)
+    a._tick()
+    holder["sig"] = _sig(-5.0)
+    a._tick(); a._tick(); a._tick()
+    assert not a._exit_halted                    # 0 = never halts
+    assert counts["close"] >= 3                  # keeps retrying every tick
+
+
 def test_trading_hours_window():
     assert _within_trading_hours({"trading_hours": {"enabled": False}}) is True
     # A zero-width past window (00:00–00:00) is effectively always closed.

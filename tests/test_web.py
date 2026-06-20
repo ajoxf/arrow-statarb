@@ -163,8 +163,12 @@ def test_preflight_checks(tmp_path):
     client = app.test_client()
     p = client.get("/api/preflight").get_json()
     keys = {c["key"] for c in p["checks"]}
-    assert keys == {"connected", "legs", "funds", "signal", "caps", "sdk"}
+    assert keys == {"connected", "legs", "funds", "signal", "caps", "sdk",
+                    "entry_guards", "exit_safety"}
     assert "ready" in p and isinstance(p["ready"], bool)
+    # the new safety checks are advisory — they must NOT be in the go-live gate
+    advisory = {c["key"] for c in p["checks"] if c["key"] in ("entry_guards", "exit_safety")}
+    assert advisory == {"entry_guards", "exit_safety"}
     # FakeBroker has get_funds (returns None funds) → not connected-funds-ok → not ready
     conn = next(c for c in p["checks"] if c["key"] == "connected")
     assert conn["status"] == "ok"     # FakeBroker is "connected"

@@ -47,6 +47,9 @@ signal:
   max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
                               # z re-sampled at order time has moved more than
                               # this from the decision z. 0 = disabled.
+  max_entry_zscore: 3.5       # regime-shift guard: refuse an entry when |z|
+                              # exceeds this (a blowout is rarely a reversion).
+                              # 0 = disabled. Keep below stop_zscore.
 
 # Probability / EV / cost gate (OU gambler's-ruin model).
 filters:
@@ -89,6 +92,9 @@ execution:
   fill_timeout_sec: 5         # wait this long for a limit before escalating
   poll_interval_sec: 0.4      # order-status (fill) poll cadence
   limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
+  max_exit_failures: 3        # after N consecutive failed auto-exits, HALT further
+                              # retries and alert (position kept) instead of
+                              # cancel-spamming the broker. 0 = retry indefinitely.
   verify_flat_before_entry: true   # skip entry if a leg already has a position
   # ── live_sim: simulated broker the real executor runs against (no real orders) ─
   sim_slippage_pct: 0.03      # max adverse slippage on simulated fills (%)
