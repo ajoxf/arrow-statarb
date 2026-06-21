@@ -61,11 +61,15 @@ class ArrowAutoTrader:
         params_provider: Callable[[], Dict],
         execute_fn: Callable[[str, int], Dict],
         close_fn: Callable[[str, int], Dict],
+        clock: Optional[Callable[[], float]] = None,
     ):
         self._signal = signal_provider
         self._params = params_provider
         self._execute = execute_fn
         self._close = close_fn
+        # Injectable wall-clock — overridden by the backtester so historical
+        # timestamps drive cooldown / time-stop / holding time. Defaults to live.
+        self._clock = clock or time.time
 
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
@@ -116,7 +120,7 @@ class ArrowAutoTrader:
                 "lots": max(1, int(pos.get("lots", 1))),
                 "entry_z": -1.0 if direction == "LONG_SPREAD" else 1.0,
                 "entry_spread": pos.get("entry_spread"),
-                "entry_time": float(pos.get("ts") or time.time()),
+                "entry_time": float(pos.get("ts") or self._clock()),
                 "order_ids": [],
                 "dry_run": bool(pos.get("dry_run", False)),
                 "restored": True,
@@ -132,7 +136,7 @@ class ArrowAutoTrader:
                 "running": self.running,
                 "in_position": self._pos is not None,
                 "position": dict(self._pos) if self._pos else None,
-                "cooldown_s": max(0.0, round(self._cooldown_until - time.time(), 1)),
+                "cooldown_s": max(0.0, round(self._cooldown_until - self._clock(), 1)),
                 "last_error": self.last_error,
             }
 
@@ -171,7 +175,7 @@ class ArrowAutoTrader:
     def _tick(self) -> None:
         p = self._params()
         sig = self._signal() or {}
-        snap: Dict = {"ts": time.time(),
+        snap: Dict = {"ts": self._clock(),
                       "leg_a": sig.get("leg_a"), "leg_b": sig.get("leg_b"),
                       "spread": sig.get("spread"), "mean": sig.get("mean"),
                       "std": sig.get("std"), "zscore": sig.get("zscore"),
@@ -197,7 +201,7 @@ class ArrowAutoTrader:
         lots    = max(1, int(p.get("lots", 1)))
         half_life = float(sig.get("half_life", 0.0))
         sample_interval = float(sig.get("sample_interval_sec", 0.5))
-        now = time.time()
+        now = self._clock()
 
         # Confirmation ticks: require N consecutive ticks beyond the threshold
         # before an entry fires (filters out single-tick spikes).
@@ -276,7 +280,7 @@ class ArrowAutoTrader:
             self._pos = {
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
-                "entry_time": time.time(),
+                "entry_time": self._clock(),
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }
@@ -300,7 +304,7 @@ class ArrowAutoTrader:
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))
             self._pos = None
             cooldown = float(self._params().get("cooldown", 300))
-            self._cooldown_until = time.time() + cooldown
+            self._cooldown_until = self._clock() + cooldown
         else:
             self.last_error = f"exit failed: {res.get('error')}"
             logger.error("ArrowAlgo: EXIT failed — {} (position still open!)", res.get("error"))
