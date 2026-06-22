@@ -20,6 +20,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+try:                                                        # mirror run_arrow.py
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+    load_dotenv()
+except Exception:
+    pass
+
 from arrow_statarb.config.config import Config              # noqa: E402
 from arrow_statarb.brokers.registry import create_broker    # noqa: E402
 
