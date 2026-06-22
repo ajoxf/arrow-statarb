@@ -22,14 +22,15 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class TradeLog:
-    def __init__(self, path: Path, brokerage_per_lot: float = 20.0):
-        self.path = Path(path)
+    def __init__(self, path: Optional[Path] = None, brokerage_per_lot: float = 20.0):
+        # path=None → in-memory only (no file IO), used by the backtester.
+        self.path = Path(path) if path is not None else None
         self.brokerage_per_lot = brokerage_per_lot
         self._lock = threading.Lock()
         self._trades: List[Dict] = self._load()
 
     def _load(self) -> List[Dict]:
-        if self.path.exists():
+        if self.path and self.path.exists():
             try:
                 with open(self.path) as f:
                     return json.load(f) or []
@@ -38,6 +39,8 @@ class TradeLog:
         return []
 
     def _save(self) -> None:
+        if not self.path:
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.path, "w") as f:
