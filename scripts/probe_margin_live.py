@@ -127,36 +127,53 @@ def main() -> int:
             ),
         )
 
-    # ── 2. basket_margin — shape unknown; try a few plausible dict encodings ──
-    def basket(encode):
-        return lambda: client.basket_margin([encode(leg) for leg in legs])
+    # ── 2. basket_margin — quantity-as-string is accepted; the only remaining
+    # rejection is "invalid order type". Dump the enum wire-values, then brute
+    # force the order_type/product string the basket endpoint wants. Stop on the
+    # first success (that's the netted spread margin WITH calendar benefit).
+    print("\n" + "=" * 70)
+    print("ENUM WIRE VALUES")
+    print("-" * 70)
+    for E in (Exchange, OrderType, ProductType, TransactionType):
+        try:
+            print(E.__name__, "→", {m.name: m.value for m in E})
+        except Exception as exc:
+            print(E.__name__, "?", exc)
 
-    # basket_margin rejected numeric quantity ("expected: string") — so EVERY
-    # value goes as a string. Try enum objects vs enum .value for the type fields.
-    # 2a: enum objects, MARKET (no price dependence)
-    def enc_enum_mkt(leg):
-        ex, tt = _enums(leg)
-        return {"exchange": ex, "symbol": leg["sym"], "quantity": str(leg["qty"]),
-                "product": ProductType.NRML, "order_type": OrderType.MARKET,
-                "transaction_type": tt, "price": "0"}
+    def basket(orders):
+        return lambda: client.basket_margin(orders)
 
-    # 2b: enum .value strings, MARKET
-    def enc_val_mkt(leg):
+    def enc(leg, order_type, product, price):
         ex, tt = _enums(leg)
         return {"exchange": ex.value, "symbol": leg["sym"], "quantity": str(leg["qty"]),
-                "product": ProductType.NRML.value, "order_type": OrderType.MARKET.value,
-                "transaction_type": tt.value, "price": "0"}
+                "product": product, "order_type": order_type,
+                "transaction_type": tt.value, "price": str(price)}
 
-    # 2c: enum objects, LIMIT with the (fallback) price as a string
-    def enc_enum_lmt(leg):
-        ex, tt = _enums(leg)
-        return {"exchange": ex, "symbol": leg["sym"], "quantity": str(leg["qty"]),
-                "product": ProductType.NRML, "order_type": OrderType.LIMIT,
-                "transaction_type": tt, "price": str(leg["ltp"])}
-
-    _show("basket_margin  [enum, MARKET]", basket(enc_enum_mkt))
-    _show("basket_margin  [.value, MARKET]", basket(enc_val_mkt))
-    _show("basket_margin  [enum, LIMIT+price]", basket(enc_enum_lmt))
+    # order_type candidates (wire spellings Arrow uses elsewhere) × product
+    # spellings ("NRML" enum value vs "M" wire code).
+    ot_candidates = ["LMT", "LIMIT", "L", "MKT", "MARKET", "M"]
+    prod_candidates = [ProductType.NRML.value, "NRML", "M"]
+    got_basket = False
+    for prod in prod_candidates:
+        for ot in ot_candidates:
+            price = "0" if ot in ("MKT", "MARKET", "M") else str(legs[0]["ltp"])
+            orders = [enc(leg, ot, prod, price) for leg in legs]
+            label = f"basket_margin  order_type={ot!r} product={prod!r}"
+            _show(label, basket(orders))
+            # crude success probe: re-run and inspect (the _show already printed);
+            # we keep going so every combo's error is visible, but flag once a
+            # dict with a margin field comes back.
+            try:
+                out = client.basket_margin(orders)
+                if isinstance(out, dict) and any(k.lower().startswith("margin") or
+                        "margin" in k.lower() or "required" in k.lower() for k in out):
+                    print(f">>> SUCCESS with order_type={ot!r} product={prod!r}")
+                    got_basket = True
+                    break
+            except Exception:
+                pass
+        if got_basket:
+            break
 
     print("\nDone. Paste the whole output back.")
     return 0
