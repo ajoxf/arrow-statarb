@@ -241,3 +241,40 @@ def test_no_broker_fails_cleanly():
     res = ex.execute(_legs())
     assert res["success"] is False
     assert "broker" in res["error"].lower()
+
+
+# ── verify_flat fail-safe when positions can't be read (Arrow timeout) ────────
+def test_verify_flat_fail_closed_blocks_when_positions_unavailable():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS, verify_flat_fail_open=False),
+                        positions_fn=lambda: None,      # read failing
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert "positions unavailable" in res["error"]
+    assert b.submits == []                              # nothing was placed
+
+
+def test_verify_flat_fail_open_allows_when_configured():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS, verify_flat_fail_open=True),
+                        positions_fn=lambda: None,
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is True
+
+
+def test_verify_flat_uses_cached_positions():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS),
+                        positions_fn=lambda: [{"symbol": "AAA", "net_quantity": 75}],
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert "existing position" in res["error"]          # AAA already held → blocked

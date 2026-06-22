@@ -103,6 +103,71 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 20)))
     execution_log = ExecutionLog()
 
+    # ── broker-read cache (positions + funds) ─────────────────────────────────
+    # Arrow's positions/limits API can be slow (10s read-timeouts) and flaky
+    # (502s). A background refresher polls it on a timer and stores last-good
+    # values; every endpoint (and the pre-entry flat check) reads the cache
+    # instead of calling Arrow directly — so a slow API never piles up request
+    # threads or blanks the dashboard, and the last good funds value sticks.
+    _broker_cache: Dict[str, Dict] = {
+        "positions": {"ts": 0.0, "val": [], "ok": False},
+        "funds": {"ts": 0.0, "val": {}, "ok": False},
+    }
+    _broker_cache_lock = threading.Lock()
+
+    def _cache_get(key: str, max_age: float):
+        with _broker_cache_lock:
+            c = _broker_cache[key]
+            fresh = c["ok"] and (time.time() - c["ts"]) <= max_age
+            return (list(c["val"]) if isinstance(c["val"], list) else dict(c["val"])), fresh
+
+    def _refresh_broker_cache() -> None:
+        b = active.get()
+        if not b:
+            return
+        try:
+            pos = b.get_positions() or []
+            with _broker_cache_lock:
+                _broker_cache["positions"] = {"ts": time.time(), "val": pos, "ok": True}
+        except Exception as exc:
+            logger.debug("positions cache refresh failed (keeping last-good) — {}", exc)
+        if hasattr(b, "get_funds"):
+            try:
+                f = b.get_funds() or {}
+                with _broker_cache_lock:
+                    _broker_cache["funds"] = {"ts": time.time(), "val": f, "ok": True}
+            except Exception as exc:
+                logger.debug("funds cache refresh failed (keeping last-good) — {}", exc)
+
+    def _positions_cached() -> list:
+        val, _ = _cache_get("positions", max_age=1e9)   # last-good; never blocks
+        return val
+
+    def _funds_cached() -> Dict:
+        val, _ = _cache_get("funds", max_age=1e9)
+        return val
+
+    def _positions_for_verify():
+        """Positions for the executor's pre-entry flat check — returns the cached
+        list only if a refresh succeeded recently, else None (→ fail-safe block)."""
+        ttl = float(cfg.get("broker.cache_ttl_sec", 2.0)) or 2.0
+        val, fresh = _cache_get("positions", max_age=max(6.0, ttl * 4))
+        return val if fresh else None
+
+    def _start_cache_refresher() -> None:
+        ttl = max(0.5, float(cfg.get("broker.cache_ttl_sec", 2.0) or 2.0))
+
+        def _loop():
+            while True:
+                try:
+                    _refresh_broker_cache()
+                except Exception:
+                    pass
+                time.sleep(ttl)
+        threading.Thread(target=_loop, daemon=True, name="BrokerCache").start()
+
+    _start_cache_refresher()
+
     # ── config helpers ───────────────────────────────────────────────────────
     def _is_dry_run() -> bool:
         try:
@@ -356,6 +421,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "poll_interval_sec": float(e.get("poll_interval_sec", 0.4)),
             "limit_to_market": bool(e.get("limit_to_market", True)),
             "verify_flat_before_entry": bool(e.get("verify_flat_before_entry", True)),
+            # On a positions-read failure: False (default) BLOCKS the entry
+            # (fail-safe for LIVE); True allows it through.
+            "verify_flat_fail_open": bool(e.get("verify_flat_fail_open", False)),
             "unknown_status_grace_polls": int(e.get("unknown_status_grace_polls", 3)),
             "assume_fill_on_unknown": bool(e.get("assume_fill_on_unknown", False)),
             "product": str(e.get("product", "NRML")),
@@ -363,7 +431,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         }
 
     spread_executor = SpreadExecutor(broker_fn=active.get, price_fn=_one_ltp,
-                                     params_fn=_exec_params)
+                                     params_fn=_exec_params,
+                                     positions_fn=_positions_for_verify)
 
     # ── live-sim: the real executor against a simulated broker (no real orders) ─
     _sim = cfg.section("execution")
@@ -466,6 +535,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "slippage_per_lot": float(f.get("slippage_per_lot", 5.0)),
             "time_stop_half_lives": float(f.get("time_stop_half_lives", 3.0)),
             "trading_hours": cfg.section("trading_hours"),
+            # no new entries within this many minutes of the exchange close
+            "no_entry_buffer_min": float(cfg.get("trading_hours.no_entry_buffer_min", 20)),
         }
 
     arrow_algo = ArrowAutoTrader(
@@ -508,7 +579,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return out
         try:
             positions = {str(p.get("symbol", "")).upper(): int(p.get("net_quantity", 0) or 0)
-                         for p in (broker.get_positions() or [])}
+                         for p in (_positions_cached() or [])}
         except Exception as exc:
             out["message"] = f"could not read positions: {exc}"
             return out
@@ -788,7 +859,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         legs = _read_legs()
         leg_syms = {lk: legs[lk]["symbol"].upper() for lk in ("leg_a", "leg_b") if lk in legs}
         try:
-            positions = broker.get_positions() or []
+            positions = _positions_cached() or []
         except Exception as exc:
             out["error"] = str(exc)
             return jsonify(out)
@@ -928,7 +999,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         # 3 — account funded
         funds = {}
         try:
-            funds = broker.get_funds() if (broker and hasattr(broker, "get_funds")) else {}
+            funds = _funds_cached()
         except Exception:
             funds = {}
         avail = funds.get("available")
@@ -1197,7 +1268,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             prices = {}
         positions = {}
         try:
-            positions = {str(p.get("symbol", "")).upper(): p for p in (broker.get_positions() or [])}
+            positions = {str(p.get("symbol", "")).upper(): p for p in (_positions_cached() or [])}
         except Exception:
             positions = {}
         for lk, sym in syms.items():
@@ -1230,7 +1301,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return jsonify(out)
         out["connected"] = True
         try:
-            f = broker.get_funds() if hasattr(broker, "get_funds") else {}
+            f = _funds_cached()
         except Exception:
             f = {}
         for k in ("available", "used", "equity", "cash"):
@@ -1248,7 +1319,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             positions = {}
             try:
                 positions = {str(p.get("symbol", "")).upper(): p
-                             for p in (broker.get_positions() or [])}
+                             for p in (_positions_cached() or [])}
             except Exception:
                 positions = {}
             la, lb = _leg_prices()

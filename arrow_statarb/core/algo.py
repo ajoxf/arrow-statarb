@@ -53,6 +53,24 @@ def _within_trading_hours(p: Dict) -> bool:
     return start <= now <= end
 
 
+def _entry_cutoff_reached(p: Dict) -> bool:
+    """True if we are within ``no_entry_buffer_min`` minutes of the exchange
+    close — block NEW entries near the close (exits stay allowed) so we don't
+    open a position we can't manage before EOD. Applies on NSE/BSE regardless of
+    whether the optional trading-hours window is enabled."""
+    th = p.get("trading_hours") or {}
+    # Default 0 (disabled) when unset — production enables it via config
+    # (_algo_params passes trading_hours.no_entry_buffer_min, default 20).
+    buf = float(p.get("no_entry_buffer_min", th.get("no_entry_buffer_min", 0)) or 0)
+    if buf <= 0:
+        return False
+    now = datetime.now(_IST)
+    close = now.replace(hour=int(th.get("close_hour", th.get("end_hour", 15))),
+                        minute=int(th.get("close_min", th.get("end_min", 30))),
+                        second=0, microsecond=0)
+    return now >= (close - timedelta(minutes=buf))
+
+
 class ArrowAutoTrader:
     def __init__(
         self,
@@ -249,6 +267,9 @@ class ArrowAutoTrader:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
                 snap["status"] = "outside trading hours"
+            elif _entry_cutoff_reached(p):
+                buf = float(p.get("no_entry_buffer_min", 0) or 0)
+                snap["status"] = f"no new entries — within {buf:.0f} min of close"
             elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
                   and max_entry_z > 0 and abs(z) > max_entry_z):
                 snap["status"] = (f"blocked: |z|={abs(z):.2f} exceeds entry cap "

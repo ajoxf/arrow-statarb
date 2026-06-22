@@ -90,12 +90,16 @@ class SpreadExecutor:
         broker_fn: Callable[[], object],
         price_fn: Callable[[str, str], Optional[float]],
         params_fn: Callable[[], Dict],
+        positions_fn: Optional[Callable[[], Optional[list]]] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._broker_fn = broker_fn
         self._price_fn = price_fn
         self._params_fn = params_fn
+        # Optional cached positions source for the pre-entry flat check. Returns a
+        # list, or None when no reliable data is available (Arrow read failing).
+        self._positions_fn = positions_fn
         self._clock = clock
         self._sleep = sleep
 
@@ -112,7 +116,7 @@ class SpreadExecutor:
         start = self._clock()
 
         if verify_flat and p.get("verify_flat_before_entry", True):
-            clash = self._verify_flat(broker, legs)
+            clash = self._verify_flat(broker, legs, fail_open=bool(p.get("verify_flat_fail_open", False)))
             if clash:
                 logger.warning("{}: blocked — {}", label, clash)
                 return dict(self._fail(legs, clash), elapsed_sec=0.0)
@@ -374,14 +378,28 @@ class SpreadExecutor:
                 logger.error("Executor: ORPHAN recovery EXCEPTION for {} — {}", leg.symbol, exc)
         return ok
 
-    def _verify_flat(self, broker, legs: List[LegOrder]) -> str:
+    def _verify_flat(self, broker, legs: List[LegOrder], fail_open: bool = False) -> str:
         """Return a reason string if either leg already has an open exchange
-        position (so we don't stack a new entry), else ``""``."""
+        position (so we don't stack a new entry), else ``""``.
+
+        Positions come from the injected cached source when available (shared with
+        the dashboard, resilient to Arrow read-timeouts). If positions cannot be
+        read at all, behaviour depends on ``fail_open``: when False (default for
+        LIVE safety) the entry is BLOCKED rather than silently proceeding."""
+        positions = None
         try:
-            positions = broker.get_positions() or []
+            if self._positions_fn is not None:
+                positions = self._positions_fn()
+            else:
+                positions = broker.get_positions()
         except Exception as exc:                # noqa: BLE001
             logger.warning("Executor: verify_flat could not read positions — {}", exc)
-            return ""                           # can't verify → don't block
+            positions = None
+        if positions is None:
+            if fail_open:
+                logger.warning("Executor: verify_flat — no position data; allowing (fail-open)")
+                return ""
+            return "verify_exchange_position: positions unavailable — entry blocked (fail-safe)"
         held = {str(pos.get("symbol", "")).upper(): int(pos.get("net_quantity", 0) or 0)
                 for pos in positions}
         clashes = [l.symbol for l in legs if held.get(l.symbol.upper(), 0) != 0]

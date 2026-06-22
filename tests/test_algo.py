@@ -198,3 +198,26 @@ def test_entry_records_decision_z_and_source():
     assert seen["source"] == "algo"
     assert seen["z"] == -2.6          # exact decision z, not re-sampled
     assert seen["direction"] == "LONG_SPREAD"
+
+
+def test_no_entry_within_close_buffer():
+    from datetime import datetime, timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    close = datetime.now(ist) + timedelta(minutes=10)   # close 10 min away
+    algo, state, calls = _make({"no_entry_buffer_min": 30,   # buffer 30 → within
+        "trading_hours": {"close_hour": close.hour, "close_min": close.minute}})
+    state["sig"] = _sig(-2.5)
+    algo._tick()
+    assert not calls["execute"]
+    assert "no new entries" in algo.get_state()["status"]
+
+
+def test_entries_allowed_far_from_close():
+    from datetime import datetime, timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    close = datetime.now(ist) + timedelta(minutes=90)
+    algo, state, calls = _make({"no_entry_buffer_min": 10,
+        "trading_hours": {"close_hour": close.hour, "close_min": close.minute}})
+    state["sig"] = _sig(-2.5)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]

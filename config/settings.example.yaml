@@ -27,6 +27,10 @@ broker:
     bse_cm: BSE
     bse_fo: BFO
   lot_overrides: {}
+  # How often a background thread refreshes positions/funds from Arrow. The
+  # dashboard + pre-entry flat check read this cache, so a slow/flaky Arrow API
+  # never piles up request threads or blanks the funds card.
+  cache_ttl_sec: 2
 
 # Default 2-leg spread. The dashboard picker overrides these into
 # config/leg_assignments.yaml.
@@ -79,11 +83,16 @@ risk:
 
 # Only trade inside this window (IST).
 trading_hours:
-  enabled: false
+  enabled: false              # optional hard window (start..end); see also the close buffer
   start_hour: 9
   start_min: 15
   end_hour: 15
   end_min: 30
+  # No NEW entries within this many minutes of the exchange close (exits still
+  # allowed). Applies on NSE/BSE even when 'enabled' is false. 0 = disabled.
+  close_hour: 15              # NSE/BSE equity & F&O close
+  close_min: 30
+  no_entry_buffer_min: 20
 
 # LIVE order execution (SpreadExecutor).
 execution:
@@ -110,6 +119,8 @@ execution:
                               # base × 2^(n-1). 0 = retry every tick (no backoff).
   exit_retry_backoff_max_sec: 60  # cap on the backoff delay.
   verify_flat_before_entry: true   # skip entry if a leg already has a position
+  verify_flat_fail_open: false     # if positions can't be read, False BLOCKS the
+                                   # entry (fail-safe); True lets it through
   # ── live_sim: simulated broker the real executor runs against (no real orders) ─
   # live-sim fills at the bid/ask touch (real depth from Arrow when available,
   # else a synthetic book this many ticks wide). Set spread_ticks to your legs'
