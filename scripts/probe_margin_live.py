@@ -81,16 +81,21 @@ def main() -> int:
         time.sleep(0.5)
     print("instrument master entries:", len(getattr(broker, "_lot_sizes", {})))
 
-    # Resolve the two legs from config (segment, symbol, lot size, LTP).
+    # Resolve the two legs from config (segment, symbol, lot size, LTP). When the
+    # market is shut LTP is 0 and we fall back to a sane price just so the margin
+    # endpoint has a value to chew on. qty is forced to a multiple of the lot.
+    FALLBACK_PRICE = 24000.0
     legs = []
     for lk in ("leg_a", "leg_b"):
         seg = cfg.get(f"instruments.{lk}.segment", "nse_fo")
         sym = cfg.get(f"instruments.{lk}.symbol", "")
         side = "buy" if lk == "leg_a" else "sell"          # LONG_SPREAD
         lot = int(broker.resolve_lot_size(seg, sym))
+        qty = lot if lot > 1 else 65                        # Arrow told us 65
         ltp = broker.get_ltp([{"exchange_segment": seg, "instrument_token": sym}]).get(sym.upper(), 0.0)
-        legs.append({"seg": seg, "sym": sym, "side": side, "qty": lot, "ltp": float(ltp or 0.0)})
-        print(f"  {lk}: {sym} {side} qty={lot} ltp={ltp}")
+        px = float(ltp) if ltp else FALLBACK_PRICE
+        legs.append({"seg": seg, "sym": sym, "side": side, "qty": qty, "ltp": px})
+        print(f"  {lk}: {sym} {side} qty={qty} px={px} (raw_lot={lot}, raw_ltp={ltp})")
 
     from pyarrow_client import Exchange, OrderType, ProductType, TransactionType
     from arrow_statarb.brokers.arrow_broker import _SEGMENT_MAP
@@ -103,8 +108,18 @@ def main() -> int:
     # ── 1. order_margin per leg (fully typed signature — guaranteed callable) ──
     for leg in legs:
         ex, tt = _enums(leg)
+        # 1a: MARKET — no price required
         _show(
-            f"order_margin  {leg['sym']} {leg['side']} x{leg['qty']} @ {leg['ltp']}",
+            f"order_margin MKT  {leg['sym']} {leg['side']} x{leg['qty']}",
+            lambda ex=ex, tt=tt, leg=leg: client.order_margin(
+                exchange=ex, symbol=leg["sym"], quantity=leg["qty"],
+                product=ProductType.NRML, order_type=OrderType.MARKET,
+                transaction_type=tt, price=0.0, include_positions=False,
+            ),
+        )
+        # 1b: LIMIT — with the (possibly fallback) price
+        _show(
+            f"order_margin LMT  {leg['sym']} {leg['side']} x{leg['qty']} @ {leg['ltp']}",
             lambda ex=ex, tt=tt, leg=leg: client.order_margin(
                 exchange=ex, symbol=leg["sym"], quantity=leg["qty"],
                 product=ProductType.NRML, order_type=OrderType.LIMIT,
@@ -118,31 +133,30 @@ def main() -> int:
 
     # basket_margin rejected numeric quantity ("expected: string") — so EVERY
     # value goes as a string. Try enum objects vs enum .value for the type fields.
-    # 2a: string scalars, enum objects for exchange/product/order_type/txn
-    def enc_enum(leg):
+    # 2a: enum objects, MARKET (no price dependence)
+    def enc_enum_mkt(leg):
+        ex, tt = _enums(leg)
+        return {"exchange": ex, "symbol": leg["sym"], "quantity": str(leg["qty"]),
+                "product": ProductType.NRML, "order_type": OrderType.MARKET,
+                "transaction_type": tt, "price": "0"}
+
+    # 2b: enum .value strings, MARKET
+    def enc_val_mkt(leg):
+        ex, tt = _enums(leg)
+        return {"exchange": ex.value, "symbol": leg["sym"], "quantity": str(leg["qty"]),
+                "product": ProductType.NRML.value, "order_type": OrderType.MARKET.value,
+                "transaction_type": tt.value, "price": "0"}
+
+    # 2c: enum objects, LIMIT with the (fallback) price as a string
+    def enc_enum_lmt(leg):
         ex, tt = _enums(leg)
         return {"exchange": ex, "symbol": leg["sym"], "quantity": str(leg["qty"]),
                 "product": ProductType.NRML, "order_type": OrderType.LIMIT,
                 "transaction_type": tt, "price": str(leg["ltp"])}
 
-    # 2b: everything as strings (enum .value)
-    def enc_str(leg):
-        ex, tt = _enums(leg)
-        return {"exchange": ex.value, "symbol": leg["sym"], "quantity": str(leg["qty"]),
-                "product": ProductType.NRML.value, "order_type": OrderType.LIMIT.value,
-                "transaction_type": tt.value, "price": str(leg["ltp"])}
-
-    # 2c: plain English string enums (BUY/SELL/NRML/LIMIT/NFO)
-    def enc_words(leg):
-        return {"exchange": _SEGMENT_MAP.get(leg["seg"].lower(), leg["seg"].upper()),
-                "symbol": leg["sym"], "quantity": str(leg["qty"]),
-                "product": "NRML", "order_type": "LIMIT",
-                "transaction_type": "BUY" if leg["side"] == "buy" else "SELL",
-                "price": str(leg["ltp"])}
-
-    _show("basket_margin  [str qty, enum objects]", basket(enc_enum))
-    _show("basket_margin  [str qty, enum .value]", basket(enc_str))
-    _show("basket_margin  [str qty, word enums]", basket(enc_words))
+    _show("basket_margin  [enum, MARKET]", basket(enc_enum_mkt))
+    _show("basket_margin  [.value, MARKET]", basket(enc_val_mkt))
+    _show("basket_margin  [enum, LIMIT+price]", basket(enc_enum_lmt))
 
     print("\nDone. Paste the whole output back.")
     return 0
