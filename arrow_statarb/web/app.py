@@ -356,6 +356,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "poll_interval_sec": float(e.get("poll_interval_sec", 0.4)),
             "limit_to_market": bool(e.get("limit_to_market", True)),
             "verify_flat_before_entry": bool(e.get("verify_flat_before_entry", True)),
+            "unknown_status_grace_polls": int(e.get("unknown_status_grace_polls", 3)),
+            "assume_fill_on_unknown": bool(e.get("assume_fill_on_unknown", False)),
             "product": str(e.get("product", "NRML")),
             "max_slippage_pct": float(r.get("max_slippage_pct", 0.5)),
         }

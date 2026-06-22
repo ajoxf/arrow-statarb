@@ -95,6 +95,11 @@ execution:
   fill_timeout_sec: 5         # wait this long for a limit before escalating
   poll_interval_sec: 0.4      # order-status (fill) poll cadence
   limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
+  # Order-status safety: a status read that comes back UNKNOWN is treated as a
+  # TRANSIENT glitch — we poll through a grace window and never fabricate a fill.
+  unknown_status_grace_polls: 3   # consecutive UNKNOWN reads tolerated before deciding
+  assume_fill_on_unknown: false   # true ONLY for a broker with no status API (then a
+                                  # persistent UNKNOWN is assumed filled, unconfirmed)
   max_exit_failures: 3        # after N consecutive failed auto-exits, HALT further
                               # retries and alert (position kept) instead of
                               # cancel-spamming the broker. 0 = retry indefinitely.

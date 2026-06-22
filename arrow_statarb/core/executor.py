@@ -43,7 +43,7 @@ class LegOrder:
     __slots__ = ("segment", "symbol", "side", "units", "token",
                  "order_id", "status", "order_type", "filled", "avg_price",
                  "limit_price", "ref_price", "error", "unconfirmed", "amend_count",
-                 "recovery", "escalated")
+                 "recovery", "escalated", "prefill", "unknown_polls")
 
     def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = ""):
         self.segment = segment
@@ -54,7 +54,7 @@ class LegOrder:
         self.order_id: Optional[str] = None
         self.status = "NEW"
         self.order_type = ""
-        self.filled = 0
+        self.filled = 0                   # CUMULATIVE units filled across re-placements
         self.avg_price = 0.0
         self.limit_price: Optional[float] = None
         self.ref_price: Optional[float] = None   # LTP at placement (slippage baseline)
@@ -63,6 +63,8 @@ class LegOrder:
         self.amend_count = 0
         self.recovery: Optional[Dict] = None
         self.escalated = False            # limit timed out → re-sent as MARKET
+        self.prefill = 0                  # units already filled BEFORE the current order
+        self.unknown_polls = 0            # consecutive UNKNOWN status reads (transient guard)
 
     @property
     def working(self) -> bool:
@@ -158,6 +160,14 @@ class SpreadExecutor:
     def _place(self, broker, leg: LegOrder, p: Dict, force_market: bool = False) -> None:
         use_limit = bool(p.get("use_limit_orders", True)) and not force_market
         order_type = "limit" if use_limit else "market"
+        # Order only the UNFILLED residual — re-placing the full size after a
+        # partial fill would double up that leg (naked overshoot). On the first
+        # placement filled==0, so residual == units.
+        residual = max(0, leg.units - leg.filled)
+        if residual <= 0:
+            leg.status = "COMPLETE"
+            return
+        leg.prefill = leg.filled          # baseline so _refresh keeps fills cumulative
         # Reference price (slippage baseline) is captured on every placement.
         ltp = self._price_fn(leg.segment, leg.symbol)
         if ltp is not None:
@@ -172,7 +182,7 @@ class SpreadExecutor:
             leg.escalated = True
 
         res = broker.submit_order(
-            symbol=leg.symbol, side=leg.side, quantity=leg.units,
+            symbol=leg.symbol, side=leg.side, quantity=residual,
             order_type=order_type, price=price, exchange_segment=leg.segment,
             product=str(p.get("product", "NRML")), token=leg.token,
         ) or {}
@@ -190,23 +200,46 @@ class SpreadExecutor:
             leg.limit_price = price
 
     # ── fill polling + amendment ─────────────────────────────────────────────
-    def _refresh(self, broker, leg: LegOrder) -> None:
+    def _refresh(self, broker, leg: LegOrder, p: Dict) -> None:
         if not leg.order_id:
             return
         st = broker.get_order_status(leg.order_id) or {}
         status = str(st.get("status", "UNKNOWN")).upper()
         if status == "UNKNOWN":
-            # Broker can't report fills — assume the accepted order is on.
-            # Orphan detection is impossible in this mode, so flag it loudly.
-            if not leg.unconfirmed:
-                logger.warning("Executor: {} has no order-status API — treating {} "
-                               "as filled (UNCONFIRMED)", broker.__class__.__name__, leg.symbol)
-            leg.status = "COMPLETE"
-            leg.unconfirmed = True
-            leg.filled = leg.units
+            # A status read can come back UNKNOWN for two very different reasons:
+            # (a) a transient glitch (API hiccup, malformed reply) on a broker
+            #     that DOES report fills, or (b) a broker with no status API.
+            # Treating (a) as a confirmed fill fabricates a position and can mark
+            # an exit "flat" when it isn't — so we keep polling through a grace
+            # window and FAIL SAFE (never assume a fill) unless explicitly told
+            # the broker has no status API (assume_fill_on_unknown).
+            leg.unknown_polls += 1
+            grace = int(p.get("unknown_status_grace_polls", 3))
+            if leg.unknown_polls <= grace:
+                leg.status = "PENDING"            # transient — keep working, poll again
+                return
+            if bool(p.get("assume_fill_on_unknown", False)):
+                if not leg.unconfirmed:
+                    logger.warning("Executor: {} status persistently UNKNOWN after {} "
+                                   "polls — assuming filled (UNCONFIRMED) per "
+                                   "assume_fill_on_unknown", leg.symbol, leg.unknown_polls)
+                leg.status = "COMPLETE"
+                leg.unconfirmed = True
+                leg.filled = leg.units
+            else:
+                # Fail-safe: do NOT fabricate a fill. Leave the leg working so the
+                # escalation/orphan logic handles it, and flag it loudly.
+                leg.unconfirmed = True
+                leg.status = "PENDING"
+                logger.error("Executor: {} status UNKNOWN after {} polls — NOT assuming "
+                             "a fill (fail-safe); will escalate / treat as unfilled",
+                             leg.symbol, leg.unknown_polls)
             return
+        leg.unknown_polls = 0
         leg.status = status
-        leg.filled = int(st.get("filled_qty") or 0)
+        # filled_qty is for the CURRENT order; add the pre-placement baseline so a
+        # residual re-placement reports the true cumulative fill.
+        leg.filled = leg.prefill + int(st.get("filled_qty") or 0)
         if st.get("avg_price"):
             leg.avg_price = float(st["avg_price"])
 
@@ -223,7 +256,7 @@ class SpreadExecutor:
             if not working:
                 break
             for leg in working:
-                self._refresh(broker, leg)
+                self._refresh(broker, leg, p)
             working = [l for l in legs if l.working]
             if not working:
                 break
@@ -281,15 +314,35 @@ class SpreadExecutor:
             if not still:
                 break
             for leg in still:
-                self._refresh(broker, leg)
+                self._refresh(broker, leg, p)
             if not [l for l in working if l.working]:
                 break
             self._sleep(poll)
 
     # ── orphan recovery / pre-entry verification ─────────────────────────────
+    def _confirm_fill(self, broker, order_id: str, p: Dict) -> Optional[bool]:
+        """Poll an order to confirm it actually filled. Returns True (COMPLETE),
+        False (REJECTED/CANCELLED), or None (unconfirmable within the window —
+        e.g. persistent UNKNOWN). 'Accepted' is NOT 'filled', so a recovery
+        market order must be confirmed, not assumed."""
+        timeout = max(float(p.get("fill_timeout_sec", 5.0)), 2.0)
+        poll = float(p.get("poll_interval_sec", 0.4))
+        deadline = self._clock() + timeout
+        while self._clock() < deadline:
+            st = broker.get_order_status(order_id) or {}
+            s = str(st.get("status", "UNKNOWN")).upper()
+            if s == "COMPLETE":
+                return True
+            if s in ("REJECTED", "CANCELLED"):
+                return False
+            self._sleep(poll)
+        return None
+
     def _recover_orphan(self, broker, filled: List[LegOrder], p: Dict) -> bool:
         """Flatten every leg that DID fill, with an opposing market order, so a
-        partial entry never leaves one-sided exposure."""
+        partial entry never leaves one-sided exposure. The flattening order is
+        CONFIRMED filled — an accepted-but-unfilled recovery still leaves a naked
+        leg, so an unconfirmed recovery counts as a failure (alert the human)."""
         ok = True
         for leg in filled:
             opp = "sell" if leg.side == "buy" else "buy"
@@ -301,13 +354,21 @@ class SpreadExecutor:
                     token=leg.token,
                 ) or {}
                 leg.recovery = res
-                if res.get("status") == "error" or res.get("order_id") in (None, ""):
+                oid = res.get("order_id")
+                if res.get("status") == "error" or oid in (None, ""):
                     ok = False
                     logger.error("Executor: ORPHAN recovery FAILED for {} — {}",
                                  leg.symbol, res.get("message"))
-                else:
+                    continue
+                confirmed = self._confirm_fill(broker, oid, p)
+                if confirmed is True:
                     logger.error("Executor: ORPHAN recovery — flattened {} {} via MARKET (id={})",
-                                 opp, leg.symbol, res.get("order_id"))
+                                 opp, leg.symbol, oid)
+                else:
+                    ok = False
+                    state = "UNCONFIRMED" if confirmed is None else "NOT FILLED"
+                    logger.error("Executor: ORPHAN recovery {} for {} (id={}) — naked leg may "
+                                 "remain, VERIFY POSITIONS NOW", state, leg.symbol, oid)
             except Exception as exc:            # noqa: BLE001
                 ok = False
                 logger.error("Executor: ORPHAN recovery EXCEPTION for {} — {}", leg.symbol, exc)

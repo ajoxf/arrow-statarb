@@ -36,6 +36,7 @@ class MockBroker:
         self.fill_after = {}           # symbol -> polls before COMPLETE (default 0)
         self.never_fill = set()        # stays OPEN forever…
         self.fill_on_market = set()    # …unless re-placed as a market order
+        self.partial_fill = {}         # symbol -> units filled on a resting limit
         # recorders
         self.submits = []
         self.amends = []
@@ -67,6 +68,8 @@ class MockBroker:
         elif sym in self.never_fill:
             if o["order_type"] == "market" and sym in self.fill_on_market:
                 o.update(status="COMPLETE", filled=o["units"], avg=o["price"] or 100.0)
+            elif sym in self.partial_fill and o["order_type"] != "market":
+                o.update(status="PARTIAL", filled=self.partial_fill[sym], avg=o["price"] or 100.0)
             else:
                 o["status"] = "OPEN"
         elif self.poll_counts[order_id] > self.fill_after.get(sym, 0):
@@ -198,12 +201,38 @@ def test_verify_flat_allows_when_flat():
     assert res["success"] is True
 
 
-# ── degraded mode: broker with no order-status API ───────────────────────────
-def test_unknown_status_treated_as_filled_unconfirmed():
+# ── transient UNKNOWN status must NOT be assumed a fill (fail-safe default) ────
+def test_unknown_status_fails_safe_not_phantom_fill():
     b = MockBroker(status_unknown=True)
     res = _executor(b).execute(_legs())
+    # default: a persistent/transient UNKNOWN never fabricates a fill → no
+    # phantom "filled" success; the trade fails safe instead.
+    assert res["success"] is False
+    assert all(not r["status"] == "COMPLETE" for r in res["results"])
+
+
+# ── opt-in legacy mode: a broker with NO status API may assume the fill ───────
+def test_assume_fill_on_unknown_opt_in():
+    b = MockBroker(status_unknown=True)
+    p = dict(PARAMS, assume_fill_on_unknown=True, unknown_status_grace_polls=1)
+    res = _executor(b, p).execute(_legs())
     assert res["success"] is True
     assert all(r["unconfirmed"] for r in res["results"])
+
+
+# ── partial fill on a limit must NOT be doubled on market escalation ──────────
+def test_partial_fill_escalation_orders_only_residual():
+    b = MockBroker()
+    # AAA partially fills (30 of 75) on the limit, then needs escalation.
+    b.never_fill = {"AAA"}
+    b.fill_on_market = {"AAA"}
+    b.partial_fill = {"AAA": 30}              # limit fills 30, rests
+    b.fill_after = {"BBB": 0}
+    res = _executor(b).execute(_legs())
+    assert res["success"] is True
+    # the escalation market order for AAA must be for the RESIDUAL 45, not 75
+    aaa_market = [s for s in b.submits if s["symbol"] == "AAA" and s["order_type"] == "market"]
+    assert aaa_market and aaa_market[-1]["quantity"] == 45
 
 
 def test_no_broker_fails_cleanly():
