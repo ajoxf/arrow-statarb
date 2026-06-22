@@ -989,17 +989,32 @@ class ArrowBroker(BaseBroker):
             return []
 
     def get_account_info(self) -> Dict:
-        """Return account balance and margin info from Arrow."""
+        """Return account balance and margin info from Arrow.
+
+        The funds/limits endpoint is named differently across SDK builds, so we
+        try the known method names in turn and use the first that returns data.
+        The raw shape (list vs dict) and field names also vary — get_funds()
+        normalizes them; here we just surface the first non-empty payload and
+        log which method/keys we got so a mismatch is diagnosable."""
         if not self.connected or not self._client:
             return {}
-        try:
-            limits = self._client.get_user_limits()
-            if isinstance(limits, list) and limits:
-                return limits[0]
-            return limits or {}
-        except Exception as exc:
-            logger.warning("ArrowBroker: get_account_info failed — {}", exc)
-            return {}
+        for meth in ("get_user_limits", "get_limits", "get_funds", "get_margins",
+                     "get_margin", "get_rms_limits", "get_balance", "funds", "limits"):
+            fn = getattr(self._client, meth, None)
+            if fn is None:
+                continue
+            try:
+                data = fn()
+            except Exception as exc:
+                logger.debug("ArrowBroker: {}() failed — {}", meth, exc)
+                continue
+            rec = data[0] if isinstance(data, list) and data else data
+            if isinstance(rec, dict) and rec:
+                logger.info("ArrowBroker: funds via {}() — keys: {}", meth, list(rec.keys()))
+                return rec
+        logger.warning("ArrowBroker: no funds/limits method returned data — "
+                       "margin will read as unavailable")
+        return {}
 
     def get_funds(self) -> Dict:
         """Normalized funds/margin from Arrow's user limits. Field names vary by
@@ -1015,11 +1030,15 @@ class ArrowBroker(BaseBroker):
 
         return {
             "available": _f("availableMargin", "availablecash", "cashAvailable",
-                            "marginAvailable", "availableBalance", "available", "net"),
+                            "marginAvailable", "availableBalance", "available", "net",
+                            "cashmarginavailable", "netcash", "availablebalance",
+                            "marginavailable", "deposit", "openingbalance"),
             "used": _f("marginUsed", "usedMargin", "utilizedMargin", "marginUtilized",
-                       "utilisedMargin", "marginused", "spanMargin", "span"),
-            "equity": _f("equity", "netWorth", "collateral", "balance", "cashBalance"),
-            "cash": _f("cash", "cashBalance", "openingBalance", "payin"),
+                       "utilisedMargin", "marginused", "spanMargin", "span",
+                       "marginutilized", "usedmargin", "utilized"),
+            "equity": _f("equity", "netWorth", "collateral", "balance", "cashBalance",
+                         "net", "networth"),
+            "cash": _f("cash", "cashBalance", "openingBalance", "payin", "cashbalance"),
             "raw": raw,
         }
 

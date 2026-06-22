@@ -1212,6 +1212,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             f = {}
         for k in ("available", "used", "equity", "cash"):
             out[k] = f.get(k)
+        # Surface the raw broker payload so a funds field-name mismatch is
+        # diagnosable from /api/funds (Arrow's keys vary by build).
+        out["raw"] = f.get("raw")
         if out["used"] is not None and out["equity"]:
             try:
                 out["margin_ratio"] = round(100.0 * out["used"] / out["equity"], 2)
