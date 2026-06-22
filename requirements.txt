@@ -1,5 +1,7 @@
-# Arrow broker SDK
-pyarrow-client
+# Arrow broker SDK. >=1.5.0 required from 1 Jul 2026: the HFT data stream
+# (wss://socket.arrow.trade) switches to MANDATORY zstd compression; 1.5.0+
+# negotiates zstd=1 and decompresses inbound tick frames automatically.
+pyarrow-client>=1.5.0
 
 # TOTP / auth
 pyotp
