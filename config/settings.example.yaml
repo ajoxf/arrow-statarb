@@ -73,6 +73,9 @@ risk:
   max_slippage_pct: 0.5
   max_daily_loss: 0           # INR; 0 = disabled. Halts new entries when today's
                               # realized P&L ≤ −this.
+  min_live_margin: 50000      # INR; the Pre-Live "Account funded" check warns
+                              # until usable margin ≥ this (your broker's SPAN+
+                              # exposure for 1 lot of the spread). 0 = just > 0.
 
 # Only trade inside this window (IST).
 trading_hours:

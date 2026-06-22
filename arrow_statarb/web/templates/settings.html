@@ -86,6 +86,11 @@
                         <div class="form-text">0 = disabled</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">Min Live Margin (₹)</label>
+                        <input type="number" class="form-control" id="r-minmargin">
+                        <div class="form-text">"Account funded" warns until usable margin ≥ this (your SPAN+exposure for 1 lot). 0 = just &gt; 0.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Max Exit Failures</label>
                         <input type="number" class="form-control" id="x-maxfail">
                         <div class="form-text">Halt auto-exit retries & alert after this many consecutive failed exits. 0 = retry indefinitely.</div>
@@ -226,6 +231,7 @@
         _set('r-maxleg', s.risk.max_contracts_per_leg);
         _set('r-slip', s.risk.max_slippage_pct);
         _set('r-mdl', s.risk.max_daily_loss);
+        _set('r-minmargin', s.risk.min_live_margin);
         _set('x-maxfail', (s.execution || {}).max_exit_failures);
 
         _setChk('th-enabled', s.trading_hours.enabled);
@@ -270,6 +276,7 @@
                 max_contracts_per_leg: +document.getElementById('r-maxleg').value,
                 max_slippage_pct: +document.getElementById('r-slip').value,
                 max_daily_loss: +document.getElementById('r-mdl').value,
+                min_live_margin: +document.getElementById('r-minmargin').value,
             },
             trading_hours: {
                 enabled: document.getElementById('th-enabled').checked,

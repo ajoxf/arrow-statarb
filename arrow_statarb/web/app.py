@@ -919,14 +919,22 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception:
             funds = {}
         avail = funds.get("available")
+        min_margin = float(r.get("min_live_margin", 0) or 0)
         if not broker:
             add("funds", "Account funded", "fail", "Connect to read funds")
         elif avail is None:
             add("funds", "Account funded", "warn", "Broker did not report funds — verify margin manually")
-        elif avail > 0:
-            add("funds", "Account funded", "ok", f"Available ₹{avail:,.0f} — verify ≥ position margin")
-        else:
+        elif avail <= 0:
             add("funds", "Account funded", "fail", "No available margin")
+        elif min_margin > 0 and avail < min_margin:
+            # Funds detected, but below the configured per-trade margin floor —
+            # a live order would likely be rejected for insufficient margin.
+            add("funds", "Account funded", "warn",
+                f"Available ₹{avail:,.0f} below required ₹{min_margin:,.0f} — top up before live")
+        else:
+            tail = (f" (≥ ₹{min_margin:,.0f} required)" if min_margin > 0
+                    else " — verify ≥ position margin")
+            add("funds", "Account funded", "ok", f"Available ₹{avail:,.0f}{tail}")
 
         # 4 — risk caps set (advisory)
         cap = int(r.get("max_contracts_per_leg", 0) or 0)
@@ -1037,6 +1045,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "max_contracts_per_leg": r.get("max_contracts_per_leg", 5),
                     "max_slippage_pct": r.get("max_slippage_pct", 0.5),
                     "max_daily_loss": r.get("max_daily_loss", 0),
+                    "min_live_margin": r.get("min_live_margin", 0),
                 },
                 "trading_hours": {
                     "enabled": bool(th.get("enabled", False)),
@@ -1079,7 +1088,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
-                     ("max_slippage_pct", 0.5), ("max_daily_loss", 0)):
+                     ("max_slippage_pct", 0.5), ("max_daily_loss", 0),
+                     ("min_live_margin", 0)):
             if k in (data.get("risk") or {}):
                 rk[k] = _num(data["risk"][k], d)
 
