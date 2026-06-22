@@ -5,20 +5,22 @@ to run end-to-end — limit placement, fill polling, amendment, limit→market
 escalation and orphan recovery — against simulated fills, so execution can be
 exercised and measured with ZERO capital at risk.
 
-It is intentionally simple and configurable (no hardcoded magic): fills arrive
-after a short, optionally-slow delay at a price slipped adversely from the live
-LTP, with tunable probabilities for a slow fill, an outright reject, and a leg
-that never fills (to demonstrate orphan detection + recovery).
+Realistic fills: a buy fills at the **ask**, a sell at the **bid** (the real
+spread cost), using live bid/ask depth from Arrow when available, or a
+configurable synthetic spread (``spread_ticks``) when only LTP is known. A limit
+only fills when it is marketable (buy ≥ ask / sell ≤ bid) — otherwise it rests
+until the executor amends it more aggressively or escalates to market, which is
+how fill-probability is modelled. ``extra_slip_ticks`` adds optional latency/queue
+slippage on top of the touch.
 
-Prices come from the real feed when a live broker is connected (so the sim uses
-real instrument prices); otherwise a gentle synthetic random walk is used.
+Tunable knobs (no hidden magic): slow-fill / reject / orphan probabilities for
+exercising the safety paths.
 """
 
 from __future__ import annotations
 
 import random
 import threading
-import time
 from typing import Callable, Dict, List, Optional
 
 from loguru import logger
@@ -29,18 +31,25 @@ class SimBroker:
         self,
         *,
         real_price_fn: Optional[Callable[[str, str], Optional[float]]] = None,
+        quote_fn: Optional[Callable[[str, str], Optional[Dict]]] = None,
         lot_size_fn: Optional[Callable[[str, str], int]] = None,
-        slippage_pct: float = 0.03,
+        tick_size: float = 0.05,
+        spread_ticks: float = 2.0,        # synthetic full bid-ask spread (ticks)
+        extra_slip_ticks: float = 0.0,    # extra adverse slip beyond the touch
         slow_prob: float = 0.25,
         reject_prob: float = 0.0,
         orphan_prob: float = 0.0,
         orphan_symbols: Optional[set] = None,
         default_lot_size: int = 75,
         seed: Optional[int] = None,
+        slippage_pct: float = 0.0,        # accepted for back-compat; unused
     ):
         self._real_price = real_price_fn
+        self._quote_fn = quote_fn
         self._lot_size_fn = lot_size_fn
-        self.slippage_pct = float(slippage_pct)
+        self.tick_size = float(tick_size) or 0.05
+        self.spread_ticks = float(spread_ticks)
+        self.extra_slip_ticks = float(extra_slip_ticks)
         self.slow_prob = float(slow_prob)
         self.reject_prob = float(reject_prob)
         self.orphan_prob = float(orphan_prob)
@@ -56,7 +65,7 @@ class SimBroker:
         self._counter = 0
         self.connected = True
 
-    # ── prices ───────────────────────────────────────────────────────────────
+    # ── prices / quotes ──────────────────────────────────────────────────────
     def _ltp(self, segment: str, symbol: str) -> float:
         if self._real_price:
             try:
@@ -65,13 +74,43 @@ class SimBroker:
                     return float(v)
             except Exception:
                 pass
-        # synthetic random walk seeded near a plausible index-future level
         b = self._base.get(symbol)
         if b is None:
             b = 25000.0 + self._rng.uniform(-500, 500)
         b *= (1 + self._rng.uniform(-0.0004, 0.0004))
         self._base[symbol] = b
         return round(b, 2)
+
+    def _quote(self, segment: str, symbol: str):
+        """Return (bid, ask, ltp). Uses real depth when ``quote_fn`` provides
+        bid/ask; otherwise synthesizes a ``spread_ticks``-wide book around LTP."""
+        q = None
+        if self._quote_fn:
+            try:
+                q = self._quote_fn(segment, symbol)
+            except Exception:
+                q = None
+        ltp = float((q or {}).get("ltp") or self._ltp(segment, symbol))
+        bid = (q or {}).get("bid")
+        ask = (q or {}).get("ask")
+        try:
+            bid = float(bid) if bid else None
+            ask = float(ask) if ask else None
+        except (TypeError, ValueError):
+            bid = ask = None
+        if not bid or not ask or ask < bid:
+            half = (self.spread_ticks * self.tick_size) / 2.0
+            bid, ask = round(ltp - half, 2), round(ltp + half, 2)
+        return bid, ask, ltp
+
+    def _marketable(self, side: str, price, bid: float, ask: float, order_type: str) -> bool:
+        if order_type == "market" or price is None:
+            return True
+        return price >= ask if side == "buy" else price <= bid
+
+    def _touch_fill(self, side: str, bid: float, ask: float) -> float:
+        extra = self.extra_slip_ticks * self.tick_size
+        return round((ask + extra) if side == "buy" else (bid - extra), 2)
 
     def get_streamed_ltp(self, symbols: List[str]) -> Dict[str, float]:
         return {s.upper(): self._ltp("", s) for s in symbols}
@@ -112,26 +151,22 @@ class SimBroker:
                         "message": "simulated reject", "symbol": symbol}
             self._counter += 1
             oid = f"SIM{self._counter}"
-            ltp = self._ltp(exchange_segment, symbol)
-            slip = self._rng.uniform(0, self.slippage_pct) / 100.0
-            fill = ltp * (1 + slip) if side == "buy" else ltp * (1 - slip)
-            # A market re-placement (escalation) usually fills; a fresh limit may
-            # be slow; a leg in orphan_symbols (or randomly, per orphan_prob) never
-            # fills even on market — forcing an orphan.
             never = (symbol.upper() in self.orphan_symbols) or (
                 (order_type != "market") and (self._rng.random() < self.orphan_prob))
             slow = (order_type != "market") and (self._rng.random() < self.slow_prob)
             o = {
-                "symbol": symbol, "side": side, "units": int(quantity),
-                "order_type": order_type, "price": price, "status": "PENDING",
-                "fill_price": round(fill, 2), "polls": 0,
+                "symbol": symbol, "seg": exchange_segment, "side": side,
+                "units": int(quantity), "order_type": order_type, "price": price,
+                "status": "PENDING", "fill_price": 0.0, "polls": 0,
                 "polls_needed": (self._rng.randint(2, 4) if slow else 0),
                 "never": never,
             }
             self._orders[oid] = o
-            # A (non-stuck) MARKET order fills immediately — so orphan-recovery
-            # flattening updates positions even without a status poll.
+            # A (non-stuck) MARKET order fills immediately at the touch — so
+            # orphan-recovery flattening updates positions without a status poll.
             if order_type == "market" and not never:
+                bid, ask, _ = self._quote(exchange_segment, symbol)
+                o["fill_price"] = self._touch_fill(side, bid, ask)
                 o["status"] = "COMPLETE"
                 self._apply_fill(o)
             return {"order_id": oid, "status": "submitted", "symbol": symbol}
@@ -148,7 +183,10 @@ class SimBroker:
                 o["status"] = "OPEN"
             else:
                 o["polls"] += 1
-                if o["polls"] > o["polls_needed"]:
+                bid, ask, _ = self._quote(o["seg"], o["symbol"])
+                marketable = self._marketable(o["side"], o["price"], bid, ask, o["order_type"])
+                if marketable and o["polls"] > o["polls_needed"]:
+                    o["fill_price"] = self._touch_fill(o["side"], bid, ask)
                     o["status"] = "COMPLETE"
                     self._apply_fill(o)
                 else:
@@ -165,8 +203,8 @@ class SimBroker:
             if not o or o["status"] in ("COMPLETE", "REJECTED", "CANCELLED"):
                 return False
             if price is not None:
-                o["price"] = price
-            o["polls_needed"] = max(0, o["polls_needed"] - 1)   # chasing helps it fill
+                o["price"] = price                                  # chasing → marketable sooner
+            o["polls_needed"] = max(0, o["polls_needed"] - 1)
             return True
 
     def cancel_order(self, order_id: str) -> bool:

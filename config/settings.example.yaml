@@ -111,7 +111,12 @@ execution:
   exit_retry_backoff_max_sec: 60  # cap on the backoff delay.
   verify_flat_before_entry: true   # skip entry if a leg already has a position
   # ── live_sim: simulated broker the real executor runs against (no real orders) ─
-  sim_slippage_pct: 0.03      # max adverse slippage on simulated fills (%)
+  # live-sim fills at the bid/ask touch (real depth from Arrow when available,
+  # else a synthetic book this many ticks wide). Set spread_ticks to your legs'
+  # real spread — the far month is usually wider than the near.
+  sim_tick_size: 0.05         # instrument tick size (NIFTY fut = 0.05)
+  sim_spread_ticks: 2.0       # synthetic bid-ask width (ticks) when no live depth
+  sim_extra_slip_ticks: 0.0   # extra adverse slip beyond the touch (latency/queue)
   sim_slow_prob: 0.25         # chance a limit needs a couple polls/amendment to fill
   sim_reject_prob: 0.0        # chance a leg is rejected at placement
   sim_orphan_prob: 0.0        # chance a leg never fills → exercise orphan recovery

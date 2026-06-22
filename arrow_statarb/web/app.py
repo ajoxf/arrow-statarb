@@ -375,9 +375,22 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception:
             return 0
 
+    def _sim_quote(seg: str, sym: str):
+        """Real top-of-book bid/ask from the connected broker (for realistic
+        live-sim fills); None when unavailable → SimBroker uses a synthetic spread."""
+        b = active.get()
+        if b and hasattr(b, "get_quote"):
+            try:
+                return b.get_quote(seg, sym)
+            except Exception:
+                return None
+        return None
+
     sim_broker = SimBroker(
-        real_price_fn=_one_ltp, lot_size_fn=_sim_lot_size,
-        slippage_pct=float(_sim.get("sim_slippage_pct", 0.03)),
+        real_price_fn=_one_ltp, quote_fn=_sim_quote, lot_size_fn=_sim_lot_size,
+        tick_size=float(_sim.get("sim_tick_size", 0.05)),
+        spread_ticks=float(_sim.get("sim_spread_ticks", 2.0)),
+        extra_slip_ticks=float(_sim.get("sim_extra_slip_ticks", 0.0)),
         slow_prob=float(_sim.get("sim_slow_prob", 0.25)),
         reject_prob=float(_sim.get("sim_reject_prob", 0.0)),
         orphan_prob=float(_sim.get("sim_orphan_prob", 0.0)),

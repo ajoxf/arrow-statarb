@@ -655,6 +655,49 @@ class ArrowBroker(BaseBroker):
             logger.error("ArrowBroker: LTP fetch failed — {}", exc)
             return {}
 
+    def get_quote(self, exchange_segment: str, symbol: str) -> Dict:
+        """Best-effort ``{ltp, bid, ask}`` for one instrument. Tries a richer
+        quote mode (FULL/QUOTE/DEPTH) for top-of-book bid/ask; if the SDK/build
+        doesn't expose it, falls back to LTP only (bid/ask = None). Tolerant of
+        field-name and shape variation — used by the live-sim fill model."""
+        out: Dict = {"ltp": None, "bid": None, "ask": None}
+        ltp_map = self.get_ltp([{"exchange_segment": exchange_segment,
+                                 "instrument_token": symbol}])
+        out["ltp"] = ltp_map.get(symbol.upper())
+        if not self.connected or not self._client:
+            return out
+        mode = None
+        for name in ("FULL", "QUOTE", "DEPTH", "MARKET_DEPTH", "OHLC"):
+            m = getattr(QuoteMode, name, None)
+            if m is not None:
+                mode = m
+                break
+        if mode is None:
+            return out
+        try:
+            exch = Exchange(_SEGMENT_MAP.get(exchange_segment.lower(), exchange_segment.upper()))
+            resp = self._client.get_quotes(mode, [(symbol, exch)])
+            rec = resp[0] if isinstance(resp, list) and resp else (resp if isinstance(resp, dict) else None)
+            if isinstance(rec, dict):
+                bid = _dig(rec, "bid", "bestBid", "buyPrice", "bidPrice", "bp", "bestBidPrice")
+                ask = _dig(rec, "ask", "bestAsk", "sellPrice", "askPrice", "sp", "offer", "bestAskPrice")
+                # depth array fallback: [{price, qty, ...}, ...]
+                if bid is None or ask is None:
+                    buys = _dig(rec, "buy", "bids", "buyDepth", "depthBuy")
+                    sells = _dig(rec, "sell", "asks", "sellDepth", "depthSell")
+                    if isinstance(buys, list) and buys:
+                        bid = bid or _dig(buys[0], "price", "rate", "p")
+                    if isinstance(sells, list) and sells:
+                        ask = ask or _dig(sells[0], "price", "rate", "p")
+                try:
+                    out["bid"] = float(bid) if bid not in (None, "") else None
+                    out["ask"] = float(ask) if ask not in (None, "") else None
+                except (TypeError, ValueError):
+                    pass
+        except Exception as exc:
+            logger.debug("ArrowBroker: depth quote unavailable for {} — {}", symbol, exc)
+        return out
+
     # ── Live price stream (WebSocket) ──────────────────────────────────────────
 
     def start_price_stream(self, symbols: List[str]) -> bool:
