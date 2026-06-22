@@ -147,6 +147,10 @@ class ArrowBroker(BaseBroker):
         # generic "login failed".
         self.last_error: str = ""
 
+        # Remembers the funds method+shape we last logged, so the per-poll funds
+        # read doesn't spam the log on every dashboard refresh.
+        self._funds_sig = None
+
         # Instrument master fetched lazily from Arrow's /all endpoint
         self._instruments: List[Dict] = []
         self._instruments_ready = threading.Event()
@@ -1010,7 +1014,10 @@ class ArrowBroker(BaseBroker):
                 continue
             rec = data[0] if isinstance(data, list) and data else data
             if isinstance(rec, dict) and rec:
-                logger.info("ArrowBroker: funds via {}() — keys: {}", meth, list(rec.keys()))
+                sig = (meth, tuple(sorted(rec.keys())))
+                if sig != self._funds_sig:        # log once (or when shape changes)
+                    self._funds_sig = sig
+                    logger.info("ArrowBroker: funds via {}() — keys: {}", meth, list(rec.keys()))
                 return rec
         logger.warning("ArrowBroker: no funds/limits method returned data — "
                        "margin will read as unavailable")
