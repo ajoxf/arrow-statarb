@@ -65,10 +65,14 @@ def _entry_cutoff_reached(p: Dict) -> bool:
     if buf <= 0:
         return False
     now = datetime.now(_IST)
-    close = now.replace(hour=int(th.get("close_hour", th.get("end_hour", 15))),
-                        minute=int(th.get("close_min", th.get("end_min", 30))),
-                        second=0, microsecond=0)
-    return now >= (close - timedelta(minutes=buf))
+    close_mod = (int(th.get("close_hour", th.get("end_hour", 15))) * 60
+                 + int(th.get("close_min", th.get("end_min", 30))))
+    now_mod = now.hour * 60 + now.minute + now.second / 60.0
+    # Minutes until the NEXT close, wrap-safe (mod 1440) so a close time that
+    # lands on the other side of midnight never inverts the comparison the way
+    # now.replace(hour=…) would. Block only inside the buffer BEFORE the close.
+    minutes_to_close = (close_mod - now_mod) % 1440
+    return minutes_to_close <= buf
 
 
 class ArrowAutoTrader:
