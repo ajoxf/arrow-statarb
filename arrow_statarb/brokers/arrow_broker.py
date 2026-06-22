@@ -1024,28 +1024,35 @@ class ArrowBroker(BaseBroker):
         return {}
 
     def get_funds(self) -> Dict:
-        """Normalized funds/margin from Arrow's user limits. Field names vary by
-        build, so this is tolerant — anything it can't read is ``None``."""
+        """Normalized funds/margin from Arrow's user limits. Arrow returns
+        ``{"allocations": [...], "margin": {...}}`` with the real figures nested
+        under ``margin`` (e.g. usableMargin, utilized, totalCash). We read from
+        that sub-dict, falling back to the top level for other SDK shapes. Field
+        names vary, so this stays tolerant — anything it can't read is ``None``."""
         raw = self.get_account_info() or {}
+        # Real figures live under "margin"; fall back to the whole payload.
+        m = raw.get("margin") if isinstance(raw.get("margin"), dict) else raw
 
         def _f(*keys):
-            v = _dig(raw, *keys)
+            v = _dig(m, *keys)
             try:
                 return float(v) if v not in (None, "") else None
             except (TypeError, ValueError):
                 return None
 
         return {
-            "available": _f("availableMargin", "availablecash", "cashAvailable",
-                            "marginAvailable", "availableBalance", "available", "net",
-                            "cashmarginavailable", "netcash", "availablebalance",
-                            "marginavailable", "deposit", "openingbalance"),
-            "used": _f("marginUsed", "usedMargin", "utilizedMargin", "marginUtilized",
-                       "utilisedMargin", "marginused", "spanMargin", "span",
-                       "marginutilized", "usedmargin", "utilized"),
-            "equity": _f("equity", "netWorth", "collateral", "balance", "cashBalance",
-                         "net", "networth"),
-            "cash": _f("cash", "cashBalance", "openingBalance", "payin", "cashbalance"),
+            # usable/free margin to deploy
+            "available": _f("usableMargin", "cashAvailableForCNC",
+                            "cashAvailableForOptionBuy", "availableMargin",
+                            "availablecash", "cashAvailable", "marginAvailable",
+                            "availableBalance", "available", "net"),
+            # margin currently blocked by positions
+            "used": _f("utilized", "cashUsed", "marginUsed", "usedMargin",
+                       "utilizedMargin", "totalMargin", "spanMargin"),
+            # account balance / total funds
+            "equity": _f("totalCash", "allocated", "totalCashEq", "equity",
+                         "netWorth", "collateral", "balance"),
+            "cash": _f("totalCash", "cashCurrent", "cash", "cashBalance"),
             "raw": raw,
         }
 
