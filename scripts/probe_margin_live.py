@@ -72,6 +72,15 @@ def main() -> int:
     client = broker._client
     print("connected. client:", type(client).__name__)
 
+    # connect() fetches the instrument master on a background thread; wait for it
+    # so resolve_lot_size() returns the real 65 (not the fallback 1).
+    import time
+    for _ in range(60):
+        if getattr(broker, "_lot_sizes", None):
+            break
+        time.sleep(0.5)
+    print("instrument master entries:", len(getattr(broker, "_lot_sizes", {})))
+
     # Resolve the two legs from config (segment, symbol, lot size, LTP).
     legs = []
     for lk in ("leg_a", "leg_b"):
@@ -79,7 +88,7 @@ def main() -> int:
         sym = cfg.get(f"instruments.{lk}.symbol", "")
         side = "buy" if lk == "leg_a" else "sell"          # LONG_SPREAD
         lot = int(broker.resolve_lot_size(seg, sym))
-        ltp = broker.get_ltp([{"segment": seg, "symbol": sym}]).get(sym, 0.0)
+        ltp = broker.get_ltp([{"exchange_segment": seg, "instrument_token": sym}]).get(sym.upper(), 0.0)
         legs.append({"seg": seg, "sym": sym, "side": side, "qty": lot, "ltp": float(ltp or 0.0)})
         print(f"  {lk}: {sym} {side} qty={lot} ltp={ltp}")
 
@@ -107,31 +116,33 @@ def main() -> int:
     def basket(encode):
         return lambda: client.basket_margin([encode(leg) for leg in legs])
 
-    # 2a: enum objects, keys mirroring order_margin params
+    # basket_margin rejected numeric quantity ("expected: string") — so EVERY
+    # value goes as a string. Try enum objects vs enum .value for the type fields.
+    # 2a: string scalars, enum objects for exchange/product/order_type/txn
     def enc_enum(leg):
         ex, tt = _enums(leg)
-        return {"exchange": ex, "symbol": leg["sym"], "quantity": leg["qty"],
+        return {"exchange": ex, "symbol": leg["sym"], "quantity": str(leg["qty"]),
                 "product": ProductType.NRML, "order_type": OrderType.LIMIT,
-                "transaction_type": tt, "price": leg["ltp"]}
+                "transaction_type": tt, "price": str(leg["ltp"])}
 
-    # 2b: plain string values
+    # 2b: everything as strings (enum .value)
     def enc_str(leg):
+        ex, tt = _enums(leg)
+        return {"exchange": ex.value, "symbol": leg["sym"], "quantity": str(leg["qty"]),
+                "product": ProductType.NRML.value, "order_type": OrderType.LIMIT.value,
+                "transaction_type": tt.value, "price": str(leg["ltp"])}
+
+    # 2c: plain English string enums (BUY/SELL/NRML/LIMIT/NFO)
+    def enc_words(leg):
         return {"exchange": _SEGMENT_MAP.get(leg["seg"].lower(), leg["seg"].upper()),
-                "symbol": leg["sym"], "quantity": leg["qty"],
+                "symbol": leg["sym"], "quantity": str(leg["qty"]),
                 "product": "NRML", "order_type": "LIMIT",
                 "transaction_type": "BUY" if leg["side"] == "buy" else "SELL",
-                "price": leg["ltp"]}
+                "price": str(leg["ltp"])}
 
-    # 2c: enum .value strings
-    def enc_val(leg):
-        ex, tt = _enums(leg)
-        return {"exchange": ex.value, "symbol": leg["sym"], "quantity": leg["qty"],
-                "product": ProductType.NRML.value, "order_type": OrderType.LIMIT.value,
-                "transaction_type": tt.value, "price": leg["ltp"]}
-
-    _show("basket_margin  [enum objects]", basket(enc_enum))
-    _show("basket_margin  [string values]", basket(enc_str))
-    _show("basket_margin  [enum .value]", basket(enc_val))
+    _show("basket_margin  [str qty, enum objects]", basket(enc_enum))
+    _show("basket_margin  [str qty, enum .value]", basket(enc_str))
+    _show("basket_margin  [str qty, word enums]", basket(enc_words))
 
     print("\nDone. Paste the whole output back.")
     return 0
