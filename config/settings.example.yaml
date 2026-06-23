@@ -102,6 +102,10 @@ execution:
   cooldown_sec: 300
   use_limit_orders: true      # place legs as LIMIT (priced off LTP), not MARKET
   limit_offset_pct: 0.05      # % through LTP for a marketable limit (caps slippage)
+  # Limit prices are snapped to the instrument tick (Arrow REJECTS off-tick
+  # prices, e.g. 23950.97). The broker master's tick is used when available;
+  # this is the fallback when it isn't. NIFTY & most NSE F&O tick = 0.10.
+  price_tick_size: 0.10
   amend_step_pct: 0.05        # extra % added each amendment to chase the fill
   amend_interval_sec: 1.5     # re-price the resting limit this often while waiting
   fill_timeout_sec: 5         # wait this long for a limit before escalating
@@ -125,7 +129,7 @@ execution:
   # live-sim fills at the bid/ask touch (real depth from Arrow when available,
   # else a synthetic book this many ticks wide). Set spread_ticks to your legs'
   # real spread — the far month is usually wider than the near.
-  sim_tick_size: 0.05         # instrument tick size (NIFTY fut = 0.05)
+  sim_tick_size: 0.10         # instrument tick size (NIFTY fut = 0.10)
   sim_spread_ticks: 2.0       # synthetic bid-ask width (ticks) when no live depth
   sim_extra_slip_ticks: 0.0   # extra adverse slip beyond the touch (latency/queue)
   sim_slow_prob: 0.25         # chance a limit needs a couple polls/amendment to fill

@@ -118,6 +118,35 @@ def _executor(broker, params=None, price=100.0):
     )
 
 
+# ── tick rounding: limit prices must land on the exchange tick grid ──────────
+def test_limit_prices_snapped_to_tick():
+    """A buy rounds UP and a sell rounds DOWN to the broker's tick, so Arrow
+    never rejects an off-tick price (the live 'multiple of 0.10' rejection)."""
+    class TickBroker(MockBroker):
+        def resolve_tick_size(self, seg, sym):
+            return 0.10
+
+    b = TickBroker()
+    # LTP 23950 → buy limit 23950×1.0005=23961.975 → up to 23962.00 (×0.10 ok);
+    # sell 23950×0.9995=23938.025 → down to 23938.00.
+    _executor(b, price=23950.0).execute(_legs())
+    for s in b.submits:
+        cents = round(s["price"] * 100)
+        assert cents % 10 == 0, f"{s['side']} price {s['price']} not a 0.10 multiple"
+    buy = next(s for s in b.submits if s["side"] == "buy")
+    sell = next(s for s in b.submits if s["side"] == "sell")
+    assert buy["price"] >= 23950.0 and sell["price"] <= 23950.0
+
+
+def test_tick_falls_back_to_config_when_broker_has_no_tick():
+    """No resolve_tick_size on the broker → use params price_tick_size."""
+    b = MockBroker()                         # no resolve_tick_size
+    p = dict(PARAMS, price_tick_size=0.10)
+    _executor(b, p, price=23950.0).execute(_legs())
+    for s in b.submits:
+        assert round(s["price"] * 100) % 10 == 0
+
+
 # ── happy path: both legs as limits, both fill ───────────────────────────────
 def test_both_legs_fill_as_limit():
     b = MockBroker()

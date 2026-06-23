@@ -428,6 +428,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "assume_fill_on_unknown": bool(e.get("assume_fill_on_unknown", False)),
             "product": str(e.get("product", "NRML")),
             "max_slippage_pct": float(r.get("max_slippage_pct", 0.5)),
+            # Fallback price tick when the broker master exposes no tick size.
+            # Arrow rejects off-tick limit prices (NIFTY fut = 0.10).
+            "price_tick_size": float(e.get("price_tick_size", 0.05)),
         }
 
     spread_executor = SpreadExecutor(broker_fn=active.get, price_fn=_one_ltp,

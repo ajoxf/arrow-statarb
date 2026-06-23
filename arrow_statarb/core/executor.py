@@ -28,6 +28,7 @@ order this places is real.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -154,12 +155,40 @@ class SpreadExecutor:
 
     # ── placement / pricing ──────────────────────────────────────────────────
     @staticmethod
-    def _limit_price(side: str, ltp: Optional[float], offset: float) -> Optional[float]:
+    def _round_to_tick(price: float, tick: float, side: str) -> float:
+        """Snap a price to the exchange tick grid. Round a BUY limit UP and a SELL
+        limit DOWN so the order stays marketable (and away from the touch it's
+        crossing). Falls back to 2dp when no tick is known."""
+        if not tick or tick <= 0:
+            return round(price, 2)
+        steps = price / tick
+        r = math.ceil(steps - 1e-9) if side == "buy" else math.floor(steps + 1e-9)
+        return round(r * tick, 2)
+
+    @staticmethod
+    def _limit_price(side: str, ltp: Optional[float], offset: float,
+                     tick: float = 0.0) -> Optional[float]:
         """A marketable limit: buy slightly above / sell slightly below LTP so it
-        fills quickly while still capping slippage at ``offset``."""
+        fills quickly while still capping slippage at ``offset``. The price is
+        snapped to the instrument tick (Arrow rejects off-tick prices)."""
         if ltp is None:
             return None
-        return round(ltp * (1 + offset), 2) if side == "buy" else round(ltp * (1 - offset), 2)
+        raw = ltp * (1 + offset) if side == "buy" else ltp * (1 - offset)
+        return SpreadExecutor._round_to_tick(raw, tick, side)
+
+    @staticmethod
+    def _tick_for(broker, leg: "LegOrder", p: Dict) -> float:
+        """Instrument tick: the broker's master value if it exposes one, else the
+        configured ``price_tick_size`` fallback (0 ⇒ plain 2dp rounding)."""
+        fn = getattr(broker, "resolve_tick_size", None)
+        if callable(fn):
+            try:
+                t = float(fn(leg.segment, leg.symbol))
+                if t > 0:
+                    return t
+            except Exception:
+                pass
+        return float(p.get("price_tick_size", 0) or 0)
 
     def _place(self, broker, leg: LegOrder, p: Dict, force_market: bool = False) -> None:
         use_limit = bool(p.get("use_limit_orders", True)) and not force_market
@@ -178,7 +207,9 @@ class SpreadExecutor:
             leg.ref_price = ltp
         price = None
         if order_type == "limit":
-            price = self._limit_price(leg.side, ltp, float(p.get("limit_offset_pct", 0.05)) / 100.0)
+            tick = self._tick_for(broker, leg, p)
+            price = self._limit_price(leg.side, ltp,
+                                      float(p.get("limit_offset_pct", 0.05)) / 100.0, tick)
             if price is None:                       # no live price → market fallback
                 order_type = "market"
                 logger.warning("Executor: no LTP for {} — placing MARKET", leg.symbol)
@@ -280,7 +311,7 @@ class SpreadExecutor:
         leg.amend_count += 1
         offset = (float(p.get("limit_offset_pct", 0.05))
                   + float(p.get("amend_step_pct", 0.05)) * leg.amend_count) / 100.0
-        price = self._limit_price(leg.side, ltp, offset)
+        price = self._limit_price(leg.side, ltp, offset, self._tick_for(broker, leg, p))
         if price is not None and broker.amend_order(leg.order_id, price=price):
             leg.limit_price = price
             logger.info("Executor: amended {} limit → {}", leg.symbol, price)

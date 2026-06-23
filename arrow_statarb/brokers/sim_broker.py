@@ -136,6 +136,11 @@ class SimBroker:
                 pass
         return self.default_lot_size
 
+    def resolve_tick_size(self, exchange_segment: str, symbol: str) -> float:
+        """Same tick the sim books quotes on, so the executor's tick-rounded
+        limits line up with the simulated bid/ask grid."""
+        return float(self.tick_size)
+
     def resolve_token(self, exchange_segment: str, symbol: str) -> str:
         return symbol
 

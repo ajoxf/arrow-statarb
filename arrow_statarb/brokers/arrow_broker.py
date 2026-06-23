@@ -139,6 +139,9 @@ class ArrowBroker(BaseBroker):
             k.upper(): int(v)
             for k, v in (config.get("lot_sizes") or {}).items()
         }
+        # Per-symbol price tick size from the master (e.g. NIFTY fut = 0.10).
+        # Orders/amends must be a multiple of this or Arrow rejects them.
+        self._tick_sizes: Dict[str, float] = {}
 
         self._client: Optional[object] = None   # ArrowClient instance
 
@@ -328,9 +331,10 @@ class ArrowBroker(BaseBroker):
 
     @staticmethod
     def _extract_symbol_lot(inst: Dict):
-        """Pull (symbol, lot_size) from one instrument record, tolerant of the
-        many key/column spellings brokers use (symbol/tradingSymbol/…,
-        lotSize/lot_size/lotQty/…). Returns (symbol_upper, int|None)."""
+        """Pull (symbol, lot_size, tick_size) from one instrument record, tolerant
+        of the many key/column spellings brokers use (symbol/tradingSymbol/…,
+        lotSize/lot_size/lotQty/…, tickSize/ticksize/tick/minMove/…). Returns
+        (symbol_upper, int|None, float|None)."""
         # Case-insensitive key lookup
         lower = {str(k).lower(): v for k, v in inst.items()}
         sym = ""
@@ -351,7 +355,19 @@ class ArrowBroker(BaseBroker):
                     ls = None
                 if ls:
                     break
-        return sym, ls
+        tick = None
+        for k in ("ticksize", "tick_size", "tick", "minmove", "min_move", "minimumtick", "pricetick"):
+            if lower.get(k) not in (None, "", "0"):
+                try:
+                    t = float(lower[k])
+                    # Some masters quote tick in paise (e.g. 10 = ₹0.10) — keep as
+                    # given; resolve_tick_size sanity-checks downstream.
+                    if t > 0:
+                        tick = t
+                        break
+                except (ValueError, TypeError):
+                    pass
+        return sym, ls, tick
 
     # ── Picker index (underlying / contract lookup) ───────────────────────────
 
@@ -528,9 +544,11 @@ class ArrowBroker(BaseBroker):
             for inst in instruments:
                 if not isinstance(inst, dict):
                     continue
-                sym, ls = self._extract_symbol_lot(inst)
+                sym, ls, tick = self._extract_symbol_lot(inst)
                 if sym and ls:
                     self._lot_sizes.setdefault(sym, ls)
+                if sym and tick:
+                    self._tick_sizes.setdefault(sym, tick)
 
             self._build_instrument_index()
 
@@ -578,6 +596,30 @@ class ArrowBroker(BaseBroker):
             exchange_segment, symbol,
         )
         return 1
+
+    def resolve_tick_size(self, exchange_segment: str, symbol: str) -> float:
+        """Return the price tick size for a symbol (e.g. NIFTY fut = 0.10).
+
+        Same exact→base resolution as resolve_lot_size. Returns 0.0 when unknown
+        so the caller can fall back to its configured default tick.
+        """
+        sym = symbol.upper()
+        t = self._tick_sizes.get(sym)
+        if not t:
+            _suffix = re.compile(r'(FUT|\d{2}[A-Z]{3}\d{2}|\d{2}[A-Z]{3}|\d{6})$')
+            base, prev = sym, None
+            while base and base != prev:
+                prev = base
+                base = _suffix.sub('', base).rstrip(" -")
+                t = self._tick_sizes.get(base)
+                if t:
+                    break
+        if not t or t <= 0:
+            return 0.0
+        # Trust the master only when it's already a plausible sub-rupee tick
+        # (NSE F&O ticks are 0.01–0.95). A value ≥ 1 is an ambiguous unit
+        # (paise? lots?) — return 0 so the caller uses its configured default.
+        return float(t) if 0 < t < 1 else 0.0
 
     # ── Quotes ────────────────────────────────────────────────────────────────
 

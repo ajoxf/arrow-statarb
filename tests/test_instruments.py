@@ -37,9 +37,22 @@ def test_parse_instruments_csv():
 
 def test_extract_symbol_lot_uses_trading_symbol():
     # Lot must be keyed by the tradeable symbol, not the underlying.
-    sym, ls = ArrowBroker._extract_symbol_lot(SAMPLE_MASTER[0])
+    sym, ls, _tick = ArrowBroker._extract_symbol_lot(SAMPLE_MASTER[0])
     assert sym == "NIFTY30JUN26F"
     assert ls == 75
+
+
+def test_resolve_tick_size_from_master_and_guard(arrow_broker):
+    # A plausible sub-rupee tick is trusted; an implausible (≥1) value is
+    # rejected so the caller falls back to its configured default (returns 0).
+    arrow_broker._tick_sizes = {"NIFTY30JUN26F": 0.10, "WEIRD": 5.0}
+    assert arrow_broker.resolve_tick_size("nse_fo", "NIFTY30JUN26F") == 0.10
+    assert arrow_broker.resolve_tick_size("nse_fo", "WEIRD") == 0.0
+    assert arrow_broker.resolve_tick_size("nse_fo", "UNSEEN") == 0.0
+    # base-symbol strip (FUT/expiry tokens): a tick keyed by the underlying
+    # still resolves for an expiry-coded trading symbol.
+    arrow_broker._tick_sizes = {"CRUDEOIL": 0.05}
+    assert arrow_broker.resolve_tick_size("nse_fo", "CRUDEOIL25JULFUT") == 0.05
 
 
 def test_build_index_groups_and_sorts(arrow_broker):
@@ -69,7 +82,7 @@ def test_lot_resolution_exact_and_strip(arrow_broker):
     arrow_broker._instruments = SAMPLE_MASTER
     # Populate lot index the way _fetch_instruments does
     for inst in SAMPLE_MASTER:
-        s, ls = ArrowBroker._extract_symbol_lot(inst)
+        s, ls, _tick = ArrowBroker._extract_symbol_lot(inst)
         if s and ls:
             arrow_broker._lot_sizes.setdefault(s, ls)
 
