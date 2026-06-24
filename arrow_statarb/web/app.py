@@ -327,9 +327,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         res = _spread_order(legs, "Order", verify_flat=True)
         if res.get("success"):
             m = _trade_meta(res)
-            # Prefer the caller's (algo's) decision z/spread over a re-sample.
+            # P&L MUST come from the actual executed fill spread (m["spread"],
+            # built from the executor's avg_price), NOT the algo's decision
+            # spread — otherwise slippage is invisible and a slipped trade can
+            # show a paper "win" while the broker books a real loss. The
+            # decision z is still recorded (below) as the signal indicator.
             trade_log.record(action="OPEN", direction=direction, lots=lots,
-                             spread=(spread if spread is not None else m["spread"]),
+                             spread=m["spread"],
                              dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"],
@@ -353,7 +357,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if res.get("success"):
             m = _trade_meta(res)
             trade_log.record(action="CLOSE", direction=direction, lots=lots,
-                             spread=(spread if spread is not None else m["spread"]),
+                             spread=m["spread"],  # actual fill spread — see OPEN note
                              dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"],
