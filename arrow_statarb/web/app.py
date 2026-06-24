@@ -1125,6 +1125,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "amend_step_pct": ex.get("amend_step_pct", 0.05),
                     "amend_interval_sec": ex.get("amend_interval_sec", 1.5),
                     "fill_timeout_sec": ex.get("fill_timeout_sec", 5),
+                    "max_exit_failures": ex.get("max_exit_failures", 0),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1136,9 +1137,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
                     "max_entry_zscore": s.get("max_entry_zscore", 0),
-                },
-                "execution": {
-                    "max_exit_failures": cfg.section("execution").get("max_exit_failures", 0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -1182,10 +1180,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             if k in (data.get("signal") or {}):
                 sig[k] = _num(data["signal"][k], d)
 
-        ex = raw.setdefault("execution", {})
-        if "max_exit_failures" in (data.get("execution") or {}):
-            ex["max_exit_failures"] = _num(data["execution"]["max_exit_failures"], 0)
-
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
                      ("max_slippage_pct", 0.5), ("max_daily_loss", 0),
@@ -1216,7 +1210,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         ex = raw.setdefault("execution", {})
         ed = data.get("execution") or {}
         for k, d in (("limit_offset_pct", 0.05), ("amend_step_pct", 0.05),
-                     ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0)):
+                     ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0),
+                     ("max_exit_failures", 0)):
             if k in ed:
                 ex[k] = _num(ed[k], d)
 

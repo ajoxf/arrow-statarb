@@ -311,9 +311,6 @@
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
                 max_entry_zscore: +document.getElementById('s-zmax').value,
             },
-            execution: {
-                max_exit_failures: +document.getElementById('x-maxfail').value,
-            },
             risk: {
                 lots_per_trade: +document.getElementById('r-lots').value,
                 max_contracts_per_leg: +document.getElementById('r-maxleg').value,
@@ -340,6 +337,7 @@
                 amend_step_pct: +document.getElementById('e-step').value,
                 amend_interval_sec: +document.getElementById('e-interval').value,
                 fill_timeout_sec: +document.getElementById('e-timeout').value,
+                max_exit_failures: +document.getElementById('x-maxfail').value,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,
