@@ -101,16 +101,23 @@ execution:
   default_lots: 1
   cooldown_sec: 300
   use_limit_orders: true      # place legs as LIMIT (priced off LTP), not MARKET
-  limit_offset_pct: 0.05      # % through LTP for a marketable limit (caps slippage)
+  # ── fill-chasing aggressiveness (this is where slippage comes from) ──────────
+  # The limit is placed THROUGH the market by limit_offset_pct so it fills fast;
+  # that give-up IS the slippage. On a ~24000 future, 0.05% ≈ 12 pts crossed on
+  # entry alone — larger than a typical mean-reversion edge. Lower = better
+  # prices but more unfilled/half-filled (orphan) legs. Watch the journal's Slip
+  # column and tune: if slippage routinely exceeds edge, go gentler still.
+  limit_offset_pct: 0.01      # % through LTP for the limit (0.01% ≈ 2-3 pts; rest near the touch)
   # Limit prices are snapped to the instrument tick (Arrow REJECTS off-tick
   # prices, e.g. 23950.97). The broker master's tick is used when available;
   # this is the fallback when it isn't. NIFTY & most NSE F&O tick = 0.10.
   price_tick_size: 0.10
-  amend_step_pct: 0.05        # extra % added each amendment to chase the fill
-  amend_interval_sec: 1.5     # re-price the resting limit this often while waiting
-  fill_timeout_sec: 5         # wait this long for a limit before escalating
+  amend_step_pct: 0.02        # extra % added each amendment to chase the fill (smaller steps)
+  amend_interval_sec: 3.0     # re-price the resting limit this often (give it time to fill at your price)
+  fill_timeout_sec: 8         # wait this long for a limit before escalating (more patience)
   poll_interval_sec: 0.4      # order-status (fill) poll cadence
   limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
+                              # (kept on so EXITS always complete; an open position must get flat)
   # Order-status safety: a status read that comes back UNKNOWN is treated as a
   # TRANSIENT glitch — we poll through a grace window and never fabricate a fill.
   unknown_status_grace_polls: 3   # consecutive UNKNOWN reads tolerated before deciding
