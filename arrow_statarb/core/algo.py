@@ -304,12 +304,18 @@ class ArrowAutoTrader:
             # revert through exit_z back toward the mean
             reverted = (z >= exit_z) if entry_z_sign < 0 else (z <= exit_z)
             held_sec = now - self._pos["entry_time"]
+            min_hold_sec = float(p.get("min_hold_sec", 0.0))
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
             spread_now = sig.get("spread")
+            # Minimum hold: suppress the reversion/target exit until the trade has
+            # lived long enough that REAL reversion — not a single noisy tick —
+            # decides the outcome. The stop-loss is never suppressed (safety), and
+            # the time-stop is a maximum so it is always beyond the minimum.
+            hold_gated = reverted and min_hold_sec > 0 and held_sec < min_hold_sec
             if abs(z) >= stop_z:
                 exit_reason = "stop"
-            elif reverted:
+            elif reverted and not hold_gated:
                 exit_reason = "target"
             elif max_hold_sec > 0 and held_sec >= max_hold_sec:
                 exit_reason = "time_stop"
@@ -335,6 +341,9 @@ class ArrowAutoTrader:
             elif exit_reason == "time_stop":
                 snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s)"
                 self._exit("time_stop", z, spread_now)
+            elif hold_gated:
+                snap["status"] = (f"min-hold {held_sec:.0f}s/{min_hold_sec:.0f}s — "
+                                  f"reverted but holding (z={z:.2f})")
             else:
                 snap["status"] = f"holding {self._pos['direction']} (z={z:.2f})"
 

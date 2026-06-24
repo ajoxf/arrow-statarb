@@ -79,6 +79,26 @@ def test_hold_then_exit_target():
     assert algo.get_state()["in_position"] is False
 
 
+def test_min_hold_suppresses_target_exit():
+    algo, state, calls = _make({"min_hold_sec": 60.0})
+    state["sig"] = _sig(-2.5); algo._tick()         # enter LONG
+    state["sig"] = _sig(0.1); algo._tick()          # reverted, but held < min_hold
+    assert calls["close"] == []                     # exit suppressed
+    assert "min-hold" in algo.get_state()["status"]
+    # once the position has lived past the minimum hold, the target exit fires
+    algo._pos["entry_time"] = time.time() - 100
+    state["sig"] = _sig(0.1); algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+
+
+def test_min_hold_never_suppresses_stop_loss():
+    algo, state, calls = _make({"min_hold_sec": 60.0})
+    state["sig"] = _sig(-2.5); algo._tick()         # enter LONG (held ~0s)
+    state["sig"] = _sig(-4.5); algo._tick()         # |z| ≥ stop within the hold window
+    assert calls["close"] == [("LONG_SPREAD", 1)]   # stop is never gated
+    assert "STOP" in algo._snap["status"]
+
+
 def test_stop_loss():
     algo, state, calls = _make()
     state["sig"] = _sig(-2.5); algo._tick()         # enter LONG

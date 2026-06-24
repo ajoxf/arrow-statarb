@@ -27,6 +27,11 @@
                         <input type="number" step="1" class="form-control" id="s-minhist">
                         <div class="form-text">Signal must collect this much history before any trade</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Min Hold (sec)</label>
+                        <input type="number" step="1" class="form-control" id="s-minhold">
+                        <div class="form-text">Suppress the reversion/target exit for this long after entry so a single noisy tick can't trigger a 1-second round trip. Stop-loss still fires immediately. 0 = off.</div>
+                    </div>
                     <div class="col-md-4">
                         <label class="form-label">Entry Z-Score (σ)</label>
                         <input type="number" step="0.1" class="form-control" id="s-entry">
@@ -255,6 +260,7 @@
         const s = await fetch('/api/settings').then(r => r.json());
         _set('s-window', s.signal.window_minutes);
         _set('s-minhist', s.signal.min_signal_minutes);
+        _set('s-minhold', s.signal.min_hold_sec);
         _set('s-tick', s.signal.sample_interval_sec);
         _set('s-entry', s.signal.entry_zscore);
         _set('s-exit', s.signal.exit_zscore);
@@ -303,6 +309,7 @@
             signal: {
                 window_minutes: +document.getElementById('s-window').value,
                 min_signal_minutes: +document.getElementById('s-minhist').value,
+                min_hold_sec: +document.getElementById('s-minhold').value,
                 sample_interval_sec: +document.getElementById('s-tick').value,
                 entry_zscore: +document.getElementById('s-entry').value,
                 exit_zscore: +document.getElementById('s-exit').value,

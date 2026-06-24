@@ -528,6 +528,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
+            "min_hold_sec": float(s.get("min_hold_sec", 0) or 0),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
@@ -1131,6 +1132,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "window_minutes": s.get("window_minutes", 120),
                     "min_signal_minutes": s.get("min_signal_minutes", 10),
                     "sample_interval_sec": s.get("sample_interval_sec", 0.5),
+                    "min_hold_sec": s.get("min_hold_sec", 0),
                     "entry_zscore": s.get("entry_zscore", 2.0),
                     "exit_zscore": s.get("exit_zscore", 0.0),
                     "stop_zscore": s.get("stop_zscore", 4.0),
@@ -1173,7 +1175,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         raw = cfg.raw
         sig = raw.setdefault("signal", {})
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
-                     ("sample_interval_sec", 0.5),
+                     ("sample_interval_sec", 0.5), ("min_hold_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
                      ("max_entry_zscore", 0.0)):
