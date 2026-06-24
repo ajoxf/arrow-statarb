@@ -53,7 +53,8 @@ class TradeLog:
                source: str = "manual", lot_size: int = 1,
                zscore: Optional[float] = None, leg_a_price: Optional[float] = None,
                leg_b_price: Optional[float] = None, name: str = "",
-               exit_reason: str = "") -> Dict:
+               exit_reason: str = "",
+               decision_spread: Optional[float] = None) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
         matching OPEN to fill in spread/net P&L plus full round-trip detail
         (entry/exit z, per-leg prices, spreads, time-in-trade).
@@ -77,7 +78,13 @@ class TradeLog:
             "leg_b_price": leg_b_price,
             "entry_spread": spread if action == "OPEN" else None,
             "exit_spread": spread if action == "CLOSE" else None,
+            # The signal mid the algo decided on (vs the fill spread above).
+            # The gap between them is execution slippage, surfaced on CLOSE.
+            "entry_decision_spread": decision_spread if action == "OPEN" else None,
+            "exit_decision_spread": decision_spread if action == "CLOSE" else None,
             "spread_pnl": 0.0,
+            "edge_pnl": 0.0,         # P&L the signal alone implied (decision spreads)
+            "slippage_pnl": 0.0,     # realized − edge: cost paid to execution (≤0 = adverse)
             "brokerage": brokerage,
             "net_pnl": 0.0,
             "status": status,          # DRY-RUN | LIVE-SIM | LIVE | rejected
@@ -101,6 +108,17 @@ class TradeLog:
                             rec["entry_spread"] = entry
                             rec["spread_pnl"] = round(raw * lots * mult, 2)
                             rec["net_pnl"] = round(rec["spread_pnl"] - brokerage - prev.get("brokerage", 0), 2)
+                            # Decompose realized P&L into signal "edge" (what the
+                            # decision spreads implied) and "slippage" (execution
+                            # cost = realized − edge). Only when both decision
+                            # spreads are known; else leave at 0.
+                            edec = prev.get("entry_decision_spread")
+                            xdec = decision_spread
+                            rec["entry_decision_spread"] = edec
+                            if edec is not None and xdec is not None:
+                                paper = (xdec - edec) if direction == "LONG_SPREAD" else (edec - xdec)
+                                rec["edge_pnl"] = round(paper * lots * mult, 2)
+                                rec["slippage_pnl"] = round(rec["spread_pnl"] - rec["edge_pnl"], 2)
                             # full round-trip detail for the journal
                             rec["entry_zscore"] = prev.get("zscore")
                             rec["exit_zscore"] = zscore

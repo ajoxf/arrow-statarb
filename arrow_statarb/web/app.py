@@ -334,6 +334,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # decision z is still recorded (below) as the signal indicator.
             trade_log.record(action="OPEN", direction=direction, lots=lots,
                              spread=m["spread"],
+                             decision_spread=(spread if spread is not None else _current_spread()),
                              dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"],
@@ -358,6 +359,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             m = _trade_meta(res)
             trade_log.record(action="CLOSE", direction=direction, lots=lots,
                              spread=m["spread"],  # actual fill spread — see OPEN note
+                             decision_spread=(spread if spread is not None else _current_spread()),
                              dry_run=(mode != "live"),
                              status=_MODE_STATUS.get(mode, "DRY-RUN"), source=source,
                              lot_size=m["lot_size"],

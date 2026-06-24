@@ -179,9 +179,11 @@
                         <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
                             <th class="ps-3">Closed</th><th>Dir</th><th class="text-end">Z in→out</th>
                             <th class="text-end">Spread in→out</th><th class="text-end">Held</th>
-                            <th>Exit</th><th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Cum</th>
+                            <th>Exit</th><th class="text-end" title="P&L the signal implied (decision spreads)">Edge</th>
+                            <th class="text-end" title="Execution cost = realized − edge (negative = adverse fills)">Slip</th>
+                            <th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Cum</th>
                         </tr></thead>
-                        <tbody id="dj-body"><tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
+                        <tbody id="dj-body"><tr><td colspan="10" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -685,9 +687,11 @@
             const tot = document.getElementById('dj-total');
             tot.textContent = _rs(j.total_pnl); tot.className = Number(j.total_pnl)>0?'text-success':(Number(j.total_pnl)<0?'text-danger':'text-secondary');
             const body = document.getElementById('dj-body');
-            if (!trips.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr>'; return; }
+            if (!trips.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-secondary py-3">No completed trades yet</td></tr>'; return; }
             body.innerHTML = trips.map(x => {
                 const np = Number(x.net_pnl||0), npc = np>0?'text-success':(np<0?'text-danger':'');
+                const edge = Number(x.edge_pnl||0), edc = edge>0?'text-success':(edge<0?'text-danger':'text-secondary');
+                const slip = Number(x.slippage_pnl||0), slc = slip<0?'text-danger':(slip>0?'text-success':'text-secondary');
                 const ex = x.exit_reason || '—';
                 const src = x.source==='algo' ? '<span class="badge bg-primary ms-1" style="font-size:.7em">algo</span>'
                     : '<span class="badge bg-secondary ms-1" style="font-size:.7em">man</span>';
@@ -697,6 +701,8 @@
                     <td class="text-end font-monospace">${_arrow2(x.entry_spread, x.exit_spread, 1)}</td>
                     <td class="text-end">${_held2(x.held_sec)}</td>
                     <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}">${ex.replace('_',' ')}</span></td>
+                    <td class="text-end font-monospace ${edc}">${_rs(edge)}</td>
+                    <td class="text-end font-monospace ${slc}">${_rs(slip)}</td>
                     <td class="text-end fw-bold ${npc}">${_rs(np)}</td>
                     <td class="text-end pe-3 font-monospace">${_rs(x.cum_pnl)}</td></tr>`;
             }).join('');
