@@ -186,6 +186,42 @@
         </div>
     </div>
 
+    <!-- ── Execution / Fill-Chasing ──────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-lightning-charge me-2"></i>Execution &amp; Slippage</div>
+            <div class="card-body">
+                <div class="alert alert-info py-2 small mb-3">
+                    Controls how hard the executor chases fills — the main source of slippage.
+                    Lower offset/steps = better prices but more unfilled legs.
+                    <strong>Applies to the next trade; no restart needed.</strong>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Limit Offset (%)</label>
+                        <input type="number" step="0.01" class="form-control" id="e-offset">
+                        <div class="form-text">% through LTP for the limit (0.01 ≈ 2-3 pts; lower = less crossing)</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Amend Step (%)</label>
+                        <input type="number" step="0.01" class="form-control" id="e-step">
+                        <div class="form-text">Extra % added each amendment to chase the fill</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Amend Interval (sec)</label>
+                        <input type="number" step="0.5" class="form-control" id="e-interval">
+                        <div class="form-text">How often the resting limit is re-priced</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Fill Timeout (sec)</label>
+                        <input type="number" step="1" class="form-control" id="e-timeout">
+                        <div class="form-text">Wait this long before escalating to MARKET</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── System Tests ──────────────────────────────────────────────────── -->
     <div class="col-lg-6">
         <div class="card h-100">
@@ -247,6 +283,13 @@
         _set('b-ev', s.filters.min_expected_value);
         _set('b-tstop', s.filters.time_stop_half_lives);
         _setChk('b-enabled', s.filters.enable_probability_filter);
+
+        if (s.execution) {
+            _set('e-offset', s.execution.limit_offset_pct);
+            _set('e-step', s.execution.amend_step_pct);
+            _set('e-interval', s.execution.amend_interval_sec);
+            _set('e-timeout', s.execution.fill_timeout_sec);
+        }
     }
 
     document.querySelectorAll('input[name=basis]').forEach(el => el.addEventListener('change', () => {
@@ -291,6 +334,12 @@
                 min_win_probability: (+document.getElementById('b-winprob').value) / 100,
                 min_expected_value: +document.getElementById('b-ev').value,
                 time_stop_half_lives: +document.getElementById('b-tstop').value,
+            },
+            execution: {
+                limit_offset_pct: +document.getElementById('e-offset').value,
+                amend_step_pct: +document.getElementById('e-step').value,
+                amend_interval_sec: +document.getElementById('e-interval').value,
+                fill_timeout_sec: +document.getElementById('e-timeout').value,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

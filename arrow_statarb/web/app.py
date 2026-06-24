@@ -1118,7 +1118,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if request.method == "GET":
             s, f, r, th = (cfg.section("signal"), cfg.section("filters"),
                            cfg.section("risk"), cfg.section("trading_hours"))
+            ex = cfg.section("execution")
             return jsonify({
+                "execution": {
+                    "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
+                    "amend_step_pct": ex.get("amend_step_pct", 0.05),
+                    "amend_interval_sec": ex.get("amend_interval_sec", 1.5),
+                    "fill_timeout_sec": ex.get("fill_timeout_sec", 5),
+                },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
                     "min_signal_minutes": s.get("min_signal_minutes", 10),
@@ -1205,6 +1212,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("time_stop_half_lives", 3.0)):
             if k in fd:
                 fl[k] = _num(fd[k], d)
+
+        ex = raw.setdefault("execution", {})
+        ed = data.get("execution") or {}
+        for k, d in (("limit_offset_pct", 0.05), ("amend_step_pct", 0.05),
+                     ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0)):
+            if k in ed:
+                ex[k] = _num(ed[k], d)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:
