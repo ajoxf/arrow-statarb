@@ -8,8 +8,8 @@ import time
 from arrow_statarb.core.algo import ArrowAutoTrader
 
 
-def _make(params_over=None):
-    state = {"sig": None}
+def _make(params_over=None, prices=None):
+    state = {"sig": None, "prices": prices}
     calls = {"execute": [], "close": []}
 
     def execute_fn(direction, lots):
@@ -33,6 +33,7 @@ def _make(params_over=None):
         params_provider=lambda: params,
         execute_fn=execute_fn,
         close_fn=close_fn,
+        prices_provider=(lambda: state["prices"]) if prices is not None else None,
     )
     return algo, state, calls
 
@@ -429,3 +430,47 @@ def test_max_hold_fires_when_not_reverted_enough():
     state["sig"] = _sig(-2.0, spread=150.0, half_life=1.0); algo._tick()   # winning but z barely moved
     assert calls["close"] == [("LONG_SPREAD", 1)]
     assert "TIME-STOP" in algo._snap["status"]
+
+
+# ── fresh-price entry guard (stale far-leg / phantom-z) ─────────────────────
+def test_spread_divergence_guard_refuses_stale_entry():
+    # Decision spread (signal) says −45, but the live leg prices read at order
+    # time give −70 — a 25-pt gap (stale far leg). The guard must refuse.
+    algo, state, calls = _make({"max_entry_spread_divergence": 8.0},
+                               prices=(24210.0, 24280.0))   # live spread = −70
+    state["sig"] = _sig(2.5, spread=-45.0)                  # decision spread −45
+    algo._tick()
+    assert calls["execute"] == []
+    assert "stale signal" in algo.get_state()["status"]
+
+
+def test_spread_divergence_guard_allows_within_threshold():
+    algo, state, calls = _make({"max_entry_spread_divergence": 8.0},
+                               prices=(24210.0, 24215.0))   # live spread = −5
+    state["sig"] = _sig(2.5, spread=-8.0)                   # |(−5) − (−8)| = 3 ≤ 8
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+def test_spread_divergence_guard_refuses_when_no_price():
+    algo, state, calls = _make({"max_entry_spread_divergence": 8.0},
+                               prices=(None, None))         # can't read → fail-safe refuse
+    state["sig"] = _sig(2.5, spread=-8.0)
+    algo._tick()
+    assert calls["execute"] == []
+    assert "stale signal" in algo.get_state()["status"]
+
+
+def test_spread_divergence_guard_off_when_zero():
+    algo, state, calls = _make({"max_entry_spread_divergence": 0.0},
+                               prices=(24210.0, 24280.0))   # huge gap but guard disabled
+    state["sig"] = _sig(2.5, spread=-45.0)
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+def test_spread_divergence_guard_skipped_without_provider():
+    algo, state, calls = _make({"max_entry_spread_divergence": 8.0})   # no prices_provider
+    state["sig"] = _sig(2.5, spread=-45.0)
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]

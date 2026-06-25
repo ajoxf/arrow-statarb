@@ -55,6 +55,11 @@
                         <div class="form-text">Refuse an entry if z re-sampled at order time moves more than this from the decision z. 0 = off.</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">Max Entry Spread Divergence (pts)</label>
+                        <input type="number" step="0.5" class="form-control" id="s-sdiv">
+                        <div class="form-text">Stale far-leg guard: refuse an entry if the live spread (read fresh at order time) differs from the decision spread by more than this many points. 0 = off.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Max Entry Z (σ)</label>
                         <input type="number" step="0.1" class="form-control" id="s-zmax">
                         <div class="form-text">Regime-shift guard: refuse an entry when |z| exceeds this. 0 = off; keep below the stop.</div>
@@ -315,6 +320,7 @@
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
         _set('s-zdiv', s.signal.max_entry_z_divergence);
+        _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
 
         _set('r-lots', s.risk.lots_per_trade);
@@ -372,6 +378,7 @@
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
+                max_entry_spread_divergence: +document.getElementById('s-sdiv').value,
                 max_entry_zscore: +document.getElementById('s-zmax').value,
             },
             risk: {

@@ -546,6 +546,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
+            "max_entry_spread_divergence": float(s.get("max_entry_spread_divergence", 0) or 0),
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "min_hold_sec": float(s.get("min_hold_sec", 0) or 0),
@@ -582,6 +583,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         params_provider=_algo_params,
         execute_fn=_spread_execute,
         close_fn=_spread_close,
+        prices_provider=_leg_prices,        # fresh leg prices for the entry guard
     )
 
     # Position recovery on restart: re-adopt any open trade from the log so the
@@ -1175,6 +1177,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
+                    "max_entry_spread_divergence": s.get("max_entry_spread_divergence", 0),
                     "max_entry_zscore": s.get("max_entry_zscore", 0),
                 },
                 "risk": {
@@ -1215,7 +1218,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("sample_interval_sec", 0.5), ("min_hold_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
-                     ("max_entry_zscore", 0.0)):
+                     ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0)):
             if k in (data.get("signal") or {}):
                 sig[k] = _num(data["signal"][k], d)
 

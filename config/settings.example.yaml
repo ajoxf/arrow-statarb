@@ -64,6 +64,12 @@ signal:
   max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
                               # z re-sampled at order time has moved more than
                               # this from the decision z. 0 = disabled.
+  max_entry_spread_divergence: 8.0  # stale-FAR-LEG guard (in spread points): at
+                              # order time, read the live leg prices (fresher than
+                              # the sampled signal) and refuse the entry if the real
+                              # spread has diverged from the decision spread by more
+                              # than this. Catches a phantom z from a stale far-month
+                              # quote — the failure the z-guard cannot see. 0 = off.
   max_entry_zscore: 3.5       # regime-shift guard: refuse an entry when |z|
                               # exceeds this (a blowout is rarely a reversion).
                               # 0 = disabled. Keep below stop_zscore.

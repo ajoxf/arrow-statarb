@@ -31,7 +31,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 from loguru import logger
 
@@ -84,11 +84,16 @@ class ArrowAutoTrader:
         execute_fn: Callable[[str, int], Dict],
         close_fn: Callable[[str, int], Dict],
         clock: Optional[Callable[[], float]] = None,
+        prices_provider: Optional[Callable[[], Tuple[Optional[float], Optional[float]]]] = None,
     ):
         self._signal = signal_provider
         self._params = params_provider
         self._execute = execute_fn
         self._close = close_fn
+        # Fresh (leg_a, leg_b) reader for the entry spread-divergence guard. Reads
+        # the live price cache at ORDER time, which is fresher than the (sampled)
+        # signal — so it catches a stale far-leg quote the z-guard can't. Optional.
+        self._prices = prices_provider
         # Injectable wall-clock — overridden by the backtester so historical
         # timestamps drive cooldown / time-stop / holding time. Defaults to live.
         self._clock = clock or time.time
@@ -484,6 +489,27 @@ class ArrowAutoTrader:
                 shown = "n/a" if fill_z is None else f"{float(fill_z):.2f}"
                 msg = (f"stale signal: decision z={z:.2f} vs fill z={shown} "
                        f"(Δ>{max_div:.2f}) — entry refused")
+                self._consec_above = self._consec_below = 0
+                self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
+                logger.warning("ArrowAlgo: {}", msg)
+                return msg
+
+        # Fresh-price spread guard: the z-guard above compares signal-to-signal,
+        # so it can't see a STALE far-leg quote (a phantom z). Here we read the
+        # live leg prices at ORDER time (fresher than the sampled signal) and
+        # refuse if the real, executable spread has diverged from the DECISION
+        # spread by more than the threshold (in spread points). 0/absent ⇒ off.
+        max_sdiv = float(p.get("max_entry_spread_divergence", 0) or 0)
+        if max_sdiv > 0 and self._prices is not None:
+            try:
+                la, lb = self._prices()
+            except Exception:
+                la = lb = None
+            live_spread = (float(la) - float(lb)) if (la is not None and lb is not None) else None
+            if live_spread is None or abs(live_spread - spread) > max_sdiv:
+                shown = "n/a" if live_spread is None else f"{live_spread:.1f}"
+                msg = (f"stale signal: decision spread={spread:.1f} vs live={shown} "
+                       f"(Δ>{max_sdiv:.1f}) — entry refused")
                 self._consec_above = self._consec_below = 0
                 self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
                 logger.warning("ArrowAlgo: {}", msg)
