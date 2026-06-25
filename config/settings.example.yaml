@@ -105,6 +105,20 @@ exits:
   profit_target_inr: 0        # INR; bank profit — exit when net P&L ≥ this. Note
                               # the live figure does not pre-deduct EXIT slippage,
                               # so leave a margin above round-trip cost. 0 = off.
+  # ── Phase 2: max-hold upgrade + trailing stop ──
+  max_hold_silent_when_losing: false  # when true, the time/max-hold exit only fires
+                              # if net P&L > 0 (a losing trade is left to the stop).
+                              # Only takes effect when dollar_stop_inr > 0 (a loss
+                              # backstop must exist), else max-hold fires regardless.
+  max_hold_z_progress_min: 0  # 0–1; suppress max-hold for a WINNING trade that has
+                              # reverted this fraction of the way from entry |z| to
+                              # exit |z| (let it run to target). 0 = off. ~0.5 typical.
+  trailing_stop_pct: 0        # % pullback from the peak net P&L that triggers an
+                              # exit. 0 = off. e.g. 20 = exit when P&L drops 20% off
+                              # its high-water mark.
+  trailing_stop_floor_pct: 0  # only arm the trailing stop once the peak reaches this
+                              # % of profit_target_inr. 0 = arm from first profit.
+                              # e.g. 70 = arm at 70% of target.
 
 # Only trade inside this window (IST).
 trading_hours:

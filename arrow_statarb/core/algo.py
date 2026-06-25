@@ -149,6 +149,7 @@ class ArrowAutoTrader:
                 # P&L reference for a position re-adopted after a restart
                 "entry_fill_spread": pos.get("entry_spread"),
                 "entry_time": float(pos.get("ts") or self._clock()),
+                "peak_pnl": 0.0,                 # trailing-stop high-water mark (fresh)
                 "order_ids": [],
                 "dry_run": bool(pos.get("dry_run", False)),
                 "restored": True,
@@ -371,19 +372,62 @@ class ArrowAutoTrader:
             # suppressed; the time-stop is a maximum so it is always beyond it.
             hold_gated = reverted and min_hold_sec > 0 and held_sec < min_hold_sec
 
+            # ── Phase 2: peak tracking, max-hold upgrade, trailing stop ──────
+            # Peak P&L high-water mark (drives the trailing stop); reset at entry.
+            peak = float(self._pos.get("peak_pnl", 0.0) or 0.0)
+            if net_pnl is not None and net_pnl > peak:
+                peak = net_pnl
+                self._pos["peak_pnl"] = peak
+            snap["peak_pnl"] = round(peak, 2) if net_pnl is not None else None
+
+            # Max-hold (the time-stop), upgraded:
+            #  • silent when losing — but ONLY when a ₹ stop is armed to catch the
+            #    loss; without that backstop it still fires (no stuck losers);
+            #  • z-progress gate — a WINNING trade that has reverted ≥ the gate
+            #    fraction of the way from entry |z| to exit |z| is let run.
+            max_hold_due = max_hold_sec > 0 and held_sec >= max_hold_sec
+            max_hold_expired = max_hold_due
+            if max_hold_due:
+                silent = bool(p.get("max_hold_silent_when_losing", False)) and dollar_stop > 0
+                if silent and net_pnl is not None and net_pnl <= 0:
+                    max_hold_due = False
+                z_prog_min = float(p.get("max_hold_z_progress_min", 0) or 0)
+                if max_hold_due and z_prog_min > 0 and net_pnl is not None and net_pnl > 0:
+                    entry_abs, exit_abs = abs(self._pos["entry_z"]), abs(exit_z)
+                    journey = entry_abs - exit_abs
+                    z_prog = ((entry_abs - abs(z)) / journey) if journey > 1e-9 else 1.0
+                    if z_prog >= z_prog_min:
+                        max_hold_due = False        # winning & reverting → run to target
+            snap["max_hold_expired"] = bool(max_hold_expired)
+
+            # Trailing stop: arm once the peak clears the floor (a % of the profit
+            # target, or simply 'in profit' when no target/floor is set), then
+            # fire when P&L pulls back trail_pct from the peak.
+            trail_pct = float(p.get("trailing_stop_pct", 0) or 0)
+            floor_pct = float(p.get("trailing_stop_floor_pct", 0) or 0)
+            trailing_fire = trailing_armed = False
+            if trail_pct > 0 and net_pnl is not None and peak > 0:
+                trailing_armed = (peak >= (floor_pct / 100.0) * profit_target
+                                  if floor_pct > 0 and profit_target > 0 else True)
+                if trailing_armed and net_pnl < peak * (1.0 - trail_pct / 100.0):
+                    trailing_fire = True
+            snap["trailing_armed"] = trailing_armed
+
             # Exit priority (first match wins) — RISK BEFORE REWARD:
-            #   1 dollar stop · 2 profit target · 3 emergency z-stop ·
-            #   4 z-score target (min-hold gated) · 5 time-stop
+            #   1 dollar stop · 2 profit target · 3 max-hold (silent/gated) ·
+            #   4 trailing stop · 5 emergency z-stop · 6 z-target (min-hold gated)
             if dollar_stop > 0 and net_pnl is not None and net_pnl <= -dollar_stop:
                 exit_reason = "dollar_stop"
             elif profit_target > 0 and net_pnl is not None and net_pnl >= profit_target:
                 exit_reason = "profit_target"
+            elif max_hold_due:
+                exit_reason = "time_stop"
+            elif trailing_fire:
+                exit_reason = "trailing_stop"
             elif abs(z) >= stop_z:
                 exit_reason = "stop"
             elif reverted and not hold_gated:
                 exit_reason = "target"
-            elif max_hold_sec > 0 and held_sec >= max_hold_sec:
-                exit_reason = "time_stop"
             else:
                 exit_reason = None
 
@@ -403,20 +447,25 @@ class ArrowAutoTrader:
             elif exit_reason == "profit_target":
                 snap["status"] = f"PROFIT TARGET (net {_pnl_txt} ≥ ₹{profit_target:.0f})"
                 self._exit("profit_target", z, spread_now)
+            elif exit_reason == "time_stop":
+                snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s, net {_pnl_txt})"
+                self._exit("time_stop", z, spread_now)
+            elif exit_reason == "trailing_stop":
+                snap["status"] = f"TRAILING STOP (net {_pnl_txt}, peak ₹{peak:.0f})"
+                self._exit("trailing_stop", z, spread_now)
             elif exit_reason == "stop":
                 snap["status"] = f"STOP (z={z:.2f})"
                 self._exit("stop", z, spread_now)
             elif exit_reason == "target":
                 snap["status"] = f"EXIT target (z={z:.2f})"
                 self._exit("target", z, spread_now)
-            elif exit_reason == "time_stop":
-                snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s)"
-                self._exit("time_stop", z, spread_now)
             elif hold_gated:
                 snap["status"] = (f"min-hold {held_sec:.0f}s/{min_hold_sec:.0f}s — "
                                   f"reverted but holding (z={z:.2f}, net {_pnl_txt})")
             else:
-                snap["status"] = f"holding {self._pos['direction']} (z={z:.2f}, net {_pnl_txt})"
+                _extra = " · max-hold EXPIRED (gated)" if max_hold_expired else ""
+                snap["status"] = (f"holding {self._pos['direction']} "
+                                  f"(z={z:.2f}, net {_pnl_txt}){_extra}")
 
         self._set_snap(snap)
 
@@ -459,6 +508,7 @@ class ArrowAutoTrader:
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),
                 "entry_time": self._clock(),
+                "peak_pnl": 0.0,                 # trailing-stop high-water mark
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }

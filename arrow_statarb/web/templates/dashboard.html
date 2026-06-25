@@ -708,7 +708,8 @@
     function _arrow2(a, b, d) { const f = v => (v==null?'—':Number(v).toFixed(d)); return `${f(a)}→${f(b)}`; }
     function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
     const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark',
-                       dollar_stop:'bg-danger', profit_target:'bg-success', manual:'bg-secondary' };
+                       dollar_stop:'bg-danger', profit_target:'bg-success',
+                       trailing_stop:'bg-info text-dark', manual:'bg-secondary' };
     const _EXITLBL = { dollar_stop:'stop price' };   // display label (stored code unchanged)
     async function pollJournal() {
         try {
@@ -861,7 +862,9 @@
         document.getElementById('sp-espread').textContent = _fmt(s.entry_spread, 2);
         document.getElementById('sp-age').textContent = _hms(s.held_sec);
         document.getElementById('sp-maxhold').textContent = _hms(s.max_hold_sec);
-        document.getElementById('sp-remaining').textContent = _hms(s.remaining_sec);
+        const remEl = document.getElementById('sp-remaining');
+        if (s.max_hold_expired) { remEl.textContent = 'EXPIRED'; remEl.className = 'text-warning'; }
+        else { remEl.textContent = _hms(s.remaining_sec); remEl.className = ''; }
         document.getElementById('sp-size').textContent = s.notional != null ? _rs(s.notional, 0) : '—';
 
         const dEl = document.getElementById('sp-dspread');

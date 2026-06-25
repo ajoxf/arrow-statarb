@@ -248,6 +248,28 @@
                         <input type="number" step="1" class="form-control" id="x-ptarget">
                         <div class="form-text">Bank profit — exit when net P&amp;L ≥ this. Leave margin above round-trip cost (exit slippage not pre-deducted). 0 = off.</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Trailing Stop — Pullback (%)</label>
+                        <input type="number" step="1" class="form-control" id="x-trailpct">
+                        <div class="form-text">Exit when net P&amp;L falls this % from its peak. 0 = off. Typical 15–25.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Trailing Stop — Floor (% of target)</label>
+                        <input type="number" step="1" class="form-control" id="x-trailfloor">
+                        <div class="form-text">Only arm once the peak reaches this % of Profit Target. 0 = arm from first profit. Typical 60–75.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max-Hold Z-Progress Gate (0–1)</label>
+                        <input type="number" step="0.05" class="form-control" id="x-mhzprog">
+                        <div class="form-text">Suppress max-hold for a winning trade that has reverted this fraction toward exit z. 0 = off. ~0.5 typical.</div>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="x-mhsilent" role="switch">
+                            <label class="form-check-label" for="x-mhsilent">Max-Hold silent when losing</label>
+                            <div class="form-text">Time-stop only fires in profit (needs a Stop Price set as the loss backstop).</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -325,6 +347,10 @@
         if (s.exits) {
             _set('x-dstop', s.exits.dollar_stop_inr);
             _set('x-ptarget', s.exits.profit_target_inr);
+            _set('x-trailpct', s.exits.trailing_stop_pct);
+            _set('x-trailfloor', s.exits.trailing_stop_floor_pct);
+            _set('x-mhzprog', s.exits.max_hold_z_progress_min);
+            _setChk('x-mhsilent', s.exits.max_hold_silent_when_losing);
         }
     }
 
@@ -379,6 +405,10 @@
             exits: {
                 dollar_stop_inr: +document.getElementById('x-dstop').value,
                 profit_target_inr: +document.getElementById('x-ptarget').value,
+                trailing_stop_pct: +document.getElementById('x-trailpct').value,
+                trailing_stop_floor_pct: +document.getElementById('x-trailfloor').value,
+                max_hold_z_progress_min: +document.getElementById('x-mhzprog').value,
+                max_hold_silent_when_losing: document.getElementById('x-mhsilent').checked,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

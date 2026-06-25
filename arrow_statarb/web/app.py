@@ -552,6 +552,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # ── dollar-P&L exit overrides (priority above the z-score exit) ──
             "dollar_stop_inr": float(xo.get("dollar_stop_inr", 0) or 0),
             "profit_target_inr": float(xo.get("profit_target_inr", 0) or 0),
+            # ── Phase 2: max-hold upgrade + trailing stop ──
+            "max_hold_silent_when_losing": bool(xo.get("max_hold_silent_when_losing", False)),
+            "max_hold_z_progress_min": float(xo.get("max_hold_z_progress_min", 0) or 0),
+            "trailing_stop_pct": float(xo.get("trailing_stop_pct", 0) or 0),
+            "trailing_stop_floor_pct": float(xo.get("trailing_stop_floor_pct", 0) or 0),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
@@ -1155,6 +1160,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "exits": {
                     "dollar_stop_inr": xo.get("dollar_stop_inr", 0),
                     "profit_target_inr": xo.get("profit_target_inr", 0),
+                    "max_hold_silent_when_losing": bool(xo.get("max_hold_silent_when_losing", False)),
+                    "max_hold_z_progress_min": xo.get("max_hold_z_progress_min", 0),
+                    "trailing_stop_pct": xo.get("trailing_stop_pct", 0),
+                    "trailing_stop_floor_pct": xo.get("trailing_stop_floor_pct", 0),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1247,7 +1256,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         xo = raw.setdefault("exits", {})
         xd = data.get("exits") or {}
-        for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0)):
+        if "max_hold_silent_when_losing" in xd:
+            xo["max_hold_silent_when_losing"] = bool(xd["max_hold_silent_when_losing"])
+        for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0),
+                     ("max_hold_z_progress_min", 0.0), ("trailing_stop_pct", 0.0),
+                     ("trailing_stop_floor_pct", 0.0)):
             if k in xd:
                 xo[k] = _num(xd[k], d)
 

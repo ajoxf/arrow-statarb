@@ -359,3 +359,73 @@ def test_entries_allowed_far_from_close():
     state["sig"] = _sig(-2.5)
     algo._tick()
     assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+# ── Phase 2: max-hold upgrade + trailing stop ───────────────────────────────
+def test_trailing_stop_fires_on_pullback():
+    algo, state, calls = _pnl_make({"trailing_stop_pct": 20.0})   # floor 0 → arm from profit
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()         # enter LONG
+    state["sig"] = _sig(-1.0, spread=150.0); algo._tick()         # net +50 → peak 50, no fire
+    assert calls["close"] == []
+    state["sig"] = _sig(-1.0, spread=135.0); algo._tick()         # net +35 < 50×0.8 → fire
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "TRAILING STOP" in algo._snap["status"]
+
+
+def test_trailing_floor_gate_blocks_small_peak():
+    algo, state, calls = _pnl_make({"trailing_stop_pct": 20.0, "trailing_stop_floor_pct": 70.0,
+                                    "profit_target_inr": 100.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()         # enter
+    state["sig"] = _sig(-1.0, spread=150.0); algo._tick()         # net +50; floor=70 → not armed
+    state["sig"] = _sig(-1.0, spread=110.0); algo._tick()         # net +10 big pullback but un-armed
+    assert calls["close"] == []                                  # floor not met → no trailing exit
+
+
+def test_profit_target_beats_trailing():
+    algo, state, calls = _pnl_make({"profit_target_inr": 40.0, "trailing_stop_pct": 20.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()         # enter
+    state["sig"] = _sig(-1.0, spread=150.0); algo._tick()         # net +50 ≥ 40 → profit target wins
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "PROFIT TARGET" in algo._snap["status"]
+
+
+def test_max_hold_silent_when_losing_with_stop():
+    algo, state, calls = _pnl_make({"max_hold_silent_when_losing": True,
+                                    "dollar_stop_inr": 500.0, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()   # enter
+    algo._pos["entry_time"] = time.time() - 10_000              # max-hold due
+    state["sig"] = _sig(-1.0, spread=80.0, half_life=1.0); algo._tick()    # net −20 (losing)
+    assert calls["close"] == []                                # silent → not closed
+    assert algo.get_state()["max_hold_expired"] is True
+    assert "EXPIRED" in algo._snap["status"]
+
+
+def test_max_hold_fires_when_losing_without_stop():
+    # Silent-when-losing only applies with a ₹ backstop; without one it still fires.
+    algo, state, calls = _pnl_make({"max_hold_silent_when_losing": True,
+                                    "dollar_stop_inr": 0.0, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 10_000
+    state["sig"] = _sig(-1.0, spread=80.0, half_life=1.0); algo._tick()    # losing, no backstop
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "TIME-STOP" in algo._snap["status"]
+
+
+def test_max_hold_z_progress_gate_suppresses_winner():
+    algo, state, calls = _pnl_make({"max_hold_z_progress_min": 0.5, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()   # entry |z|=2.5
+    algo._pos["entry_time"] = time.time() - 10_000
+    # winning + z reverted 0.6 of the way (entry 2.5 → exit 0): (2.5−1.0)/2.5 = 0.6 ≥ 0.5
+    state["sig"] = _sig(-1.0, spread=150.0, half_life=1.0); algo._tick()   # net +50
+    assert calls["close"] == []                                # suppressed → let it run
+    assert algo.get_state()["max_hold_expired"] is True
+
+
+def test_max_hold_fires_when_not_reverted_enough():
+    algo, state, calls = _pnl_make({"max_hold_z_progress_min": 0.5, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 10_000
+    # z reverted only 0.2 of the way: (2.5−2.0)/2.5 = 0.2 < 0.5 → not suppressed
+    state["sig"] = _sig(-2.0, spread=150.0, half_life=1.0); algo._tick()   # winning but z barely moved
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "TIME-STOP" in algo._snap["status"]
