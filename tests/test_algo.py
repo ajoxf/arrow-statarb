@@ -164,6 +164,20 @@ def test_profit_target_fires_short():
     assert "PROFIT TARGET" in algo._snap["status"]
 
 
+def test_position_detail_in_snapshot():
+    # The Signal & Position card reads these live snapshot fields.
+    algo, state, calls = _pnl_make({"lot_multiplier": 65.0, "time_stop_half_lives": 2.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=10.0); algo._tick()    # enter LONG
+    state["sig"] = _sig(-1.0, spread=130.0, half_life=10.0); algo._tick()    # holding
+    st = algo.get_state()
+    assert st["entry_spread"] == 100.0
+    assert st["delta_spread"] == 30.0
+    assert st["held_sec"] is not None
+    assert st["max_hold_sec"] == 10.0                 # 2 × 10 × 0.5
+    assert st["notional"] == 7150                     # 1 lot × 65 × leg_a(110)
+    assert st["position"]["entry_z"] == -2.5
+
+
 def test_dollar_stop_priority_over_time_stop():
     # Both the dollar stop and the time-stop would fire; risk-first must win.
     algo, state, calls = _pnl_make({"dollar_stop_inr": 50.0, "time_stop_half_lives": 1.0})

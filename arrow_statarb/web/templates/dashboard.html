@@ -338,15 +338,43 @@
             </div>
         </div>
 
-        <!-- Current Position -->
+        <!-- Signal & Position -->
         <div class="card mt-3">
-            <div class="card-header"><i class="bi bi-folder me-2"></i>Current Position</div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-folder me-2"></i>Signal &amp; Position</span>
+                <span id="sp-badge" class="badge bg-secondary">FLAT</span>
+            </div>
             <div class="card-body">
-                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Direction:</span><strong id="pos-dir">FLAT</strong></div>
-                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg A:</span><span><span id="pos-a">0</span> contracts</span></div>
-                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Leg B:</span><span><span id="pos-b">0</span> contracts</span></div>
-                <hr>
-                <div class="d-flex justify-content-between"><span class="text-secondary">Unrealized P&amp;L:</span><strong id="pos-pnl" class="text-success">₹0.00</strong></div>
+                <div class="row text-center g-2 mb-1">
+                    <div class="col-4"><div class="fs-4 fw-bold" id="sp-z">—</div><div class="small text-secondary">Z-SCORE</div></div>
+                    <div class="col-4"><div class="fs-4 fw-bold" id="sp-spread">—</div><div class="small text-secondary" id="sp-legs">SPREAD</div></div>
+                    <div class="col-4"><div class="fs-5 fw-bold" id="sp-dir">FLAT</div><div class="small text-secondary">POSITION</div></div>
+                </div>
+                <!-- detail grid + P&L bar: only while in a position -->
+                <div id="sp-detail" class="d-none">
+                    <hr class="my-2">
+                    <div class="row small g-1">
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Entry Z</span><span id="sp-ez">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Leg A Entry</span><span id="sp-ela">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Entry Spread</span><span id="sp-espread">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Age</span><span id="sp-age">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Max Hold</span><span id="sp-maxhold">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Target</span><span id="sp-target" class="text-success">—</span></div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between"><span class="text-secondary">P&amp;L</span><span id="sp-pnl" class="fw-bold">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Leg B Entry</span><span id="sp-elb">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Δ Spread</span><span id="sp-dspread">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Size</span><span id="sp-size">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Remaining</span><span id="sp-remaining">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Stop</span><span id="sp-stop" class="text-danger">—</span></div>
+                        </div>
+                    </div>
+                    <div class="progress mt-2" style="height:8px;" title="P&L between stop (left) and target (right)">
+                        <div id="sp-bar" class="progress-bar bg-secondary" role="progressbar" style="width:50%"></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -501,12 +529,13 @@
             const p = await fetch('/api/positions').then(r => r.json());
             _posDir = p.direction || 'FLAT';
             _inPosition = !!(p.leg_a || p.leg_b);
-            document.getElementById('pos-dir').textContent = _posDir;
-            document.getElementById('pos-a').textContent = p.leg_a || 0;
-            document.getElementById('pos-b').textContent = p.leg_b || 0;
+            // (broker-position detail now lives in the Signal & Position card,
+            // driven by /api/algo/state; these IDs may not be present.)
+            const _set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
+            _set('pos-dir', _posDir); _set('pos-a', p.leg_a || 0); _set('pos-b', p.leg_b || 0);
             const pnl = Number(p.unrealized_pnl || 0);
             const el = document.getElementById('pos-pnl');
-            el.textContent = _rs(pnl); el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : '');
+            if (el) { el.textContent = _rs(pnl); el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : ''); }
         } catch (e) {}
     }
 
@@ -788,7 +817,77 @@
                 if (/ENTRY|EXIT|STOP|blocked/.test(s.status))
                     log('ALGO: ' + s.status, /blocked|STOP/.test(s.status)?'log-warning':'log-trade');
             }
+            renderSigPos(s);
         } catch (e) {}
+    }
+
+    function _hms(sec) {
+        if (sec == null) return '—';
+        sec = Math.max(0, Math.round(Number(sec)));
+        const m = Math.floor(sec / 60), s = sec % 60;
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    // Populate the Signal & Position card from the live algo snapshot.
+    function renderSigPos(s) {
+        const z = s.zscore;
+        const zEl = document.getElementById('sp-z');
+        zEl.textContent = _fmt(z, 4);
+        zEl.className = 'fs-4 fw-bold ' + (z == null ? '' : (z < 0 ? 'text-danger' : 'text-success'));
+        document.getElementById('sp-spread').textContent = _fmt(s.spread, 2);
+        document.getElementById('sp-legs').textContent =
+            (s.leg_a != null && s.leg_b != null) ? `${_fmt(s.leg_a,2)} − ${_fmt(s.leg_b,2)}` : 'SPREAD';
+
+        const pos = s.position;
+        const inPos = !!(s.in_position && pos);
+        const badge = document.getElementById('sp-badge');
+        const dir = document.getElementById('sp-dir');
+        const detail = document.getElementById('sp-detail');
+        if (!inPos) {
+            badge.textContent = 'FLAT'; badge.className = 'badge bg-secondary';
+            dir.textContent = 'FLAT'; dir.className = 'fs-5 fw-bold text-secondary';
+            detail.classList.add('d-none');
+            return;
+        }
+        const isLong = pos.direction === 'LONG_SPREAD';
+        const tag = isLong ? 'LONG' : 'SHORT';
+        badge.textContent = tag; badge.className = 'badge ' + (isLong ? 'bg-success' : 'bg-danger');
+        dir.textContent = tag; dir.className = 'fs-5 fw-bold ' + (isLong ? 'text-success' : 'text-danger');
+        detail.classList.remove('d-none');
+
+        document.getElementById('sp-ez').textContent = _fmt(pos.entry_z, 3);
+        document.getElementById('sp-ela').textContent = pos.entry_leg_a != null ? _fmt(pos.entry_leg_a, 2) : '—';
+        document.getElementById('sp-elb').textContent = pos.entry_leg_b != null ? _fmt(pos.entry_leg_b, 2) : '—';
+        document.getElementById('sp-espread').textContent = _fmt(s.entry_spread, 2);
+        document.getElementById('sp-age').textContent = _hms(s.held_sec);
+        document.getElementById('sp-maxhold').textContent = _hms(s.max_hold_sec);
+        document.getElementById('sp-remaining').textContent = _hms(s.remaining_sec);
+        document.getElementById('sp-size').textContent = s.notional != null ? _rs(s.notional, 0) : '—';
+
+        const dEl = document.getElementById('sp-dspread');
+        if (s.delta_spread == null) { dEl.textContent = '—'; dEl.className = ''; }
+        else { const d = Number(s.delta_spread); dEl.textContent = (d>=0?'+':'') + d.toFixed(2);
+               dEl.className = d >= 0 ? 'text-success' : 'text-danger'; }
+
+        const pEl = document.getElementById('sp-pnl');
+        if (s.net_pnl == null) { pEl.textContent = '—'; pEl.className = 'fw-bold'; }
+        else { const v = Number(s.net_pnl); pEl.textContent = _rs(v, 2);
+               pEl.className = 'fw-bold ' + (v > 0 ? 'text-success' : (v < 0 ? 'text-danger' : '')); }
+
+        document.getElementById('sp-target').textContent = s.profit_target != null ? '+' + _rs(s.profit_target, 0) : 'off';
+        document.getElementById('sp-stop').textContent = s.dollar_stop != null ? _rs(s.dollar_stop, 0) : 'off';
+
+        // P&L progress bar: net_pnl positioned between stop (left) and target (right).
+        const bar = document.getElementById('sp-bar');
+        const np = Number(s.net_pnl);
+        const lo = (s.dollar_stop != null) ? Number(s.dollar_stop) : -Math.max(100, Math.abs(np) * 2);
+        const hi = (s.profit_target != null) ? Number(s.profit_target) : Math.max(100, Math.abs(np) * 2);
+        if (s.net_pnl == null || hi <= lo) { bar.style.width = '0%'; }
+        else {
+            const frac = Math.min(1, Math.max(0, (np - lo) / (hi - lo)));
+            bar.style.width = (frac * 100).toFixed(0) + '%';
+            bar.className = 'progress-bar ' + (np > 0 ? 'bg-success' : (np < 0 ? 'bg-danger' : 'bg-secondary'));
+        }
     }
 
     // ── Manual Spread Trade (client-side watcher) ────────────────────────────

@@ -349,6 +349,22 @@ class ArrowAutoTrader:
             snap["profit_target"] = profit_target if profit_target > 0 else None
             _pnl_txt = f"₹{net_pnl:.0f}" if net_pnl is not None else "n/a"
 
+            # ── position detail for the Signal & Position card ───────────────
+            entry_ref = self._pos.get("entry_fill_spread")
+            if entry_ref is None:
+                entry_ref = self._pos.get("entry_spread")
+            snap["entry_spread"] = entry_ref
+            snap["held_sec"] = round(held_sec, 1)
+            snap["max_hold_sec"] = round(max_hold_sec, 1) if max_hold_sec > 0 else None
+            snap["remaining_sec"] = (round(max(0.0, max_hold_sec - held_sec), 1)
+                                     if max_hold_sec > 0 else None)
+            snap["delta_spread"] = (round(spread_now - entry_ref, 4)
+                                    if spread_now is not None and entry_ref is not None else None)
+            _lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+            _la = sig.get("leg_a")
+            snap["notional"] = (round(self._pos["lots"] * _lot_mult * float(_la))
+                                if _la else None)
+
             # Minimum hold: suppress the reversion/target exit until the trade has
             # lived long enough that REAL reversion — not a single noisy tick —
             # decides the outcome. Risk overrides (dollar stop, z-stop) are NEVER
@@ -440,6 +456,8 @@ class ArrowAutoTrader:
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
                 "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
+                "entry_leg_a": res.get("leg_a_fill"),
+                "entry_leg_b": res.get("leg_b_fill"),
                 "entry_time": self._clock(),
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
