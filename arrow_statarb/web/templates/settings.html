@@ -234,12 +234,12 @@
             <div class="card-body">
                 <div class="alert alert-warning py-2 small mb-3">
                     Exits on REAL live P&amp;L, evaluated every tick <strong>above</strong> the z-score exit.
-                    Priority: dollar stop → profit target → z-stop → z-exit → time-stop.
-                    The dollar stop is never gated by min-hold. <strong>Applies to the next tick; no restart.</strong>
+                    Priority: stop price → profit target → z-stop → z-exit → time-stop.
+                    The stop price is never gated by min-hold. <strong>Applies to the next tick; no restart.</strong>
                 </div>
                 <div class="row g-3">
                     <div class="col-md-6">
-                        <label class="form-label">Dollar Stop (₹)</label>
+                        <label class="form-label">Stop Price (₹)</label>
                         <input type="number" step="1" class="form-control" id="x-dstop">
                         <div class="form-text">Hard loss floor — exit when net P&amp;L ≤ −this. 0 = off.</div>
                     </div>

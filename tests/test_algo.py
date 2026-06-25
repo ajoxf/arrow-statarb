@@ -137,7 +137,7 @@ def test_dollar_stop_fires_long():
     state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter LONG
     state["sig"] = _sig(-1.0, spread=40.0); algo._tick()            # net = −60 ≤ −50
     assert calls["close"] == [("LONG_SPREAD", 1)]
-    assert "DOLLAR STOP" in algo._snap["status"]
+    assert "STOP PRICE" in algo._snap["status"]
 
 
 def test_dollar_stop_fires_short():
@@ -145,7 +145,7 @@ def test_dollar_stop_fires_short():
     state["sig"] = _sig(2.5, spread=100.0); algo._tick()            # enter SHORT
     state["sig"] = _sig(1.0, spread=160.0); algo._tick()            # net = −60 ≤ −50
     assert calls["close"] == [("SHORT_SPREAD", 1)]
-    assert "DOLLAR STOP" in algo._snap["status"]
+    assert "STOP PRICE" in algo._snap["status"]
 
 
 def test_profit_target_fires_long():
@@ -171,7 +171,7 @@ def test_dollar_stop_priority_over_time_stop():
     algo._pos["entry_time"] = time.time() - 10_000             # time-stop also due
     state["sig"] = _sig(-1.0, spread=40.0, half_life=1.0); algo._tick()
     assert calls["close"] == [("LONG_SPREAD", 1)]
-    assert "DOLLAR STOP" in algo._snap["status"]              # not TIME-STOP
+    assert "STOP PRICE" in algo._snap["status"]              # not TIME-STOP
 
 
 def test_dollar_stop_not_gated_by_min_hold():
@@ -180,7 +180,7 @@ def test_dollar_stop_not_gated_by_min_hold():
     state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter (held ~0s)
     state["sig"] = _sig(-1.0, spread=40.0); algo._tick()            # net −60 within hold
     assert calls["close"] == [("LONG_SPREAD", 1)]
-    assert "DOLLAR STOP" in algo._snap["status"]
+    assert "STOP PRICE" in algo._snap["status"]
 
 
 def test_dollar_exits_disabled_when_zero():

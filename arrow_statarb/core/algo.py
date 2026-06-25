@@ -382,7 +382,7 @@ class ArrowAutoTrader:
                 snap["status"] = (f"exit retry in {wait:.0f}s (backoff after "
                                   f"{self._exit_failures} failure(s); {exit_reason}, z={z:.2f})")
             elif exit_reason == "dollar_stop":
-                snap["status"] = f"DOLLAR STOP (net {_pnl_txt} ≤ −₹{dollar_stop:.0f})"
+                snap["status"] = f"STOP PRICE (net {_pnl_txt} ≤ −₹{dollar_stop:.0f})"
                 self._exit("dollar_stop", z, spread_now)
             elif exit_reason == "profit_target":
                 snap["status"] = f"PROFIT TARGET (net {_pnl_txt} ≥ ₹{profit_target:.0f})"
