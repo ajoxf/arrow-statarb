@@ -86,6 +86,18 @@ risk:
                               # until usable margin ≥ this (your broker's SPAN+
                               # exposure for 1 lot of the spread). 0 = just > 0.
 
+# Fast-exit overrides (Phase 1). Dollar-P&L exits evaluated EVERY tick in strict
+# priority ABOVE the z-score exit:  1) dollar stop  2) profit target  3) z-stop
+# 4) z-score target  5) time-stop. P&L is the live mark-to-market of the open
+# position (entry FILL spread vs current mid, × lots × lot_size, − round-trip
+# brokerage). The dollar stop is never gated by min-hold — risk before reward.
+exits:
+  dollar_stop_inr: 0          # INR; hard loss floor per trade — exit when net P&L
+                              # ≤ −this. 0 = off. (The z-stop still applies.)
+  profit_target_inr: 0        # INR; bank profit — exit when net P&L ≥ this. Note
+                              # the live figure does not pre-deduct EXIT slippage,
+                              # so leave a margin above round-trip cost. 0 = off.
+
 # Only trade inside this window (IST).
 trading_hours:
   enabled: false              # optional hard window (start..end); see also the close buffer

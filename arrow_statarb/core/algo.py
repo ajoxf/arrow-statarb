@@ -145,6 +145,9 @@ class ArrowAutoTrader:
                 "lots": max(1, int(pos.get("lots", 1))),
                 "entry_z": -1.0 if direction == "LONG_SPREAD" else 1.0,
                 "entry_spread": pos.get("entry_spread"),
+                # the trade-log OPEN records the FILL spread, so it is the right
+                # P&L reference for a position re-adopted after a restart
+                "entry_fill_spread": pos.get("entry_spread"),
                 "entry_time": float(pos.get("ts") or self._clock()),
                 "order_ids": [],
                 "dry_run": bool(pos.get("dry_run", False)),
@@ -215,6 +218,34 @@ class ArrowAutoTrader:
             stop_zscore=float(p.get("stop_zscore", 4.0)),
             enabled=bool(p.get("enable_probability_filter", True)),
         )
+
+    def _live_net_pnl(self, cur_spread: Optional[float], p: Dict) -> Optional[float]:
+        """Live mark-to-market net P&L (₹) of the open position, or None when it
+        cannot be computed yet (flat, or no current price).
+
+        gross = Δspread × lots × lot_size — the spread is in ₹/unit so it must be
+        scaled by the contract's unit count. The reference is the actual ENTRY
+        FILL spread (which already embeds entry slippage); the current side is
+        the live MID spread, so the EXIT's own slippage is NOT pre-deducted —
+        the live figure is a touch rosier than the eventual realized P&L, and ₹
+        targets should be set with a little margin. Fees are the flat round-trip
+        brokerage (2 legs × entry+exit), matching the trade-log convention.
+        LONG profits when the spread rises; SHORT when it falls."""
+        pos = self._pos
+        if not pos or cur_spread is None:
+            return None
+        entry = pos.get("entry_fill_spread")
+        if entry is None:
+            entry = pos.get("entry_spread")
+        if entry is None:
+            return None
+        lots = max(1, int(pos.get("lots", 1)))
+        lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+        change = ((cur_spread - entry) if pos["direction"] == "LONG_SPREAD"
+                  else (entry - cur_spread))
+        gross = change * lots * lot_mult
+        rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        return gross - rt_fees
 
     def _tick(self) -> None:
         p = self._params()
@@ -308,12 +339,30 @@ class ArrowAutoTrader:
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
             spread_now = sig.get("spread")
+
+            # ── live mark-to-market net P&L on the open position (₹) ──────────
+            net_pnl = self._live_net_pnl(spread_now, p)
+            dollar_stop = float(p.get("dollar_stop_inr", 0) or 0)
+            profit_target = float(p.get("profit_target_inr", 0) or 0)
+            snap["net_pnl"] = round(net_pnl, 2) if net_pnl is not None else None
+            snap["dollar_stop"] = -dollar_stop if dollar_stop > 0 else None
+            snap["profit_target"] = profit_target if profit_target > 0 else None
+            _pnl_txt = f"₹{net_pnl:.0f}" if net_pnl is not None else "n/a"
+
             # Minimum hold: suppress the reversion/target exit until the trade has
             # lived long enough that REAL reversion — not a single noisy tick —
-            # decides the outcome. The stop-loss is never suppressed (safety), and
-            # the time-stop is a maximum so it is always beyond the minimum.
+            # decides the outcome. Risk overrides (dollar stop, z-stop) are NEVER
+            # suppressed; the time-stop is a maximum so it is always beyond it.
             hold_gated = reverted and min_hold_sec > 0 and held_sec < min_hold_sec
-            if abs(z) >= stop_z:
+
+            # Exit priority (first match wins) — RISK BEFORE REWARD:
+            #   1 dollar stop · 2 profit target · 3 emergency z-stop ·
+            #   4 z-score target (min-hold gated) · 5 time-stop
+            if dollar_stop > 0 and net_pnl is not None and net_pnl <= -dollar_stop:
+                exit_reason = "dollar_stop"
+            elif profit_target > 0 and net_pnl is not None and net_pnl >= profit_target:
+                exit_reason = "profit_target"
+            elif abs(z) >= stop_z:
                 exit_reason = "stop"
             elif reverted and not hold_gated:
                 exit_reason = "target"
@@ -332,6 +381,12 @@ class ArrowAutoTrader:
                 wait = self._exit_retry_at - now
                 snap["status"] = (f"exit retry in {wait:.0f}s (backoff after "
                                   f"{self._exit_failures} failure(s); {exit_reason}, z={z:.2f})")
+            elif exit_reason == "dollar_stop":
+                snap["status"] = f"DOLLAR STOP (net {_pnl_txt} ≤ −₹{dollar_stop:.0f})"
+                self._exit("dollar_stop", z, spread_now)
+            elif exit_reason == "profit_target":
+                snap["status"] = f"PROFIT TARGET (net {_pnl_txt} ≥ ₹{profit_target:.0f})"
+                self._exit("profit_target", z, spread_now)
             elif exit_reason == "stop":
                 snap["status"] = f"STOP (z={z:.2f})"
                 self._exit("stop", z, spread_now)
@@ -343,9 +398,9 @@ class ArrowAutoTrader:
                 self._exit("time_stop", z, spread_now)
             elif hold_gated:
                 snap["status"] = (f"min-hold {held_sec:.0f}s/{min_hold_sec:.0f}s — "
-                                  f"reverted but holding (z={z:.2f})")
+                                  f"reverted but holding (z={z:.2f}, net {_pnl_txt})")
             else:
-                snap["status"] = f"holding {self._pos['direction']} (z={z:.2f})"
+                snap["status"] = f"holding {self._pos['direction']} (z={z:.2f}, net {_pnl_txt})"
 
         self._set_snap(snap)
 
@@ -377,9 +432,14 @@ class ArrowAutoTrader:
         except TypeError:                        # execute_fn without the kwargs (tests)
             res = self._execute(direction, lots) or {}
         if res.get("success"):
+            # entry_fill_spread = the ACTUAL executed spread (avg fills), used for
+            # live ₹ P&L; falls back to the decision spread when the execute path
+            # can't report fills (dry-run stubs / tests).
+            fill = res.get("fill_spread")
             self._pos = {
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
+                "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
                 "entry_time": self._clock(),
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),

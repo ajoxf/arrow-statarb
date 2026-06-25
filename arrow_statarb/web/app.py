@@ -327,6 +327,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         res = _spread_order(legs, "Order", verify_flat=True)
         if res.get("success"):
             m = _trade_meta(res)
+            # Hand the actual executed fill spread back to the caller (the algo
+            # stores it as the live-P&L reference for its dollar-stop / target).
+            res["fill_spread"] = m["spread"]
+            res["leg_a_fill"] = m["leg_a_price"]
+            res["leg_b_fill"] = m["leg_b_price"]
             # P&L MUST come from the actual executed fill spread (m["spread"],
             # built from the executor's avg_price), NOT the algo's decision
             # spread — otherwise slippage is invisible and a slipped trade can
@@ -516,6 +521,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         s = cfg.section("signal")
         f = cfg.section("filters")
         r = cfg.section("risk")
+        xo = cfg.section("exits")          # dollar-P&L exit overrides (Phase 1)
         cap = int(r.get("max_contracts_per_leg", 0) or 0)
         lots = int(_algo_lots["lots"])
         if cap > 0:
@@ -529,6 +535,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "min_hold_sec": float(s.get("min_hold_sec", 0) or 0),
+            # ── dollar-P&L exit overrides (priority above the z-score exit) ──
+            "dollar_stop_inr": float(xo.get("dollar_stop_inr", 0) or 0),
+            "profit_target_inr": float(xo.get("profit_target_inr", 0) or 0),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
@@ -1120,6 +1129,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             s, f, r, th = (cfg.section("signal"), cfg.section("filters"),
                            cfg.section("risk"), cfg.section("trading_hours"))
             ex = cfg.section("execution")
+            xo = cfg.section("exits")
             return jsonify({
                 "execution": {
                     "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
@@ -1127,6 +1137,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "amend_interval_sec": ex.get("amend_interval_sec", 1.5),
                     "fill_timeout_sec": ex.get("fill_timeout_sec", 5),
                     "max_exit_failures": ex.get("max_exit_failures", 0),
+                },
+                "exits": {
+                    "dollar_stop_inr": xo.get("dollar_stop_inr", 0),
+                    "profit_target_inr": xo.get("profit_target_inr", 0),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1216,6 +1230,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("max_exit_failures", 0)):
             if k in ed:
                 ex[k] = _num(ed[k], d)
+
+        xo = raw.setdefault("exits", {})
+        xd = data.get("exits") or {}
+        for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0)):
+            if k in xd:
+                xo[k] = _num(xd[k], d)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:

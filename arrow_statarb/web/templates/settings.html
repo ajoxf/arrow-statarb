@@ -227,6 +227,32 @@
         </div>
     </div>
 
+    <!-- ── Fast-Exit Overrides (dollar P&L) ──────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-cash-stack me-2"></i>Fast-Exit Overrides</div>
+            <div class="card-body">
+                <div class="alert alert-warning py-2 small mb-3">
+                    Exits on REAL live P&amp;L, evaluated every tick <strong>above</strong> the z-score exit.
+                    Priority: dollar stop → profit target → z-stop → z-exit → time-stop.
+                    The dollar stop is never gated by min-hold. <strong>Applies to the next tick; no restart.</strong>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Dollar Stop (₹)</label>
+                        <input type="number" step="1" class="form-control" id="x-dstop">
+                        <div class="form-text">Hard loss floor — exit when net P&amp;L ≤ −this. 0 = off.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Profit Target (₹)</label>
+                        <input type="number" step="1" class="form-control" id="x-ptarget">
+                        <div class="form-text">Bank profit — exit when net P&amp;L ≥ this. Leave margin above round-trip cost (exit slippage not pre-deducted). 0 = off.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── System Tests ──────────────────────────────────────────────────── -->
     <div class="col-lg-6">
         <div class="card h-100">
@@ -296,6 +322,10 @@
             _set('e-interval', s.execution.amend_interval_sec);
             _set('e-timeout', s.execution.fill_timeout_sec);
         }
+        if (s.exits) {
+            _set('x-dstop', s.exits.dollar_stop_inr);
+            _set('x-ptarget', s.exits.profit_target_inr);
+        }
     }
 
     document.querySelectorAll('input[name=basis]').forEach(el => el.addEventListener('change', () => {
@@ -345,6 +375,10 @@
                 amend_interval_sec: +document.getElementById('e-interval').value,
                 fill_timeout_sec: +document.getElementById('e-timeout').value,
                 max_exit_failures: +document.getElementById('x-maxfail').value,
+            },
+            exits: {
+                dollar_stop_inr: +document.getElementById('x-dstop').value,
+                profit_target_inr: +document.getElementById('x-ptarget').value,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

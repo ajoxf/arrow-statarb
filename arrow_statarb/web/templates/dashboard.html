@@ -678,7 +678,8 @@
     // ── Trade Journal (round-trips) ──────────────────────────────────────────
     function _arrow2(a, b, d) { const f = v => (v==null?'—':Number(v).toFixed(d)); return `${f(a)}→${f(b)}`; }
     function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
-    const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark', manual:'bg-secondary' };
+    const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark',
+                       dollar_stop:'bg-danger', profit_target:'bg-success', manual:'bg-secondary' };
     async function pollJournal() {
         try {
             const j = await fetch('/api/trades/journal').then(x => x.json());
@@ -771,6 +772,13 @@
                 let txt = `[${mode}] ${s.status||'—'}`;
                 if (s.zscore != null) txt += ` · z=${Number(s.zscore).toFixed(2)}`;
                 if (s.in_position && s.position) txt += ` · IN ${s.position.direction}`;
+                if (s.in_position && s.net_pnl != null) {
+                    let pl = ` · P&L ₹${Number(s.net_pnl).toFixed(0)}`;
+                    if (s.dollar_stop != null) pl += ` (stop ₹${Number(s.dollar_stop).toFixed(0)}`;
+                    if (s.profit_target != null) pl += `${s.dollar_stop!=null?' / ':' ('}tgt +₹${Number(s.profit_target).toFixed(0)}`;
+                    if (s.dollar_stop != null || s.profit_target != null) pl += ')';
+                    txt += pl;
+                }
                 if (s.last_error) txt += ` · ⚠ ${s.last_error}`;
                 el.textContent = txt;
             }

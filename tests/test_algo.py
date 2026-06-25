@@ -37,9 +37,9 @@ def _make(params_over=None):
     return algo, state, calls
 
 
-def _sig(z, ready=True, half_life=0.0, std=1.0):
+def _sig(z, ready=True, half_life=0.0, std=1.0, spread=100.0):
     return {"zscore": z, "std": std, "ready": ready, "leg_a": 110.0, "leg_b": 10.0,
-            "spread": 100.0, "mean": 100.0, "samples": 300, "half_life": half_life,
+            "spread": spread, "mean": 100.0, "samples": 300, "half_life": half_life,
             "sample_interval_sec": 0.5, "entry_zscore": 2.0, "exit_zscore": 0.0,
             "stop_zscore": 4.0, "min_signal_minutes": 1.0, "span_minutes": 5.0}
 
@@ -105,6 +105,110 @@ def test_stop_loss():
     state["sig"] = _sig(-4.5); algo._tick()         # |z| ≥ stop → stop out
     assert calls["close"] == [("LONG_SPREAD", 1)]
     assert "STOP" in algo._snap["status"]
+
+
+# ── Phase 1: dollar-P&L exit overrides ──────────────────────────────────────
+# net P&L (no fees) = (cur_spread − entry_fill) × lots × lot_mult  for LONG,
+#                     (entry_fill − cur_spread) × lots × lot_mult  for SHORT.
+# Entry fill spread falls back to the entry signal spread (100.0 here) when the
+# test execute stub returns no fill price. lot_mult=1, brokerage=0 → clean math.
+def _pnl_make(over=None):
+    params = {"dollar_stop_inr": 0.0, "profit_target_inr": 0.0,
+              "lot_multiplier": 1.0, "brokerage_per_lot": 0.0}
+    if over:
+        params.update(over)
+    return _make(params)
+
+
+def test_live_net_pnl_long_and_short_signs():
+    algo, state, calls = _pnl_make()
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter LONG @100
+    state["sig"] = _sig(-1.0, spread=130.0); algo._tick()           # spread rose 30
+    assert algo.get_state()["net_pnl"] == 30.0                      # LONG gains
+    # fresh SHORT trade
+    algo, state, calls = _pnl_make()
+    state["sig"] = _sig(2.5, spread=100.0); algo._tick()            # enter SHORT @100
+    state["sig"] = _sig(1.0, spread=130.0); algo._tick()            # spread rose 30
+    assert algo.get_state()["net_pnl"] == -30.0                     # SHORT loses
+
+
+def test_dollar_stop_fires_long():
+    algo, state, calls = _pnl_make({"dollar_stop_inr": 50.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter LONG
+    state["sig"] = _sig(-1.0, spread=40.0); algo._tick()            # net = −60 ≤ −50
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "DOLLAR STOP" in algo._snap["status"]
+
+
+def test_dollar_stop_fires_short():
+    algo, state, calls = _pnl_make({"dollar_stop_inr": 50.0})
+    state["sig"] = _sig(2.5, spread=100.0); algo._tick()            # enter SHORT
+    state["sig"] = _sig(1.0, spread=160.0); algo._tick()            # net = −60 ≤ −50
+    assert calls["close"] == [("SHORT_SPREAD", 1)]
+    assert "DOLLAR STOP" in algo._snap["status"]
+
+
+def test_profit_target_fires_long():
+    algo, state, calls = _pnl_make({"profit_target_inr": 50.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter LONG
+    state["sig"] = _sig(-1.5, spread=160.0); algo._tick()           # net = +60 ≥ 50, z not reverted
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "PROFIT TARGET" in algo._snap["status"]
+
+
+def test_profit_target_fires_short():
+    algo, state, calls = _pnl_make({"profit_target_inr": 50.0})
+    state["sig"] = _sig(2.5, spread=100.0); algo._tick()            # enter SHORT
+    state["sig"] = _sig(1.5, spread=40.0); algo._tick()             # net = +60 ≥ 50
+    assert calls["close"] == [("SHORT_SPREAD", 1)]
+    assert "PROFIT TARGET" in algo._snap["status"]
+
+
+def test_dollar_stop_priority_over_time_stop():
+    # Both the dollar stop and the time-stop would fire; risk-first must win.
+    algo, state, calls = _pnl_make({"dollar_stop_inr": 50.0, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 10_000             # time-stop also due
+    state["sig"] = _sig(-1.0, spread=40.0, half_life=1.0); algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "DOLLAR STOP" in algo._snap["status"]              # not TIME-STOP
+
+
+def test_dollar_stop_not_gated_by_min_hold():
+    # Risk control must fire immediately even inside the min-hold window.
+    algo, state, calls = _pnl_make({"dollar_stop_inr": 50.0, "min_hold_sec": 600.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()           # enter (held ~0s)
+    state["sig"] = _sig(-1.0, spread=40.0); algo._tick()            # net −60 within hold
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "DOLLAR STOP" in algo._snap["status"]
+
+
+def test_dollar_exits_disabled_when_zero():
+    # 0/0 → no dollar exits; a big paper loss with z un-reverted just holds.
+    algo, state, calls = _pnl_make()
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()
+    state["sig"] = _sig(-1.0, spread=40.0); algo._tick()            # net −60 but disabled
+    assert calls["close"] == []
+    assert "holding" in algo.get_state()["status"]
+
+
+def test_dollar_stop_uses_entry_fill_not_decision():
+    # The execute stub reports a fill spread of 100 while the decision spread is
+    # 999. P&L MUST be measured from the FILL: at cur=130 the fill-based net is
+    # +30 (no stop), whereas a decision-based net would be −869 (would stop).
+    algo, state, calls = _make({"dollar_stop_inr": 50.0, "lot_multiplier": 1.0,
+                                "brokerage_per_lot": 0.0})
+
+    def execute_with_fill(direction, lots, **kw):
+        calls["execute"].append((direction, lots))
+        return {"success": True, "dry_run": True, "fill_spread": 100.0,
+                "results": [{"order_id": "A"}, {"order_id": "B"}]}
+    algo._execute = execute_with_fill
+    state["sig"] = _sig(-2.5, spread=999.0); algo._tick()           # decision 999, fill 100
+    assert algo._pos["entry_fill_spread"] == 100.0
+    state["sig"] = _sig(-1.0, spread=130.0); algo._tick()           # fill net +30 → no stop
+    assert calls["close"] == []
+    assert algo.get_state()["net_pnl"] == 30.0                      # measured from fill, not 999
 
 
 def test_cooldown_blocks_reentry():
