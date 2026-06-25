@@ -1,8 +1,15 @@
 """SignalEngine — the single source of truth: time window, stats, z, half-life."""
 
 import math
+import time
 
 from arrow_statarb.core.signal import SignalEngine
+
+
+def _persist_eng(path, series="A|B", **pover):
+    return SignalEngine(prices_provider=lambda: (None, None),
+                        params_provider=lambda: _params(**pover),
+                        persist_path=path, series_key_provider=lambda: series)
 
 
 def _params(**over):
@@ -116,3 +123,88 @@ def test_excursion_event_log_has_timestamps():
     assert "time" in e["events"][0] and e["events"][0]["z"] == 0.0
     eng.reset_excursions()
     assert eng.get_excursions()["event_count"] == 0
+
+
+# ── window persistence (resume warm-up across a quick restart) ───────────────
+def test_persist_and_restore_resumes_window(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p)
+    for i in range(30):
+        eng.push(110.0, 10.0, ts=now - 30 + i)        # recent ~30s of samples
+    eng._persist()
+    assert p.exists()
+    eng2 = _persist_eng(p)
+    eng2._restore()
+    assert len(eng2._samples) == 30
+    assert eng2.get_signal()["samples"] == 30
+
+
+def test_restore_refused_on_series_mismatch(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p, series="A|B")
+    for i in range(20):
+        eng.push(110.0, 10.0, ts=now - 20 + i)
+    eng._persist()
+    eng2 = _persist_eng(p, series="C|D")               # different contracts
+    eng2._restore()
+    assert len(eng2._samples) == 0                     # not resumable
+
+
+def test_restore_refused_when_stale(tmp_path):
+    p = tmp_path / "win.json"
+    old = time.time() - 3600                           # 1 hour ago
+    eng = _persist_eng(p, window_minutes=120.0)        # 2h window — samples still "in window"
+    for i in range(20):
+        eng.push(110.0, 10.0, ts=old + i)
+    eng._persist()
+    eng2 = _persist_eng(p, window_minutes=120.0)
+    eng2._restore()
+    assert len(eng2._samples) == 0                     # gap > resume_max_gap → fresh
+
+
+def test_restore_drops_samples_older_than_window(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p, window_minutes=1.0)          # 60s window
+    for i in range(10):                                # 10 old (>60s) — bypass push trim
+        eng._samples.append((now - 300 + i, 110.0, 10.0, 100.0))
+    for i in range(10):                                # 10 recent (<60s)
+        eng._samples.append((now - 10 + i, 110.0, 10.0, 100.0))
+    eng._persist()
+    eng2 = _persist_eng(p, window_minutes=1.0)
+    eng2._restore()
+    assert len(eng2._samples) == 10                    # only in-window samples kept
+
+
+def test_reset_clears_persisted_file(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p)
+    for i in range(10):
+        eng.push(110.0, 10.0, ts=now - 10 + i)
+    eng._persist()
+    assert p.exists()
+    eng.reset()
+    assert not p.exists()                              # intentional reset wipes it
+
+
+def test_persist_disabled_writes_nothing(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p, persist_window=False)
+    for i in range(10):
+        eng.push(110.0, 10.0, ts=now - 10 + i)
+    eng._persist()
+    assert not p.exists()
+
+
+def test_persist_skipped_without_series_key(tmp_path):
+    p = tmp_path / "win.json"
+    now = time.time()
+    eng = _persist_eng(p, series="")                   # legs unknown
+    for i in range(10):
+        eng.push(110.0, 10.0, ts=now - 10 + i)
+    eng._persist()
+    assert not p.exists()

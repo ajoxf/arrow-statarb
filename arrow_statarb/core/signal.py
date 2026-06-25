@@ -12,9 +12,11 @@ Convention (Arrow fact #10):
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -28,9 +30,17 @@ class SignalEngine:
         self,
         prices_provider: Callable[[], Tuple[Optional[float], Optional[float]]],
         params_provider: Callable[[], Dict],
+        persist_path: Optional[Path] = None,
+        series_key_provider: Optional[Callable[[], str]] = None,
     ):
         self._prices = prices_provider
         self._params = params_provider
+        # Optional disk persistence of the rolling window so a quick restart
+        # resumes the warm-up instead of re-collecting it (with strict freshness
+        # + same-series guards on restore — see _restore).
+        self._persist_path = Path(persist_path) if persist_path else None
+        self._series_key_provider = series_key_provider
+        self._last_persist = 0.0
 
         # (timestamp, leg_a, leg_b, spread)
         self._samples: Deque[Tuple[float, float, float, float]] = deque()
@@ -80,6 +90,7 @@ class SignalEngine:
         with self._lock:
             if self.running:
                 return False
+            self._restore()               # resume the window from disk if fresh
             self._stop_evt.clear()
             self.running = True
             self._thread = threading.Thread(target=self._loop, daemon=True, name="SignalEngine")
@@ -90,12 +101,14 @@ class SignalEngine:
     def stop(self) -> None:
         self._stop_evt.set()
         self.running = False
+        self._persist()                   # best-effort save so a restart resumes
         logger.info("SignalEngine: stopped")
 
     def reset(self) -> None:
         with self._lock:
             self._samples.clear()
             self._reset_exc_state()       # series discontinues; counters preserved
+            self._clear_persisted()       # don't let a restore undo an intentional reset
 
     def _reset_exc_state(self) -> None:
         """Clear the transient crossing state (not the counters)."""
@@ -181,6 +194,7 @@ class SignalEngine:
             try:
                 interval = max(0.05, self._p()["sample_interval_sec"])
                 self.sample_once()
+                self._maybe_persist()
             except Exception as exc:
                 self._last_error = str(exc)
                 logger.exception("SignalEngine: sample error")
@@ -222,6 +236,111 @@ class SignalEngine:
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:
             self._samples.popleft()
+
+    # ── window persistence (resume warm-up across a quick restart) ────────────
+    def _series_key(self) -> str:
+        """Identity of the current leg pair (e.g. 'NIFTY30JUN26F|NIFTY28JUL26F').
+        Persisted with the window so a restore is REFUSED when the legs changed —
+        a different contract pair is a different spread series, not resumable."""
+        try:
+            return str(self._series_key_provider()) if self._series_key_provider else ""
+        except Exception:
+            return ""
+
+    def _persist_cfg(self) -> Tuple[bool, float, float]:
+        """(enabled, resume_max_gap_sec, persist_interval_sec) from live params."""
+        p = self._params() or {}
+        enabled = bool(p.get("persist_window", True))
+        gap = float(p.get("resume_max_gap_min", 10.0) or 0.0) * 60.0
+        every = float(p.get("persist_interval_sec", 30.0) or 30.0)
+        return enabled, gap, every
+
+    def _maybe_persist(self, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        _, _, every = self._persist_cfg()
+        if now - self._last_persist >= max(5.0, every):
+            self._persist(now)
+
+    def _persist(self, now: Optional[float] = None) -> None:
+        """Write the current window to disk (atomically). No-op when persistence
+        is off, no path is set, the series is unknown, or the window is empty."""
+        if not self._persist_path:
+            return
+        enabled, _, _ = self._persist_cfg()
+        if not enabled:
+            return
+        key = self._series_key()
+        if not key:
+            return                          # never persist a window we can't label
+        now = time.time() if now is None else now
+        with self._lock:
+            samples = list(self._samples)
+        if not samples:
+            return
+        payload = {"series_key": key,
+                   "window_minutes": self._p()["window_minutes"],
+                   "saved_at": now,
+                   "samples": [list(s) for s in samples]}
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._persist_path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            tmp.replace(self._persist_path)
+            self._last_persist = now
+        except Exception as exc:           # never let persistence break sampling
+            logger.warning("SignalEngine: could not persist window — {}", exc)
+
+    def _clear_persisted(self) -> None:
+        if not self._persist_path:
+            return
+        try:
+            self._persist_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _restore(self) -> None:
+        """Repopulate the window from disk IFF it is safe to resume:
+          • persistence enabled and the file exists/parses;
+          • the saved leg series matches the CURRENT legs (else discard);
+          • samples older than the window are dropped (handles overnight);
+          • the newest surviving sample is within ``resume_max_gap_min`` of now
+            (a larger gap = stale regime → re-collect fresh).
+        Anything short of all four → start cold (the safe default)."""
+        if not self._persist_path or not self._persist_path.exists():
+            return
+        enabled, max_gap, _ = self._persist_cfg()
+        if not enabled:
+            return
+        try:
+            with open(self._persist_path) as f:
+                data = json.load(f) or {}
+        except Exception as exc:
+            logger.warning("SignalEngine: could not read persisted window — {}", exc)
+            return
+        cur_key = self._series_key()
+        if not cur_key or data.get("series_key") != cur_key:
+            logger.info("SignalEngine: window not restored — leg series changed "
+                        "(saved={}, current={})", data.get("series_key"), cur_key)
+            return
+        now = time.time()
+        window_sec = self._p()["window_minutes"] * 60.0
+        kept = [tuple(s) for s in (data.get("samples") or [])
+                if isinstance(s, (list, tuple)) and len(s) == 4 and (now - s[0]) <= window_sec]
+        if not kept:
+            return
+        kept.sort(key=lambda s: s[0])
+        gap = now - kept[-1][0]
+        if max_gap > 0 and gap > max_gap:
+            logger.info("SignalEngine: window not restored — last sample {:.1f} min old "
+                        "(> {:.0f} min cap); collecting fresh", gap / 60.0, max_gap / 60.0)
+            return
+        with self._lock:
+            self._samples = deque(kept)
+            self._reset_exc_state()
+        span = (kept[-1][0] - kept[0][0]) / 60.0
+        logger.info("SignalEngine: restored {} samples spanning {:.1f} min "
+                    "(gap {:.1f} min) — warm-up skipped", len(kept), span, gap / 60.0)
 
     # ── stats ────────────────────────────────────────────────────────────────
     @staticmethod

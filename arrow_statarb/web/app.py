@@ -51,6 +51,7 @@ TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
 # restart within the validity window reuses it instead of running 2FA again.
 # Module-level so tests can redirect it away from a real session file.
 SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
+SIGNAL_WINDOW_FILE = PROJECT_ROOT / "data" / "signal_window.json"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -495,9 +496,22 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "entry_zscore": float(s.get("entry_zscore", 2.0)),
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
+            # window persistence (resume warm-up across a quick restart)
+            "persist_window": bool(s.get("persist_window", True)),
+            "resume_max_gap_min": float(s.get("resume_max_gap_min", 10) or 0),
+            "persist_interval_sec": float(s.get("persist_interval_sec", 30) or 30),
         }
 
-    signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params)
+    def _series_key() -> str:
+        """Current leg pair as 'leg_a|leg_b' symbols — tags the persisted window
+        so it is only resumed for the same contracts."""
+        legs = _read_legs()
+        a = (legs.get("leg_a") or {}).get("symbol", "")
+        b = (legs.get("leg_b") or {}).get("symbol", "")
+        return f"{a}|{b}" if a and b else ""
+
+    signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
+                                 persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key)
     # Auto-start so the live signal + z-score chart always collect whenever prices
     # are available — independent of connecting the broker or arming the algo. It
     # simply no-ops while no prices are returned, so this is safe at startup.

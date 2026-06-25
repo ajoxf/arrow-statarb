@@ -44,6 +44,14 @@ signal:
   sample_interval_sec: 0.5    # how often the server samples prices
   display_refresh_ms: 500     # dashboard live-price poll cadence (min 500ms)
   min_signal_minutes: 30      # history required before any trade (ready gate)
+  # Window persistence: save the rolling window to data/signal_window.json so a
+  # quick restart resumes the warm-up instead of re-collecting it. Restore is
+  # REFUSED if the legs changed or the newest saved sample is older than
+  # resume_max_gap_min (stale regime → collect fresh). Safe for short restarts;
+  # overnight gaps fall outside the window and re-collect automatically.
+  persist_window: true
+  resume_max_gap_min: 10      # max minutes the program can be off and still resume
+  persist_interval_sec: 30    # how often the window is flushed to disk
   min_hold_sec: 0             # suppress the reversion/target exit for this long
                               # after entry, so a single noisy tick can't trigger a
                               # 1-second round trip (paying the bid-ask twice for
