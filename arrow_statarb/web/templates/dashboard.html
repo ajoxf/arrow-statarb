@@ -211,6 +211,29 @@
                 </div>
             </div>
         </div>
+
+        <!-- Exchange Order Log (the broker's own order book — exchange source of truth) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-journal-text me-2"></i>Exchange Order Log <span id="xo-broker" class="badge bg-secondary">—</span></span>
+                <span class="small">
+                    <button class="btn btn-sm btn-outline-success" onclick="downloadExchangeCSV()"><i class="bi bi-download"></i> CSV</button>
+                    <button class="btn btn-sm btn-outline-secondary ms-1" onclick="pollExchangeOrders()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                </span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm mb-0 align-middle">
+                        <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
+                            <th class="ps-3">Time</th><th>Symbol</th><th>Side</th><th>Product</th><th>Type</th>
+                            <th class="text-end">Qty</th><th class="text-end">Fill Qty</th><th class="text-end">Fill Price</th>
+                            <th class="text-end">Fee</th><th>Status</th><th class="pe-3">Order ID</th>
+                        </tr></thead>
+                        <tbody id="xo-body"><tr><td colspan="11" class="text-center text-secondary py-3">No exchange orders</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- ════════════════ RIGHT COLUMN ════════════════ -->
@@ -778,6 +801,48 @@
         try { await fetch('/api/execution/clear', { method:'POST' }); pollExecution(); } catch (e) {}
     }
 
+    // ── Exchange Order Log (the broker's own order book) ─────────────────────
+    let _xoOrders = [];
+    const _XOSTCLS = { COMPLETE:'bg-success', REJECTED:'bg-danger', CANCELLED:'bg-secondary',
+                       OPEN:'bg-info text-dark', PARTIAL:'bg-warning text-dark',
+                       PENDING:'bg-warning text-dark', UNKNOWN:'bg-secondary' };
+    async function pollExchangeOrders() {
+        try {
+            const r = await fetch('/api/exchange-orders').then(x => x.json());
+            _xoOrders = r.orders || [];
+            const b = document.getElementById('xo-broker');
+            if (b) b.textContent = String(r.broker || '—').toUpperCase();
+            const body = document.getElementById('xo-body');
+            if (!_xoOrders.length) {
+                body.innerHTML = `<tr><td colspan="11" class="text-center text-secondary py-3">${r.note || 'No exchange orders'}</td></tr>`;
+                return;
+            }
+            const sc = s => s === 'BUY' ? 'text-success' : (s === 'SELL' ? 'text-danger' : '');
+            body.innerHTML = _xoOrders.map(o => `<tr class="small">
+                <td class="ps-3 font-monospace">${o.time || '—'}</td>
+                <td>${o.symbol || '—'}</td>
+                <td class="${sc(o.side)}">${o.side || '—'}</td>
+                <td>${o.product || '—'}</td>
+                <td>${o.order_type || '—'}</td>
+                <td class="text-end">${o.qty ?? '—'}</td>
+                <td class="text-end">${o.fill_qty ?? '—'}</td>
+                <td class="text-end font-monospace">${o.fill_price ? Number(o.fill_price).toFixed(2) : '—'}</td>
+                <td class="text-end">${o.fee ? _rs(o.fee) : '—'}</td>
+                <td><span class="badge ${_XOSTCLS[o.status] || 'bg-secondary'}">${o.status || '—'}</span></td>
+                <td class="pe-3 font-monospace" style="font-size:.8em">${o.order_id || '—'}</td></tr>`).join('');
+        } catch (e) {}
+    }
+    function downloadExchangeCSV() {
+        if (!_xoOrders.length) { return; }
+        const cols = ['time','symbol','exchange','side','product','order_type','qty',
+                      'fill_qty','fill_price','price','fee','pnl','status','order_id'];
+        const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const csv = [cols.join(','), ..._xoOrders.map(o => cols.map(c => esc(o[c])).join(','))].join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = 'exchange_orders.csv'; a.click(); URL.revokeObjectURL(a.href);
+    }
+
     // ── Algorithm toggle + state ─────────────────────────────────────────────
     document.getElementById('algo-toggle').addEventListener('change', async function () {
         const enabled = this.checked;
@@ -994,6 +1059,7 @@
     pollPreflight(); setInterval(pollPreflight, 3000);
     pollJournal();  setInterval(pollJournal, 3000);
     pollExecution(); setInterval(pollExecution, 2000);
+    pollExchangeOrders(); setInterval(pollExchangeOrders, 5000);
     pollTrades();   setInterval(pollTrades, 3000);
     pollHistory();  setInterval(pollHistory, 1000);
     pollAlgoState(); setInterval(pollAlgoState, 1000);

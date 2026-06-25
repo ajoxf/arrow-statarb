@@ -1134,6 +1134,23 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         execution_log.clear()
         return jsonify({"success": True})
 
+    @app.route("/api/exchange-orders", methods=["GET"])
+    def api_exchange_orders():
+        """The broker's own order book straight from the exchange (source of
+        truth), for the Exchange Order Log. Live broker only — the sim broker
+        has no exchange book."""
+        broker = active.get()
+        name = str(cfg.get("broker.name", "arrow"))
+        if not broker or not hasattr(broker, "get_order_book"):
+            return jsonify({"orders": [], "broker": name,
+                            "note": "connect the broker to load the exchange order book"})
+        try:
+            orders = broker.get_order_book() or []
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("api_exchange_orders failed — {}", exc)
+            return jsonify({"orders": [], "broker": name, "note": "could not read order book"})
+        return jsonify({"orders": orders, "broker": name, "count": len(orders)})
+
     # ── settings page + API ──────────────────────────────────────────────────
     @app.route("/settings")
     def settings_page():

@@ -1077,6 +1077,67 @@ class ArrowBroker(BaseBroker):
             logger.error("ArrowBroker: get_positions failed — {}", exc)
             return []
 
+    def get_order_book(self) -> List[Dict]:
+        """The day's order book from Arrow, normalized for the dashboard's
+        Exchange Order Log. Field-name tolerant across SDK builds; returns []
+        on any error so the dashboard degrades gracefully."""
+        if not self.connected or not self._client:
+            return []
+        client = self._client
+        raw = None
+        for meth in ("get_order_book", "get_orders", "order_book", "get_orderbook",
+                     "get_order_history", "order_history", "get_trade_book", "get_trades"):
+            fn = getattr(client, meth, None)
+            if fn is None:
+                continue
+            try:
+                raw = fn()
+                if raw is not None:
+                    break
+            except Exception as exc:
+                logger.debug("ArrowBroker: {}() failed — {}", meth, exc)
+        # Some SDK builds wrap the list in {data|orders|orderBook: [...]}.
+        if isinstance(raw, dict):
+            raw = (_dig(raw, "data", "orders", "orderBook", "order_book",
+                        "tradeBook", "result", default=None) or [])
+        if not isinstance(raw, list):
+            return []
+
+        orders: List[Dict] = []
+        for o in raw:
+            if not isinstance(o, dict):
+                continue
+            status_raw = str(_dig(o, "status", "orderStatus", "ordStatus",
+                                  "report_type", default="")).upper().strip()
+            orders.append({
+                "time": str(_dig(o, "orderTime", "order_time", "exchTime", "exchangeTime",
+                                 "updateTime", "orderEntryTime", "exchUpdateTime", "time",
+                                 default="")),
+                "symbol": str(_dig(o, "tradingSymbol", "tradingsymbol", "symbol",
+                                   "instrument", default="")),
+                "exchange": str(_dig(o, "exchSeg", "exchange", "exchangeSegment", default="")),
+                "side": str(_dig(o, "transactionType", "transaction_type", "side",
+                                 "buyOrSell", "trantype", default="")).upper(),
+                "product": str(_dig(o, "product", "productType", "prod", default="")),
+                "order_type": str(_dig(o, "orderType", "order_type", "ordType",
+                                       "priceType", default="")).upper(),
+                "qty": int(float(_dig(o, "quantity", "qty", "orderQty", "totalQty",
+                                      "totalQuantity", default=0) or 0)),
+                "fill_qty": int(float(_dig(o, "filledQty", "filledQuantity", "filled_quantity",
+                                           "cumQty", "fillshares", "tradedQty", default=0) or 0)),
+                "fill_price": float(_dig(o, "avgPrice", "averagePrice", "avgprc",
+                                         "tradedPrice", "fillPrice", default=0) or 0),
+                "price": float(_dig(o, "price", "orderPrice", "limitPrice", default=0) or 0),
+                "fee": float(_dig(o, "fee", "brokerage", "charges", "totalCharges",
+                                  "transactionCharges", default=0) or 0),
+                "pnl": float(_dig(o, "pnl", "realizedPnl", "netPnl", "mtm", default=0) or 0),
+                "status": _ORDER_STATUS_MAP.get(status_raw, status_raw or "UNKNOWN"),
+                "order_id": str(_dig(o, "orderNo", "order_id", "nestOrderNumber",
+                                     "norenordno", "orderId", "id", "ID", default="")),
+                "raw": o,
+            })
+        return orders
+
     def get_account_info(self) -> Dict:
         """Return account balance and margin info from Arrow.
 
