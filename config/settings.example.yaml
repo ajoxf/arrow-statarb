@@ -112,6 +112,17 @@ risk:
   loss_streak_pause_at: 0     # after N consecutive losing closes, HALT new
                               # entries entirely (manual resume). 0 = off.
 
+# Self-healing reconciliation (Tier B). Compares engine belief vs the exchange's
+# bot-leg positions on a cadence; after N consecutive mismatches it force-clears a
+# ghost engine position (safe) and — only when auto_close is on — flattens exchange
+# orphans (REAL market orders). Cleanup costs go to the untracked-close ledger and
+# count against the daily-loss limit. Never touches non-bot instruments.
+reconcile:
+  enabled: false            # run the self-healing loop
+  interval_sec: 20
+  mismatch_threshold: 3     # act only after N consecutive mismatches
+  auto_close: false         # flatten exchange orphans automatically (REAL orders!)
+
 # Regime / trend-day guard (Tier A). Classifies the spread TRENDING vs RANGE over
 # a trailing window (Kaufman efficiency ratio + zero-crossings of a per-IST-day
 # 'morning anchor' + variance ratio). On TRENDING it halts NEW entries for the day

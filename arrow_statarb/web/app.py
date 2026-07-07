@@ -37,6 +37,8 @@ from arrow_statarb.core.algo import ArrowAutoTrader
 from arrow_statarb.core.executor import SpreadExecutor, LegOrder
 from arrow_statarb.core.execution_log import ExecutionLog
 from arrow_statarb.core.trade_log import TradeLog
+from arrow_statarb.core.untracked_ledger import UntrackedLedger
+from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
@@ -52,6 +54,7 @@ TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
 # Module-level so tests can redirect it away from a real session file.
 SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
 SIGNAL_WINDOW_FILE = PROJECT_ROOT / "data" / "signal_window.json"
+UNTRACKED_FILE = PROJECT_ROOT / "data" / "untracked_closes.json"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -102,6 +105,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     _ltp_cache: Dict[str, Any] = {}
     trade_log = TradeLog(TRADES_FILE,
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 20)))
+    untracked_ledger = UntrackedLedger(UNTRACKED_FILE)
     execution_log = ExecutionLog()
 
     # ── broker-read cache (positions + funds) ─────────────────────────────────
@@ -596,7 +600,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "lots": lots,
             "lot_multiplier": _lot_multiplier(),
             "max_daily_loss": float(r.get("max_daily_loss", 0) or 0),
-            "day_pnl": trade_log.day_pnl(),
+            # untracked cleanup costs count against the daily-loss limit
+            "day_pnl": round(trade_log.day_pnl() - untracked_ledger.day_cost(), 2),
             "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
             "commission_basis": str(f.get("commission_basis", "per_lot")),
             "min_win_probability": float(f.get("min_win_probability", 0.60)),
@@ -669,6 +674,69 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             out["message"] = ("Exchange shows an open leg position but the engine is flat — "
                               "possible orphaned leg or manual trade. Review positions.")
         return out
+
+    # ── self-healing reconciliation (Tier B) ─────────────────────────────────
+    def _bot_leg_positions() -> list:
+        """Exchange net positions on the BOT'S legs ONLY (never other symbols)."""
+        legs = _read_legs()
+        if not _have_both_legs(legs):
+            return []
+        seg_of = {legs[lk]["symbol"].upper(): legs[lk]["segment"] for lk in ("leg_a", "leg_b")}
+        out = []
+        for p in (_positions_cached() or []):
+            sym = str(p.get("symbol", "")).upper()
+            if sym in seg_of:
+                out.append({"symbol": sym, "segment": seg_of[sym],
+                            "net_quantity": int(p.get("net_quantity", 0) or 0),
+                            "ltp": float(p.get("ltp", 0) or 0)})
+        return out
+
+    def _flatten_bot_leg(p: Dict) -> None:
+        """Market-close one orphaned bot leg; book an estimated cost to the ledger."""
+        broker = active.get()
+        qty = int(p.get("net_quantity", 0) or 0)
+        if not broker or qty == 0:
+            return
+        side = "sell" if qty > 0 else "buy"
+        broker.submit_order(symbol=p["symbol"], side=side, quantity=abs(qty),
+                            order_type="market", price=None,
+                            exchange_segment=p["segment"],
+                            product=str(cfg.get("execution.product", "NRML")))
+        est = round(abs(qty) * float(p.get("ltp") or 0) * 0.0003, 2)   # ~3bps market-close slip
+        untracked_ledger.record(reason="orphan_auto_close", symbol=p["symbol"],
+                                qty=abs(qty), est_cost=est,
+                                detail=f"reconcile flattened {side} {abs(qty)} @market")
+
+    _reconcile_guard = ReconcileGuard(
+        engine_in_trade=lambda: bool(arrow_algo.get_state().get("in_position")),
+        exchange_bot_positions=_bot_leg_positions,
+        clear_engine=lambda: arrow_algo.clear_position("reconcile: exchange flat"),
+        flatten_leg=_flatten_bot_leg,
+        threshold=int(cfg.get("reconcile.mismatch_threshold", 3) or 3))
+
+    def _start_reconcile_loop() -> None:
+        def loop():
+            while True:
+                try:
+                    rc = cfg.section("reconcile")
+                    if bool(rc.get("enabled", False)):
+                        _reconcile_guard._auto_close = bool(rc.get("auto_close", False))
+                        res = _reconcile_guard.check()
+                        if res.get("acted") == "cleared_engine":
+                            untracked_ledger.record(reason="engine_ghost_cleared",
+                                                    detail="exchange FLAT; engine state force-cleared")
+                except Exception:
+                    pass
+                time.sleep(max(5.0, float(cfg.get("reconcile.interval_sec", 20) or 20)))
+        threading.Thread(target=loop, daemon=True, name="Reconcile").start()
+
+    _start_reconcile_loop()
+
+    @app.route("/api/untracked", methods=["GET"])
+    def api_untracked():
+        return jsonify({"events": untracked_ledger.all(), "total": untracked_ledger.total(),
+                        "day_cost": untracked_ledger.day_cost(),
+                        "reconcile": _reconcile_guard.last})
 
     # ── pages ────────────────────────────────────────────────────────────────
     @app.route("/")

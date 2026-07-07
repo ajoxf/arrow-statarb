@@ -36,5 +36,7 @@ htmlcov/
 data/trades.json
 # Persisted signal window (resume warm-up across a restart) — runtime only
 data/signal_window.json
+# Untracked-close ledger (orphan/reconcile cleanup costs) — runtime only
+data/untracked_closes.json
 # Cached Arrow session token (a credential — never commit)
 data/arrow_session.json

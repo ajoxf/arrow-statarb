@@ -169,6 +169,21 @@ class ArrowAutoTrader:
                        direction, self._pos["lots"])
         return True
 
+    def clear_position(self, reason: str = "reconcile") -> bool:
+        """Force-drop the engine's belief in an open position (used by the
+        reconciler when the exchange shows FLAT but the engine thinks it is
+        in-trade). Safe — touches only in-memory state, places no orders."""
+        with self._lock:
+            if self._pos is None:
+                return False
+            direction = self._pos.get("direction")
+            self._pos = None
+            self._exit_failures = 0
+            self._exit_halted = False
+            self._exit_retry_at = 0.0
+        logger.warning("ArrowAlgo: force-cleared engine position ({}) — {}", direction, reason)
+        return True
+
     def restore_cooldown(self, until_ts: float) -> bool:
         """Re-arm the entry cooldown after a restart so a stop/exit right before
         shutdown doesn't allow an immediate re-entry. ``until_ts`` is an absolute
