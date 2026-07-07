@@ -103,6 +103,8 @@ risk:
   min_live_margin: 50000      # INR; the Pre-Live "Account funded" check warns
                               # until usable margin ≥ this (your broker's SPAN+
                               # exposure for 1 lot of the spread). 0 = just > 0.
+  capital_at_risk_inr: 0      # your SPAN+exposure margin per trade (₹), the basis
+                              # for %-of-capital stop/target. 0 = %-forms disabled.
   # ── Tier A: loss-streak circuit breaker (consecutive losing closes) ──
   loss_streak_reduce_at: 0    # after N consecutive losing closes, cut size by
                               # loss_streak_reduce_pct. 0 = off.
@@ -142,6 +144,15 @@ exits:
                                    # if P&L can't be priced). Recommended ON.
   reversion_gate_inr: 0            # ₹ floor above BE for the reversion exit (0 = BE;
                                    # set >0 for "BE + profit")
+  # ── Tier B: scale-invariant exit levels (survive resizing / re-vol) ──
+  # Target precedence: σ-fraction > %-of-capital > fixed profit_target_inr,
+  # then raised to a cost floor. Stop = min(target/RR, %-capital × CAR) — tighter
+  # binds — else fixed dollar_stop_inr. All 0 = use the fixed-₹ fields above.
+  profit_target_sigma_frac: 0      # target = frac × |z_entry| × σ_entry × qty (0.5–0.7 typical)
+  tp_capital_pct: 0                # else target = this % of capital_at_risk_inr
+  cost_floor_mult: 0               # raise target to ≥ this × round-trip cost (1.0–1.5)
+  stop_capital_pct: 0              # stop = this % of capital_at_risk_inr (e.g. 1.5)
+  stop_rr: 0                       # and/or target ÷ RR (e.g. 0.3 → wide); tighter of the two binds
   # ── Phase 2: max-hold upgrade + trailing stop ──
   max_hold_silent_when_losing: false  # when true, the time/max-hold exit only fires
                               # if net P&L > 0 (a losing trade is left to the stop).

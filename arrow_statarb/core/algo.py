@@ -279,6 +279,58 @@ class ArrowAutoTrader:
             return True                              # fail-open
         return net_pnl >= float(p.get("reversion_gate_inr", 0) or 0)
 
+    def _round_trip_cost(self, p: Dict) -> float:
+        """Estimated round-trip cost in ₹: brokerage + slippage (both ×2 legs
+        ×2 in/out) + STT (2 sells × %-of-notional). Uses the entry leg price as
+        the notional basis."""
+        pos = self._pos or {}
+        lots = int(pos.get("lots", p.get("lots", 1)) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
+        stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
+        ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
+        if stt_pct > 0 and ref:
+            cost += 2.0 * stt_pct * float(ref) * lots * lot_m
+        return cost
+
+    def _effective_exit_levels(self, p: Dict) -> Tuple[float, float]:
+        """Resolve the ₹ (dollar_stop, profit_target) with scale-invariant
+        precedence, so the levels survive resizing/re-vol:
+          target: σ-fraction > %-of-capital > fixed-₹, then raised to a cost floor;
+          stop:   min(target/RR, %-of-capital × capital_at_risk) — the TIGHTER
+                  binds — with fixed-₹ as the fallback.
+        Fixed-₹ fields are used only when their scale-invariant twin is unset."""
+        pos = self._pos or {}
+        lots = int(pos.get("lots", p.get("lots", 1)) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        car = float(p.get("capital_at_risk_inr", 0) or 0)
+        # ── target ──
+        target = float(p.get("profit_target_inr", 0) or 0)
+        sfrac = float(p.get("profit_target_sigma_frac", 0) or 0)
+        std0 = float(pos.get("entry_std", 0) or 0)
+        absz = abs(float(pos.get("entry_z", 0) or 0))
+        tp_cap = float(p.get("tp_capital_pct", 0) or 0)
+        if sfrac > 0 and std0 > 0 and absz > 0:
+            target = sfrac * absz * std0 * lots * lot_m
+        elif tp_cap > 0 and car > 0:
+            target = (tp_cap / 100.0) * car
+        cost_mult = float(p.get("cost_floor_mult", 0) or 0)
+        if cost_mult > 0 and target > 0:
+            target = max(target, cost_mult * self._round_trip_cost(p))
+        # ── stop ──
+        stop = float(p.get("dollar_stop_inr", 0) or 0)
+        cands = []
+        rr = float(p.get("stop_rr", 0) or 0)
+        if rr > 0 and target > 0:
+            cands.append(target / rr)
+        scap = float(p.get("stop_capital_pct", 0) or 0)
+        if scap > 0 and car > 0:
+            cands.append((scap / 100.0) * car)
+        if cands:
+            stop = min(cands)
+        return round(stop, 2), round(target, 2)
+
     def _tick(self) -> None:
         p = self._params()
         sig = self._signal() or {}
@@ -416,8 +468,7 @@ class ArrowAutoTrader:
 
             # ── live mark-to-market net P&L on the open position (₹) ──────────
             net_pnl = self._live_net_pnl(spread_now, p)
-            dollar_stop = float(p.get("dollar_stop_inr", 0) or 0)
-            profit_target = float(p.get("profit_target_inr", 0) or 0)
+            dollar_stop, profit_target = self._effective_exit_levels(p)
             snap["net_pnl"] = round(net_pnl, 2) if net_pnl is not None else None
             snap["dollar_stop"] = -dollar_stop if dollar_stop > 0 else None
             snap["profit_target"] = profit_target if profit_target > 0 else None
@@ -598,6 +649,7 @@ class ArrowAutoTrader:
             self._pos = {
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
+                "entry_std": (self._signal() or {}).get("std"),   # σ frozen at entry
                 "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),

@@ -572,6 +572,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
             "reversion_gate_inr": float(xo.get("reversion_gate_inr", 0) or 0),
             "stt_pct": float(f.get("stt_pct", 0.02) or 0),   # STT %-of-notional, sell-side
+            # ── Tier B: scale-invariant exit levels ──
+            "profit_target_sigma_frac": float(xo.get("profit_target_sigma_frac", 0) or 0),
+            "tp_capital_pct": float(xo.get("tp_capital_pct", 0) or 0),
+            "cost_floor_mult": float(xo.get("cost_floor_mult", 0) or 0),
+            "stop_capital_pct": float(xo.get("stop_capital_pct", 0) or 0),
+            "stop_rr": float(xo.get("stop_rr", 0) or 0),
+            "capital_at_risk_inr": float(r.get("capital_at_risk_inr", 0) or 0),
             "stop_cooldown": float(cfg.get("execution.stop_cooldown_sec", 0) or 0),
             "z_reset_after_stop": bool(cfg.section("execution").get("z_reset_after_stop", False)),
             "loss_streak": int(trade_log.loss_streak()),
@@ -1212,6 +1219,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "trailing_stop_floor_pct": xo.get("trailing_stop_floor_pct", 0),
                     "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
                     "reversion_gate_inr": xo.get("reversion_gate_inr", 0),
+                    "profit_target_sigma_frac": xo.get("profit_target_sigma_frac", 0),
+                    "tp_capital_pct": xo.get("tp_capital_pct", 0),
+                    "cost_floor_mult": xo.get("cost_floor_mult", 0),
+                    "stop_capital_pct": xo.get("stop_capital_pct", 0),
+                    "stop_rr": xo.get("stop_rr", 0),
                 },
                 "regime": {
                     "enabled": bool(rg.get("enabled", False)),
@@ -1243,6 +1255,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "loss_streak_reduce_at": r.get("loss_streak_reduce_at", 0),
                     "loss_streak_reduce_pct": r.get("loss_streak_reduce_pct", 20),
                     "loss_streak_pause_at": r.get("loss_streak_pause_at", 0),
+                    "capital_at_risk_inr": r.get("capital_at_risk_inr", 0),
                 },
                 "trading_hours": {
                     "enabled": bool(th.get("enabled", False)),
@@ -1284,7 +1297,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
                      ("max_slippage_pct", 0.5), ("max_daily_loss", 0),
                      ("min_live_margin", 0), ("loss_streak_reduce_at", 0),
-                     ("loss_streak_reduce_pct", 20), ("loss_streak_pause_at", 0)):
+                     ("loss_streak_reduce_pct", 20), ("loss_streak_pause_at", 0),
+                     ("capital_at_risk_inr", 0)):
             if k in (data.get("risk") or {}):
                 rk[k] = _num(data["risk"][k], d)
 
@@ -1327,7 +1341,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             xo["reversion_require_profit"] = bool(xd["reversion_require_profit"])
         for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0),
                      ("max_hold_z_progress_min", 0.0), ("trailing_stop_pct", 0.0),
-                     ("trailing_stop_floor_pct", 0.0), ("reversion_gate_inr", 0.0)):
+                     ("trailing_stop_floor_pct", 0.0), ("reversion_gate_inr", 0.0),
+                     ("profit_target_sigma_frac", 0.0), ("tp_capital_pct", 0.0),
+                     ("cost_floor_mult", 0.0), ("stop_capital_pct", 0.0), ("stop_rr", 0.0)):
             if k in xd:
                 xo[k] = _num(xd[k], d)
 

@@ -579,3 +579,41 @@ def test_live_net_pnl_includes_stt():
     # gross = 10 × 1 × 65 = 650; STT = 2 × 0.0002 × 24000 × 65 = 624; net ≈ 26
     expected = 650.0 - 2 * 0.0002 * 24000.0 * 65.0
     assert abs(algo.get_state()["net_pnl"] - expected) < 0.01
+
+
+# ── Tier B: scale-invariant exit levels ─────────────────────────────────────
+def test_sigma_fraction_target_precedence():
+    algo, _, _ = _pnl_make({"lot_multiplier": 65.0, "profit_target_inr": 999.0,
+                            "profit_target_sigma_frac": 0.5})
+    algo._pos = {"lots": 1, "entry_z": -3.0, "entry_std": 4.0}
+    stop, target = algo._effective_exit_levels(algo._params())
+    assert target == 0.5 * 3.0 * 4.0 * 1 * 65.0        # σ-frac wins over fixed 999
+    assert target == 390.0
+
+
+def test_capital_pct_stop_and_target():
+    algo, _, _ = _pnl_make({"capital_at_risk_inr": 100000.0,
+                            "tp_capital_pct": 0.5, "stop_capital_pct": 1.5})
+    algo._pos = {"lots": 1, "entry_z": -3.0, "entry_std": 0.0}   # no σ → %-capital target
+    stop, target = algo._effective_exit_levels(algo._params())
+    assert target == 500.0                              # 0.5% × 100k
+    assert stop == 1500.0                               # 1.5% × 100k
+
+
+def test_stop_tighter_of_rr_and_capital():
+    algo, _, _ = _pnl_make({"capital_at_risk_inr": 100000.0, "profit_target_inr": 3000.0,
+                            "stop_rr": 0.3, "stop_capital_pct": 1.5})
+    algo._pos = {"lots": 1, "entry_z": 0.0, "entry_std": 0.0}
+    stop, target = algo._effective_exit_levels(algo._params())
+    # RR-stop = 3000/0.3 = 10000 (wide); %-cap = 1500 (tight) → min binds
+    assert stop == 1500.0
+
+
+def test_cost_floor_raises_tiny_target():
+    algo, _, _ = _pnl_make({"lot_multiplier": 1.0, "profit_target_inr": 10.0,
+                            "cost_floor_mult": 1.0, "brokerage_per_lot": 20.0,
+                            "slippage_per_lot": 5.0, "stt_pct": 0.0})
+    algo._pos = {"lots": 1, "entry_z": 0.0, "entry_std": 0.0}
+    _, target = algo._effective_exit_levels(algo._params())
+    # round-trip cost = (20+5)×1×4 = 100; floor raises 10 → 100
+    assert target == 100.0
