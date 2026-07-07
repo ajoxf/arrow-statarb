@@ -107,6 +107,9 @@ class ArrowAutoTrader:
         # After a STOP, block same-direction re-entry until z re-enters the exit
         # band (z-reset gate) — stops chasing a runaway trend back in. None = clear.
         self._stop_block_dir: Optional[str] = None
+        # Regime guard: once a day is flagged TRENDING, latch a halt on new
+        # entries until the next IST day (auto-rearm). Stores the halted day index.
+        self._regime_halt_day: Optional[int] = None
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._exit_failures = 0                    # consecutive failed exit attempts
@@ -327,10 +330,27 @@ class ArrowAutoTrader:
                 self._stop_block_dir = None
             streak = int(p.get("loss_streak", 0) or 0)
             pause_at = int(p.get("loss_streak_pause_at", 0) or 0)
+            # Regime guard: latch a day-long halt once the spread is flagged
+            # TRENDING (auto-rearm next IST day); optional trend-direction filter.
+            reg_enabled = bool(p.get("regime_enabled", False))
+            reg_state = sig.get("regime")
+            reg_slope = float((sig.get("regime_detail") or {}).get("slope", 0.0) or 0.0)
+            today = int((self._clock() + 5.5 * 3600) // 86400)
+            if self._regime_halt_day is not None and self._regime_halt_day != today:
+                self._regime_halt_day = None                     # auto-rearm next day
+            if (reg_enabled and bool(p.get("regime_halt_on_trending", True))
+                    and reg_state == "TRENDING"):
+                self._regime_halt_day = today                    # latch for the day
+            regime_halted = reg_enabled and self._regime_halt_day == today
+            trend_blocks = (reg_enabled and bool(p.get("regime_trend_direction_filter", False))
+                            and ((reg_slope > 0 and want_dir == "LONG_SPREAD")
+                                 or (reg_slope < 0 and want_dir == "SHORT_SPREAD")))
             if mdl > 0 and day_pnl <= -mdl:
                 snap["status"] = f"daily loss limit reached (₹{day_pnl:.0f} ≤ −₹{mdl:.0f}) — entries halted"
             elif pause_at > 0 and streak >= pause_at:
                 snap["status"] = f"paused: {streak}-loss streak (≥ {pause_at}) — entries halted"
+            elif regime_halted:
+                snap["status"] = "regime TRENDING — new entries halted for the day (auto-rearm tomorrow)"
             elif now < self._cooldown_until:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
@@ -338,6 +358,9 @@ class ArrowAutoTrader:
             elif _entry_cutoff_reached(p):
                 buf = float(p.get("no_entry_buffer_min", 0) or 0)
                 snap["status"] = f"no new entries — within {buf:.0f} min of close"
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short) and trend_blocks):
+                snap["status"] = (f"trend filter: {'SHORT' if reg_slope > 0 else 'LONG'}-only "
+                                  f"(S {'rising' if reg_slope > 0 else 'falling'})")
             elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
                   and self._stop_block_dir == want_dir):
                 snap["status"] = (f"z-reset: blocking {want_dir.replace('_SPREAD','')} "

@@ -208,3 +208,40 @@ def test_persist_skipped_without_series_key(tmp_path):
         eng.push(110.0, 10.0, ts=now - 10 + i)
     eng._persist()
     assert not p.exists()
+
+
+# ── regime detection ────────────────────────────────────────────────────────
+def _reg_params(**over):
+    p = {"window_minutes": 120.0, "sample_interval_sec": 1.0, "min_signal_minutes": 0.0,
+         "entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0,
+         "regime_window_samples": 60, "regime_efficiency_ratio_max": 0.6,
+         "regime_min_zero_crossings": 4, "regime_vr_lag": 5}
+    p.update(over)
+    return p
+
+
+def test_regime_flags_trending_series():
+    eng = SignalEngine(lambda: (None, None), lambda: _reg_params())
+    now = time.time()
+    for i in range(80):                              # steady upward drift
+        eng.push(100.0 + i, 0.0, ts=now - 80 + i)
+    reg = eng.regime(ts_now=now)
+    assert reg["state"] == "TRENDING"
+    assert reg["efficiency_ratio"] > 0.9            # monotone → ER≈1
+    assert reg["slope"] > 0
+
+
+def test_regime_flags_range_series():
+    eng = SignalEngine(lambda: (None, None), lambda: _reg_params())
+    now = time.time()
+    for i in range(80):                              # oscillating around 100
+        eng.push(100.0 + (5 if i % 2 else -5), 0.0, ts=now - 80 + i)
+    reg = eng.regime(ts_now=now)
+    assert reg["state"] == "RANGE"
+    assert reg["zero_crossings"] > 4                # many anchor crossings
+
+
+def test_regime_unknown_when_thin():
+    eng = SignalEngine(lambda: (None, None), lambda: _reg_params())
+    eng.push(100.0, 0.0, ts=time.time())
+    assert eng.regime()["state"] == "UNKNOWN"

@@ -38,11 +38,12 @@ def _make(params_over=None, prices=None):
     return algo, state, calls
 
 
-def _sig(z, ready=True, half_life=0.0, std=1.0, spread=100.0):
+def _sig(z, ready=True, half_life=0.0, std=1.0, spread=100.0, regime=None, slope=0.0):
     return {"zscore": z, "std": std, "ready": ready, "leg_a": 110.0, "leg_b": 10.0,
             "spread": spread, "mean": 100.0, "samples": 300, "half_life": half_life,
             "sample_interval_sec": 0.5, "entry_zscore": 2.0, "exit_zscore": 0.0,
-            "stop_zscore": 4.0, "min_signal_minutes": 1.0, "span_minutes": 5.0}
+            "stop_zscore": 4.0, "min_signal_minutes": 1.0, "span_minutes": 5.0,
+            "regime": regime, "regime_detail": {"slope": slope, "state": regime}}
 
 
 def test_not_ready_collects():
@@ -538,3 +539,33 @@ def test_loss_streak_pauses_entries():
     state["sig"] = _sig(-2.5); algo._tick()
     assert calls["execute"] == []
     assert "paused" in algo.get_state()["status"]
+
+
+# ── Tier A: regime / trend-day guard ────────────────────────────────────────
+def test_regime_halt_blocks_entries_and_latches():
+    algo, state, calls = _make({"regime_enabled": True, "regime_halt_on_trending": True})
+    state["sig"] = _sig(-2.5, regime="TRENDING"); algo._tick()
+    assert calls["execute"] == []
+    assert "regime TRENDING" in algo.get_state()["status"]
+    assert algo._regime_halt_day is not None
+    # latched for the day: even a RANGE reading now still blocks
+    state["sig"] = _sig(-2.5, regime="RANGE"); algo._tick()
+    assert calls["execute"] == []
+
+
+def test_regime_disabled_allows_entry():
+    algo, state, calls = _make({"regime_enabled": False})
+    state["sig"] = _sig(-2.5, regime="TRENDING"); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]     # guard off → normal entry
+
+
+def test_trend_direction_filter_blocks_wrong_side():
+    algo, state, calls = _make({"regime_enabled": True, "regime_halt_on_trending": False,
+                                "regime_trend_direction_filter": True})
+    # rising spread (slope>0) → SHORT-only; a LONG signal (z<0) is blocked
+    state["sig"] = _sig(-2.5, regime="RANGE", slope=5.0); algo._tick()
+    assert calls["execute"] == []
+    assert "trend filter" in algo.get_state()["status"]
+    # a SHORT signal (z>0) into a rising spread is allowed
+    state["sig"] = _sig(2.5, regime="RANGE", slope=5.0); algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]

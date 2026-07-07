@@ -61,6 +61,10 @@ class SignalEngine:
         # a band only re-arms once z falls back inside the re-arm zone (|z|<1).
         self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
         self._active_up = self._active_dn = False   # a ≥2σ excursion is open
+        # Regime detection: a "morning anchor" frozen once per IST day after
+        # warm-up, against which trend/range is measured.
+        self._anchor: Optional[float] = None
+        self._anchor_day: Optional[int] = None
 
     @staticmethod
     def _fresh_exc() -> Dict:
@@ -371,6 +375,49 @@ class SignalEngine:
             return 0.0
         return max(0.0, float(np.log(2) / (-np.log(phi))))
 
+    def regime(self, spreads: Optional[List[float]] = None,
+               ts_now: Optional[float] = None) -> Dict:
+        """Classify the spread's regime over the trailing window with three
+        orthogonal measures, and freeze a per-IST-day 'morning anchor' after
+        warm-up:
+          • efficiency ratio (Kaufman) = |net move| ÷ path length → 1 = trending;
+          • zero-crossings of (S − anchor): few = trending, many = reverting;
+          • variance ratio VR(k): >1 trending, <1 reverting, ≈1 random walk.
+        Returns {state, efficiency_ratio, zero_crossings, variance_ratio, slope,
+        anchor}; state ∈ {TRENDING, RANGE, UNKNOWN}. Pure read of config; only
+        side effect is the once-per-day anchor freeze."""
+        p = self._params() or {}
+        if spreads is None:
+            with self._lock:
+                spreads = [s[3] for s in self._samples]
+        n_win = int(p.get("regime_window_samples", 120) or 120)
+        blank = {"state": "UNKNOWN", "efficiency_ratio": None, "zero_crossings": None,
+                 "variance_ratio": None, "slope": 0.0, "anchor": self._anchor}
+        if len(spreads) < max(20, n_win // 4):
+            return blank
+        arr = np.asarray(spreads[-n_win:], dtype=float)
+        now = time.time() if ts_now is None else ts_now
+        day = int((now + 5.5 * 3600) // 86400)               # IST day index
+        if self._anchor is None or self._anchor_day != day:
+            self._anchor = float(np.mean(arr)); self._anchor_day = day
+        anchor = self._anchor
+        path = float(np.sum(np.abs(np.diff(arr))))
+        er = abs(float(arr[-1] - arr[0])) / path if path > 1e-12 else 0.0
+        signs = np.sign(arr - anchor)
+        zc = int(np.sum(signs[1:] * signs[:-1] < 0))
+        k = max(2, int(p.get("regime_vr_lag", 5) or 5))
+        d1 = np.diff(arr)
+        vk = arr[k:] - arr[:-k]
+        v1 = float(np.var(d1, ddof=1)) if len(d1) > 1 else 0.0
+        vr = (float(np.var(vk, ddof=1)) / (k * v1)) if (v1 > 1e-12 and len(vk) > 1) else 1.0
+        er_max = float(p.get("regime_efficiency_ratio_max", 0.6) or 0.6)
+        zc_min = int(p.get("regime_min_zero_crossings", 4) or 4)
+        trending = (er >= er_max) and (zc <= zc_min)
+        return {"state": "TRENDING" if trending else "RANGE",
+                "efficiency_ratio": round(er, 3), "zero_crossings": zc,
+                "variance_ratio": round(vr, 3), "slope": float(arr[-1] - arr[0]),
+                "anchor": round(anchor, 4)}
+
     def get_signal(self) -> Dict:
         """Return the live signal snapshot — the ONE z the algo + dashboard use."""
         p = self._p()
@@ -410,6 +457,9 @@ class SignalEngine:
             # Need enough history AND a usable std before the signal is tradeable.
             ready=(span_min >= p["min_signal_minutes"] and std > 1e-12),
         )
+        reg = self.regime(spreads=spreads, ts_now=tsN)
+        out["regime"] = reg["state"]
+        out["regime_detail"] = reg
         return out
 
     def get_series(self, max_points: int = 200) -> Dict:

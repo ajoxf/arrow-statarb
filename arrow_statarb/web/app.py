@@ -489,6 +489,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # ── signal + algo wiring ─────────────────────────────────────────────────
     def _signal_params() -> Dict:
         s = cfg.section("signal")
+        rg = cfg.section("regime")
         return {
             "window_minutes": float(s.get("window_minutes", 120)),
             "sample_interval_sec": float(s.get("sample_interval_sec", 0.5)),
@@ -500,6 +501,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "persist_window": bool(s.get("persist_window", True)),
             "resume_max_gap_min": float(s.get("resume_max_gap_min", 10) or 0),
             "persist_interval_sec": float(s.get("persist_interval_sec", 30) or 30),
+            # regime detection thresholds (read by SignalEngine.regime())
+            "regime_window_samples": int(rg.get("window_samples", 120) or 120),
+            "regime_efficiency_ratio_max": float(rg.get("efficiency_ratio_max", 0.6) or 0.6),
+            "regime_min_zero_crossings": int(rg.get("min_zero_crossings", 4) or 4),
+            "regime_vr_lag": int(rg.get("vr_lag", 5) or 5),
         }
 
     def _series_key() -> str:
@@ -567,6 +573,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "loss_streak_reduce_at": int(r.get("loss_streak_reduce_at", 0) or 0),
             "loss_streak_reduce_pct": float(r.get("loss_streak_reduce_pct", 0) or 0),
             "loss_streak_pause_at": int(r.get("loss_streak_pause_at", 0) or 0),
+            # ── Tier A: regime / trend-day guard (state comes from the signal) ──
+            "regime_enabled": bool(cfg.section("regime").get("enabled", False)),
+            "regime_halt_on_trending": bool(cfg.section("regime").get("halt_on_trending", True)),
+            "regime_trend_direction_filter": bool(cfg.section("regime").get("trend_direction_filter", False)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
@@ -1177,6 +1187,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                            cfg.section("risk"), cfg.section("trading_hours"))
             ex = cfg.section("execution")
             xo = cfg.section("exits")
+            rg = cfg.section("regime")
             return jsonify({
                 "execution": {
                     "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
@@ -1196,6 +1207,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "trailing_stop_floor_pct": xo.get("trailing_stop_floor_pct", 0),
                     "reversion_require_profit": bool(xo.get("reversion_require_profit", False)),
                     "reversion_gate_inr": xo.get("reversion_gate_inr", 0),
+                },
+                "regime": {
+                    "enabled": bool(rg.get("enabled", False)),
+                    "halt_on_trending": bool(rg.get("halt_on_trending", True)),
+                    "trend_direction_filter": bool(rg.get("trend_direction_filter", False)),
+                    "efficiency_ratio_max": rg.get("efficiency_ratio_max", 0.6),
+                    "min_zero_crossings": rg.get("min_zero_crossings", 4),
+                    "window_samples": rg.get("window_samples", 120),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1304,6 +1323,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("trailing_stop_floor_pct", 0.0), ("reversion_gate_inr", 0.0)):
             if k in xd:
                 xo[k] = _num(xd[k], d)
+
+        rg = raw.setdefault("regime", {})
+        rgd = data.get("regime") or {}
+        for k in ("enabled", "halt_on_trending", "trend_direction_filter"):
+            if k in rgd:
+                rg[k] = bool(rgd[k])
+        for k, d in (("efficiency_ratio_max", 0.6), ("min_zero_crossings", 4),
+                     ("window_samples", 120)):
+            if k in rgd:
+                rg[k] = _num(rgd[k], d)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:

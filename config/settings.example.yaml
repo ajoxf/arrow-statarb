@@ -106,6 +106,20 @@ risk:
   loss_streak_pause_at: 0     # after N consecutive losing closes, HALT new
                               # entries entirely (manual resume). 0 = off.
 
+# Regime / trend-day guard (Tier A). Classifies the spread TRENDING vs RANGE over
+# a trailing window (Kaufman efficiency ratio + zero-crossings of a per-IST-day
+# 'morning anchor' + variance ratio). On TRENDING it halts NEW entries for the day
+# and auto-rearms next morning — the one macro failure a calendar spread has no
+# other defense against. All off by default.
+regime:
+  enabled: false
+  halt_on_trending: true          # latch a day-long entry halt when TRENDING
+  trend_direction_filter: false   # rising spread → SHORT-only, falling → LONG-only
+  window_samples: 120             # trailing window (samples) for the metrics
+  efficiency_ratio_max: 0.6       # ER ≥ this AND few crossings ⇒ TRENDING
+  min_zero_crossings: 4           # ≤ this many anchor crossings supports TRENDING
+  vr_lag: 5                       # variance-ratio lag (diagnostic)
+
 # Fast-exit overrides (Phase 1). Dollar-P&L exits evaluated EVERY tick in strict
 # priority ABOVE the z-score exit:  1) dollar stop  2) profit target  3) z-stop
 # 4) z-score target  5) time-stop. P&L is the live mark-to-market of the open
