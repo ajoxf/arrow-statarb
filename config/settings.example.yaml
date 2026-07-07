@@ -85,6 +85,10 @@ filters:
                               # model applies ×2 legs and ×2 (entry+exit), so a
                               # 1-lot spread round trip ≈ ₹80.
   slippage_per_lot: 5         # INR per lot per leg, one way
+  stt_pct: 0.02               # Securities Transaction Tax, % of notional on the
+                              # SELL side. A calendar round trip has 2 sells (one
+                              # leg at entry, the other at exit) → charged into net
+                              # P&L and break-even. 0 = off. (NSE futures ≈ 0.02%.)
   time_stop_half_lives: 3.0   # exit if held longer than this × half-life
   half_life_min_sec: 0        # allowed-range lower bound (0 = none)
   half_life_max_sec: 0        # allowed-range upper bound (0 = none)
@@ -132,10 +136,12 @@ exits:
                               # the live figure does not pre-deduct EXIT slippage,
                               # so leave a margin above round-trip cost. 0 = off.
   # ── Tier A: gated reversion exit — never book a losing "profit-take" ──
-  reversion_require_profit: false  # the z-reversion exit may fire only when
-                                   # net P&L ≥ reversion_gate_inr (fail-open if P&L
-                                   # can't be priced). off = current behaviour.
-  reversion_gate_inr: 0            # ₹ floor for the reversion exit (0 = break-even)
+  reversion_require_profit: true   # exits only AFTER break-even — the z-reversion
+                                   # exit may fire only when net P&L ≥
+                                   # reversion_gate_inr (BE includes STT; fail-open
+                                   # if P&L can't be priced). Recommended ON.
+  reversion_gate_inr: 0            # ₹ floor above BE for the reversion exit (0 = BE;
+                                   # set >0 for "BE + profit")
   # ── Phase 2: max-hold upgrade + trailing stop ──
   max_hold_silent_when_losing: false  # when true, the time/max-hold exit only fires
                               # if net P&L > 0 (a losing trade is left to the stop).

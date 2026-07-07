@@ -346,6 +346,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              lot_size=m["lot_size"],
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
+                             stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
                              name=m["name"])
         return res
 
@@ -371,6 +372,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              lot_size=m["lot_size"],
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
+                             stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
                              name=m["name"], exit_reason=reason)
         return res
 
@@ -565,8 +567,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "trailing_stop_pct": float(xo.get("trailing_stop_pct", 0) or 0),
             "trailing_stop_floor_pct": float(xo.get("trailing_stop_floor_pct", 0) or 0),
             # ── Tier A: gated reversion + z-reset + stop-cooldown + loss-streak ──
-            "reversion_require_profit": bool(xo.get("reversion_require_profit", False)),
+            # reversion gate ON by default — never book below break-even (BE
+            # includes STT below); set reversion_gate_inr for a BE+profit floor.
+            "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
             "reversion_gate_inr": float(xo.get("reversion_gate_inr", 0) or 0),
+            "stt_pct": float(f.get("stt_pct", 0.02) or 0),   # STT %-of-notional, sell-side
             "stop_cooldown": float(cfg.get("execution.stop_cooldown_sec", 0) or 0),
             "z_reset_after_stop": bool(cfg.section("execution").get("z_reset_after_stop", False)),
             "loss_streak": int(trade_log.loss_streak()),
@@ -1205,7 +1210,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "max_hold_z_progress_min": xo.get("max_hold_z_progress_min", 0),
                     "trailing_stop_pct": xo.get("trailing_stop_pct", 0),
                     "trailing_stop_floor_pct": xo.get("trailing_stop_floor_pct", 0),
-                    "reversion_require_profit": bool(xo.get("reversion_require_profit", False)),
+                    "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
                     "reversion_gate_inr": xo.get("reversion_gate_inr", 0),
                 },
                 "regime": {
@@ -1249,6 +1254,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "commission_basis": f.get("commission_basis", "per_lot"),
                     "brokerage_per_lot": f.get("brokerage_per_lot", 20),
                     "slippage_per_lot": f.get("slippage_per_lot", 5),
+                    "stt_pct": f.get("stt_pct", 0.02),
                     "min_win_probability": f.get("min_win_probability", 0.60),
                     "min_expected_value": f.get("min_expected_value", 0),
                     "time_stop_half_lives": f.get("time_stop_half_lives", 3.0),
@@ -1297,6 +1303,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if "commission_basis" in fd:
             fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
         for k, d in (("brokerage_per_lot", 20.0), ("slippage_per_lot", 5.0),
+                     ("stt_pct", 0.02),
                      ("min_win_probability", 0.60), ("min_expected_value", 0.0),
                      ("time_stop_half_lives", 3.0)):
             if k in fd:

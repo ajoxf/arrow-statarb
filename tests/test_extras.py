@@ -322,3 +322,15 @@ def test_trade_log_round_trips_detail(tmp_path):
     assert trip["held_sec"] is not None and trip["held_sec"] >= 0
     assert trip["cum_pnl"] == trip["net_pnl"]
     assert j["total_pnl"] == 500.0
+
+
+def test_trade_log_stt_charged(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=0.0, dry_run=False,
+              status="LIVE", lot_size=65, leg_a_price=24000.0, leg_b_price=24080.0)
+    rec = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=10.0,
+                    dry_run=False, status="LIVE", lot_size=65,
+                    leg_a_price=24010.0, leg_b_price=24070.0, stt_pct=0.02)
+    assert rec["spread_pnl"] == 650.0                            # +10 × 65
+    assert rec["stt"] == round(0.0002 * 65 * (24000.0 + 24010.0), 2)   # ≈ 624
+    assert rec["net_pnl"] == round(650.0 - rec["stt"], 2)

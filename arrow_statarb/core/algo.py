@@ -257,6 +257,14 @@ class ArrowAutoTrader:
                   else (entry - cur_spread))
         gross = change * lots * lot_mult
         rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        # STT (Securities Transaction Tax): sell-side % of notional. A calendar
+        # round trip has TWO sells (one leg at entry, the other at exit), each on
+        # ~one leg's notional (price × lots × lot_size). Configurable, 0 = off.
+        stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
+        if stt_pct > 0:
+            ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
+            if ref:
+                rt_fees += 2.0 * stt_pct * float(ref) * lots * lot_mult
         return gross - rt_fees
 
     def _reversion_allowed(self, net_pnl: Optional[float], p: Dict) -> bool:

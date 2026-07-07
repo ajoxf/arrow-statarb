@@ -569,3 +569,13 @@ def test_trend_direction_filter_blocks_wrong_side():
     # a SHORT signal (z>0) into a rising spread is allowed
     state["sig"] = _sig(2.5, regime="RANGE", slope=5.0); algo._tick()
     assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+def test_live_net_pnl_includes_stt():
+    algo, state, calls = _pnl_make({"stt_pct": 0.02, "lot_multiplier": 65.0})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG
+    algo._pos["entry_leg_a"] = 24000.0                          # notional basis
+    state["sig"] = _sig(-1.0, spread=10.0); algo._tick()        # +10 spread
+    # gross = 10 × 1 × 65 = 650; STT = 2 × 0.0002 × 24000 × 65 = 624; net ≈ 26
+    expected = 650.0 - 2 * 0.0002 * 24000.0 * 65.0
+    assert abs(algo.get_state()["net_pnl"] - expected) < 0.01

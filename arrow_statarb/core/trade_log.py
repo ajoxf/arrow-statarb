@@ -54,7 +54,8 @@ class TradeLog:
                zscore: Optional[float] = None, leg_a_price: Optional[float] = None,
                leg_b_price: Optional[float] = None, name: str = "",
                exit_reason: str = "",
-               decision_spread: Optional[float] = None) -> Dict:
+               decision_spread: Optional[float] = None,
+               stt_pct: float = 0.0) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
         matching OPEN to fill in spread/net P&L plus full round-trip detail
         (entry/exit z, per-leg prices, spreads, time-in-trade).
@@ -86,6 +87,7 @@ class TradeLog:
             "edge_pnl": 0.0,         # P&L the signal alone implied (decision spreads)
             "slippage_pnl": 0.0,     # realized − edge: cost paid to execution (≤0 = adverse)
             "brokerage": brokerage,
+            "stt": 0.0,              # Securities Transaction Tax (settled on CLOSE)
             "net_pnl": 0.0,
             "status": status,          # DRY-RUN | LIVE-SIM | LIVE | rejected
             "dry_run": dry_run,
@@ -107,7 +109,18 @@ class TradeLog:
                             raw = (spread - entry) if direction == "LONG_SPREAD" else (entry - spread)
                             rec["entry_spread"] = entry
                             rec["spread_pnl"] = round(raw * lots * mult, 2)
-                            rec["net_pnl"] = round(rec["spread_pnl"] - brokerage - prev.get("brokerage", 0), 2)
+                            # STT: sell-side % of notional × the two sells (one leg
+                            # at entry, the other at exit); leg prices ≈ equal, so a
+                            # representative leg price each side is a good estimate.
+                            stt = 0.0
+                            if stt_pct and stt_pct > 0:
+                                p_in = prev.get("leg_a_price") or prev.get("leg_b_price") or 0
+                                p_out = leg_a_price or leg_b_price or 0
+                                stt = round((stt_pct / 100.0) * lots * mult
+                                            * (abs(float(p_in)) + abs(float(p_out))), 2)
+                            rec["stt"] = stt
+                            rec["net_pnl"] = round(rec["spread_pnl"] - brokerage
+                                                   - prev.get("brokerage", 0) - stt, 2)
                             # Decompose realized P&L into signal "edge" (what the
                             # decision spreads implied) and "slippage" (execution
                             # cost = realized − edge). Only when both decision
