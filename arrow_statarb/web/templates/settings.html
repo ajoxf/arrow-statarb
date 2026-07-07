@@ -105,6 +105,25 @@
                         <input type="number" class="form-control" id="x-maxfail">
                         <div class="form-text">Halt auto-exit retries & alert after this many consecutive failed exits. 0 = retry indefinitely.</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Capital at Risk (₹)</label>
+                        <input type="number" class="form-control" id="r-car">
+                        <div class="form-text">SPAN margin per trade — basis for %-of-capital stop/target. 0 = off.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Loss-streak reduce at</label>
+                        <input type="number" class="form-control" id="r-lsreduce">
+                        <div class="form-text">Cut size after N losses. 0 = off.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Reduce %</label>
+                        <input type="number" class="form-control" id="r-lspct">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Pause at</label>
+                        <input type="number" class="form-control" id="r-lspause">
+                        <div class="form-text">Halt after N losses. 0 = off.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -171,6 +190,11 @@
                         <div class="form-text">Expected market impact per lot</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">STT (% of notional)</label>
+                        <input type="number" step="0.001" class="form-control" id="b-stt">
+                        <div class="form-text">Securities Transaction Tax, sell-side. NSE futures ≈ 0.02.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Min Win Probability (%)</label>
                         <input type="number" class="form-control" id="b-winprob">
                         <div class="form-text">OU reversion probability threshold</div>
@@ -227,6 +251,18 @@
                         <input type="number" step="1" class="form-control" id="e-timeout">
                         <div class="form-text">Wait this long before escalating to MARKET</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Stop Cooldown (sec)</label>
+                        <input type="number" step="1" class="form-control" id="e-stopcd">
+                        <div class="form-text">Extra cooldown after a STOP (vs any close). 0 = same.</div>
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-zreset" role="switch">
+                            <label class="form-check-label" for="e-zreset">z-reset after stop</label>
+                            <div class="form-text">Block same-dir re-entry until z re-enters the band.</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -275,6 +311,92 @@
                             <div class="form-text">Time-stop only fires in profit (needs a Stop Price set as the loss backstop).</div>
                         </div>
                     </div>
+                    <div class="col-12"><hr class="my-1"><small class="text-secondary">Exits only after break-even + scale-invariant levels</small></div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="x-revprofit" role="switch">
+                            <label class="form-check-label" for="x-revprofit">Reversion exit only after BE</label>
+                            <div class="form-text">Never book a losing "profit-take" (BE includes STT).</div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Reversion Profit Floor (₹)</label>
+                        <input type="number" step="1" class="form-control" id="x-revgate">
+                        <div class="form-text">₹ above BE required for the reversion exit (0 = BE).</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Target σ-fraction</label>
+                        <input type="number" step="0.05" class="form-control" id="x-sfrac">
+                        <div class="form-text">frac × |z| × σ × qty. 0 = off.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Target % of capital</label>
+                        <input type="number" step="0.1" class="form-control" id="x-tpcap">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Cost floor (× cost)</label>
+                        <input type="number" step="0.1" class="form-control" id="x-costfloor">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Stop % of capital</label>
+                        <input type="number" step="0.1" class="form-control" id="x-stopcap">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Stop RR (target ÷ RR)</label>
+                        <input type="number" step="0.05" class="form-control" id="x-stoprr">
+                        <div class="form-text">Tighter of RR-stop and %-capital binds.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Regime / Trend-Day Guard ──────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-activity me-2"></i>Regime / Trend-Day Guard</div>
+            <div class="card-body">
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="rg-enabled" role="switch">
+                    <label class="form-check-label fw-bold" for="rg-enabled">Enable regime guard</label>
+                </div>
+                <div class="form-text mb-2">Halts new entries on a TRENDING day (auto-rearm next morning) — the calendar spread's one macro failure mode.</div>
+                <div class="row g-2">
+                    <div class="col-md-6 d-flex align-items-end"><div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="rg-halt" role="switch">
+                        <label class="form-check-label" for="rg-halt">Halt on TRENDING</label></div></div>
+                    <div class="col-md-6 d-flex align-items-end"><div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="rg-dirfilter" role="switch">
+                        <label class="form-check-label" for="rg-dirfilter">Trend-direction filter</label></div></div>
+                    <div class="col-md-6"><label class="form-label">Efficiency Ratio max</label>
+                        <input type="number" step="0.05" class="form-control" id="rg-er"></div>
+                    <div class="col-md-6"><label class="form-label">Min Zero-Crossings</label>
+                        <input type="number" step="1" class="form-control" id="rg-zc"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Self-Healing Reconciliation ───────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Self-Healing Reconciliation</div>
+            <div class="card-body">
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="rc-enabled" role="switch">
+                    <label class="form-check-label fw-bold" for="rc-enabled">Enable reconcile loop</label>
+                </div>
+                <div class="form-text mb-2">Compares engine vs exchange; force-clears ghost engine state (safe). Costs go to the untracked ledger.</div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="rc-autoclose" role="switch">
+                    <label class="form-check-label" for="rc-autoclose">Auto-close exchange orphans</label>
+                    <div class="form-text text-warning">Places REAL market orders to flatten orphaned legs. Leave off until trusted.</div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-md-6"><label class="form-label">Mismatch threshold</label>
+                        <input type="number" step="1" class="form-control" id="rc-thresh"></div>
+                    <div class="col-md-6"><label class="form-label">Interval (sec)</label>
+                        <input type="number" step="1" class="form-control" id="rc-interval"></div>
                 </div>
             </div>
         </div>
@@ -328,6 +450,10 @@
         _set('r-slip', s.risk.max_slippage_pct);
         _set('r-mdl', s.risk.max_daily_loss);
         _set('r-minmargin', s.risk.min_live_margin);
+        _set('r-car', s.risk.capital_at_risk_inr);
+        _set('r-lsreduce', s.risk.loss_streak_reduce_at);
+        _set('r-lspct', s.risk.loss_streak_reduce_pct);
+        _set('r-lspause', s.risk.loss_streak_pause_at);
         _set('x-maxfail', (s.execution || {}).max_exit_failures);
 
         _setChk('th-enabled', s.trading_hours.enabled);
@@ -342,6 +468,7 @@
         _set('b-winprob', Math.round(s.filters.min_win_probability * 100));
         _set('b-ev', s.filters.min_expected_value);
         _set('b-tstop', s.filters.time_stop_half_lives);
+        _set('b-stt', s.filters.stt_pct);
         _setChk('b-enabled', s.filters.enable_probability_filter);
 
         if (s.execution) {
@@ -349,6 +476,8 @@
             _set('e-step', s.execution.amend_step_pct);
             _set('e-interval', s.execution.amend_interval_sec);
             _set('e-timeout', s.execution.fill_timeout_sec);
+            _set('e-stopcd', s.execution.stop_cooldown_sec);
+            _setChk('e-zreset', s.execution.z_reset_after_stop);
         }
         if (s.exits) {
             _set('x-dstop', s.exits.dollar_stop_inr);
@@ -357,6 +486,26 @@
             _set('x-trailfloor', s.exits.trailing_stop_floor_pct);
             _set('x-mhzprog', s.exits.max_hold_z_progress_min);
             _setChk('x-mhsilent', s.exits.max_hold_silent_when_losing);
+            _setChk('x-revprofit', s.exits.reversion_require_profit);
+            _set('x-revgate', s.exits.reversion_gate_inr);
+            _set('x-sfrac', s.exits.profit_target_sigma_frac);
+            _set('x-tpcap', s.exits.tp_capital_pct);
+            _set('x-costfloor', s.exits.cost_floor_mult);
+            _set('x-stopcap', s.exits.stop_capital_pct);
+            _set('x-stoprr', s.exits.stop_rr);
+        }
+        if (s.regime) {
+            _setChk('rg-enabled', s.regime.enabled);
+            _setChk('rg-halt', s.regime.halt_on_trending);
+            _setChk('rg-dirfilter', s.regime.trend_direction_filter);
+            _set('rg-er', s.regime.efficiency_ratio_max);
+            _set('rg-zc', s.regime.min_zero_crossings);
+        }
+        if (s.reconcile) {
+            _setChk('rc-enabled', s.reconcile.enabled);
+            _setChk('rc-autoclose', s.reconcile.auto_close);
+            _set('rc-thresh', s.reconcile.mismatch_threshold);
+            _set('rc-interval', s.reconcile.interval_sec);
         }
     }
 
@@ -387,6 +536,10 @@
                 max_slippage_pct: +document.getElementById('r-slip').value,
                 max_daily_loss: +document.getElementById('r-mdl').value,
                 min_live_margin: +document.getElementById('r-minmargin').value,
+                capital_at_risk_inr: +document.getElementById('r-car').value,
+                loss_streak_reduce_at: +document.getElementById('r-lsreduce').value,
+                loss_streak_reduce_pct: +document.getElementById('r-lspct').value,
+                loss_streak_pause_at: +document.getElementById('r-lspause').value,
             },
             trading_hours: {
                 enabled: document.getElementById('th-enabled').checked,
@@ -401,6 +554,7 @@
                 min_win_probability: (+document.getElementById('b-winprob').value) / 100,
                 min_expected_value: +document.getElementById('b-ev').value,
                 time_stop_half_lives: +document.getElementById('b-tstop').value,
+                stt_pct: +document.getElementById('b-stt').value,
             },
             execution: {
                 limit_offset_pct: +document.getElementById('e-offset').value,
@@ -408,6 +562,8 @@
                 amend_interval_sec: +document.getElementById('e-interval').value,
                 fill_timeout_sec: +document.getElementById('e-timeout').value,
                 max_exit_failures: +document.getElementById('x-maxfail').value,
+                stop_cooldown_sec: +document.getElementById('e-stopcd').value,
+                z_reset_after_stop: document.getElementById('e-zreset').checked,
             },
             exits: {
                 dollar_stop_inr: +document.getElementById('x-dstop').value,
@@ -416,6 +572,26 @@
                 trailing_stop_floor_pct: +document.getElementById('x-trailfloor').value,
                 max_hold_z_progress_min: +document.getElementById('x-mhzprog').value,
                 max_hold_silent_when_losing: document.getElementById('x-mhsilent').checked,
+                reversion_require_profit: document.getElementById('x-revprofit').checked,
+                reversion_gate_inr: +document.getElementById('x-revgate').value,
+                profit_target_sigma_frac: +document.getElementById('x-sfrac').value,
+                tp_capital_pct: +document.getElementById('x-tpcap').value,
+                cost_floor_mult: +document.getElementById('x-costfloor').value,
+                stop_capital_pct: +document.getElementById('x-stopcap').value,
+                stop_rr: +document.getElementById('x-stoprr').value,
+            },
+            regime: {
+                enabled: document.getElementById('rg-enabled').checked,
+                halt_on_trending: document.getElementById('rg-halt').checked,
+                trend_direction_filter: document.getElementById('rg-dirfilter').checked,
+                efficiency_ratio_max: +document.getElementById('rg-er').value,
+                min_zero_crossings: +document.getElementById('rg-zc').value,
+            },
+            reconcile: {
+                enabled: document.getElementById('rc-enabled').checked,
+                auto_close: document.getElementById('rc-autoclose').checked,
+                mismatch_threshold: +document.getElementById('rc-thresh').value,
+                interval_sec: +document.getElementById('rc-interval').value,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

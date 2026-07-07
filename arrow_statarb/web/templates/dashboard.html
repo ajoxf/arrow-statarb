@@ -365,7 +365,7 @@
         <div class="card mt-3">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-folder me-2"></i>Signal &amp; Position</span>
-                <span id="sp-badge" class="badge bg-secondary">FLAT</span>
+                <span><span id="sp-regime" class="badge bg-secondary me-1" title="spread regime">—</span><span id="sp-badge" class="badge bg-secondary">FLAT</span></span>
             </div>
             <div class="card-body">
                 <div class="row text-center g-2 mb-1">
@@ -896,6 +896,13 @@
 
     // Populate the Signal & Position card from the live algo snapshot.
     function renderSigPos(s) {
+        const rb = document.getElementById('sp-regime');
+        if (rb) {
+            const rs = s.regime || '—';
+            rb.textContent = rs;
+            rb.className = 'badge me-1 ' + (rs === 'TRENDING' ? 'bg-danger'
+                : (rs === 'RANGE' ? 'bg-success' : 'bg-secondary'));
+        }
         const z = s.zscore;
         const zEl = document.getElementById('sp-z');
         zEl.textContent = _fmt(z, 4);

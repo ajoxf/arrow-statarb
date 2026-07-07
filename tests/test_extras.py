@@ -334,3 +334,18 @@ def test_trade_log_stt_charged(tmp_path):
     assert rec["spread_pnl"] == 650.0                            # +10 × 65
     assert rec["stt"] == round(0.0002 * 65 * (24000.0 + 24010.0), 2)   # ≈ 624
     assert rec["net_pnl"] == round(650.0 - rec["stt"], 2)
+
+
+def test_trade_log_cost_audit(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=20)
+    assert tl.cost_audit()["n"] == 0
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=0.0, dry_run=False,
+              status="LIVE", lot_size=65, leg_a_price=24000.0, leg_b_price=24080.0,
+              decision_spread=0.0)
+    tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=10.0, dry_run=False,
+              status="LIVE", lot_size=65, leg_a_price=24010.0, leg_b_price=24070.0,
+              decision_spread=8.0, stt_pct=0.02)
+    audit = tl.cost_audit()
+    assert audit["n"] == 1
+    assert audit["avg_stt"] > 0                         # STT captured
+    assert audit["avg_realized_cost"] >= audit["avg_stt"]

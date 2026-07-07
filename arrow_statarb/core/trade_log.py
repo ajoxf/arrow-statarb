@@ -204,6 +204,27 @@ class TradeLog:
                     break
         return n
 
+    def cost_audit(self, n: int = 20) -> Dict:
+        """Average REALIZED round-trip cost over the last ``n`` closed trades
+        (round-trip brokerage + STT + |execution slippage|). Lets the caller
+        compare it to the MODELED cost and alarm on miscalibration — an inflated
+        model makes every trade look unprofitable and jams the edge filter."""
+        with self._lock:
+            closes = [r for r in self._trades
+                      if r.get("action") == "CLOSE" and r.get("entry_spread") is not None][-n:]
+        if not closes:
+            return {"n": 0, "avg_realized_cost": 0.0, "avg_brokerage": 0.0,
+                    "avg_stt": 0.0, "avg_slippage": 0.0}
+        brk = stt = slip = 0.0
+        for r in closes:
+            brk += float(r.get("brokerage", 0) or 0) * 2.0          # entry + exit
+            stt += float(r.get("stt", 0) or 0)
+            slip += abs(float(r.get("slippage_pnl", 0) or 0))
+        k = len(closes)
+        return {"n": k, "avg_brokerage": round(brk / k, 2), "avg_stt": round(stt / k, 2),
+                "avg_slippage": round(slip / k, 2),
+                "avg_realized_cost": round((brk + stt + slip) / k, 2)}
+
     def round_trips(self) -> Dict:
         """Completed trades (each settled CLOSE carries full entry+exit detail)
         with a running cumulative P&L, plus the currently-open trade if any.

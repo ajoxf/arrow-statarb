@@ -732,6 +732,23 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     _start_reconcile_loop()
 
+    @app.route("/api/cost-audit", methods=["GET"])
+    def api_cost_audit():
+        """Realized round-trip cost vs the MODELED cost, with a miscalibration
+        alarm (either side ≥ 2× the other) — the model must track real fills or
+        the edge filter blocks good trades / lets through bad ones."""
+        realized = trade_log.cost_audit()
+        lots = int(_algo_lots["lots"]); lot_m = _lot_multiplier()
+        brk = float(cfg.get("filters.brokerage_per_lot", 20) or 0) * lots * 4
+        slp = float(cfg.get("filters.slippage_per_lot", 5) or 0) * lots * 4
+        stt_pct = float(cfg.get("filters.stt_pct", 0) or 0) / 100.0
+        la, _ = _leg_prices()
+        stt = (2 * stt_pct * float(la) * lots * lot_m) if la else 0.0
+        modeled = round(brk + slp + stt, 2)
+        rc = realized.get("avg_realized_cost", 0.0)
+        alarm = bool(rc > 0 and (modeled >= 2 * rc or rc >= 2 * modeled))
+        return jsonify({"modeled_cost": modeled, "realized": realized, "alarm": alarm})
+
     @app.route("/api/untracked", methods=["GET"])
     def api_untracked():
         return jsonify({"events": untracked_ledger.all(), "total": untracked_ledger.total(),
@@ -1268,6 +1285,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             ex = cfg.section("execution")
             xo = cfg.section("exits")
             rg = cfg.section("regime")
+            rc = cfg.section("reconcile")
             return jsonify({
                 "execution": {
                     "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
@@ -1300,6 +1318,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "efficiency_ratio_max": rg.get("efficiency_ratio_max", 0.6),
                     "min_zero_crossings": rg.get("min_zero_crossings", 4),
                     "window_samples": rg.get("window_samples", 120),
+                },
+                "reconcile": {
+                    "enabled": bool(rc.get("enabled", False)),
+                    "auto_close": bool(rc.get("auto_close", False)),
+                    "mismatch_threshold": rc.get("mismatch_threshold", 3),
+                    "interval_sec": rc.get("interval_sec", 20),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1424,6 +1448,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("window_samples", 120)):
             if k in rgd:
                 rg[k] = _num(rgd[k], d)
+
+        rc = raw.setdefault("reconcile", {})
+        rcd = data.get("reconcile") or {}
+        for k in ("enabled", "auto_close"):
+            if k in rcd:
+                rc[k] = bool(rcd[k])
+        for k, d in (("mismatch_threshold", 3), ("interval_sec", 20)):
+            if k in rcd:
+                rc[k] = _num(rcd[k], d)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:

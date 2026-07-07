@@ -353,7 +353,8 @@ class ArrowAutoTrader:
                       "leg_a": sig.get("leg_a"), "leg_b": sig.get("leg_b"),
                       "spread": sig.get("spread"), "mean": sig.get("mean"),
                       "std": sig.get("std"), "zscore": sig.get("zscore"),
-                      "samples": sig.get("samples"), "half_life": sig.get("half_life")}
+                      "samples": sig.get("samples"), "half_life": sig.get("half_life"),
+                      "regime": sig.get("regime")}
 
         z = sig.get("zscore")
         std = sig.get("std")
