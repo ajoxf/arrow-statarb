@@ -558,6 +558,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "max_hold_z_progress_min": float(xo.get("max_hold_z_progress_min", 0) or 0),
             "trailing_stop_pct": float(xo.get("trailing_stop_pct", 0) or 0),
             "trailing_stop_floor_pct": float(xo.get("trailing_stop_floor_pct", 0) or 0),
+            # ── Tier A: gated reversion + z-reset + stop-cooldown + loss-streak ──
+            "reversion_require_profit": bool(xo.get("reversion_require_profit", False)),
+            "reversion_gate_inr": float(xo.get("reversion_gate_inr", 0) or 0),
+            "stop_cooldown": float(cfg.get("execution.stop_cooldown_sec", 0) or 0),
+            "z_reset_after_stop": bool(cfg.section("execution").get("z_reset_after_stop", False)),
+            "loss_streak": int(trade_log.loss_streak()),
+            "loss_streak_reduce_at": int(r.get("loss_streak_reduce_at", 0) or 0),
+            "loss_streak_reduce_pct": float(r.get("loss_streak_reduce_pct", 0) or 0),
+            "loss_streak_pause_at": int(r.get("loss_streak_pause_at", 0) or 0),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "max_exit_failures": int(cfg.get("execution.max_exit_failures", 0) or 0),
             "exit_retry_backoff": float(cfg.get("execution.exit_retry_backoff_sec", 0) or 0),
@@ -1175,6 +1184,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "amend_interval_sec": ex.get("amend_interval_sec", 1.5),
                     "fill_timeout_sec": ex.get("fill_timeout_sec", 5),
                     "max_exit_failures": ex.get("max_exit_failures", 0),
+                    "stop_cooldown_sec": ex.get("stop_cooldown_sec", 0),
+                    "z_reset_after_stop": bool(ex.get("z_reset_after_stop", False)),
                 },
                 "exits": {
                     "dollar_stop_inr": xo.get("dollar_stop_inr", 0),
@@ -1183,6 +1194,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "max_hold_z_progress_min": xo.get("max_hold_z_progress_min", 0),
                     "trailing_stop_pct": xo.get("trailing_stop_pct", 0),
                     "trailing_stop_floor_pct": xo.get("trailing_stop_floor_pct", 0),
+                    "reversion_require_profit": bool(xo.get("reversion_require_profit", False)),
+                    "reversion_gate_inr": xo.get("reversion_gate_inr", 0),
                 },
                 "signal": {
                     "window_minutes": s.get("window_minutes", 120),
@@ -1203,6 +1216,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "max_slippage_pct": r.get("max_slippage_pct", 0.5),
                     "max_daily_loss": r.get("max_daily_loss", 0),
                     "min_live_margin": r.get("min_live_margin", 0),
+                    "loss_streak_reduce_at": r.get("loss_streak_reduce_at", 0),
+                    "loss_streak_reduce_pct": r.get("loss_streak_reduce_pct", 20),
+                    "loss_streak_pause_at": r.get("loss_streak_pause_at", 0),
                 },
                 "trading_hours": {
                     "enabled": bool(th.get("enabled", False)),
@@ -1242,7 +1258,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
                      ("max_slippage_pct", 0.5), ("max_daily_loss", 0),
-                     ("min_live_margin", 0)):
+                     ("min_live_margin", 0), ("loss_streak_reduce_at", 0),
+                     ("loss_streak_reduce_pct", 20), ("loss_streak_pause_at", 0)):
             if k in (data.get("risk") or {}):
                 rk[k] = _num(data["risk"][k], d)
 
@@ -1268,9 +1285,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         ex = raw.setdefault("execution", {})
         ed = data.get("execution") or {}
+        if "z_reset_after_stop" in ed:
+            ex["z_reset_after_stop"] = bool(ed["z_reset_after_stop"])
         for k, d in (("limit_offset_pct", 0.05), ("amend_step_pct", 0.05),
                      ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0),
-                     ("max_exit_failures", 0)):
+                     ("max_exit_failures", 0), ("stop_cooldown_sec", 0.0)):
             if k in ed:
                 ex[k] = _num(ed[k], d)
 
@@ -1278,9 +1297,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         xd = data.get("exits") or {}
         if "max_hold_silent_when_losing" in xd:
             xo["max_hold_silent_when_losing"] = bool(xd["max_hold_silent_when_losing"])
+        if "reversion_require_profit" in xd:
+            xo["reversion_require_profit"] = bool(xd["reversion_require_profit"])
         for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0),
                      ("max_hold_z_progress_min", 0.0), ("trailing_stop_pct", 0.0),
-                     ("trailing_stop_floor_pct", 0.0)):
+                     ("trailing_stop_floor_pct", 0.0), ("reversion_gate_inr", 0.0)):
             if k in xd:
                 xo[k] = _num(xd[k], d)
 

@@ -99,6 +99,12 @@ risk:
   min_live_margin: 50000      # INR; the Pre-Live "Account funded" check warns
                               # until usable margin ≥ this (your broker's SPAN+
                               # exposure for 1 lot of the spread). 0 = just > 0.
+  # ── Tier A: loss-streak circuit breaker (consecutive losing closes) ──
+  loss_streak_reduce_at: 0    # after N consecutive losing closes, cut size by
+                              # loss_streak_reduce_pct. 0 = off.
+  loss_streak_reduce_pct: 20  # % size reduction once the reduce threshold hits.
+  loss_streak_pause_at: 0     # after N consecutive losing closes, HALT new
+                              # entries entirely (manual resume). 0 = off.
 
 # Fast-exit overrides (Phase 1). Dollar-P&L exits evaluated EVERY tick in strict
 # priority ABOVE the z-score exit:  1) dollar stop  2) profit target  3) z-stop
@@ -111,6 +117,11 @@ exits:
   profit_target_inr: 0        # INR; bank profit — exit when net P&L ≥ this. Note
                               # the live figure does not pre-deduct EXIT slippage,
                               # so leave a margin above round-trip cost. 0 = off.
+  # ── Tier A: gated reversion exit — never book a losing "profit-take" ──
+  reversion_require_profit: false  # the z-reversion exit may fire only when
+                                   # net P&L ≥ reversion_gate_inr (fail-open if P&L
+                                   # can't be priced). off = current behaviour.
+  reversion_gate_inr: 0            # ₹ floor for the reversion exit (0 = break-even)
   # ── Phase 2: max-hold upgrade + trailing stop ──
   max_hold_silent_when_losing: false  # when true, the time/max-hold exit only fires
                               # if net P&L > 0 (a losing trade is left to the stop).
@@ -145,6 +156,10 @@ execution:
   order_type: limit
   default_lots: 1
   cooldown_sec: 300
+  stop_cooldown_sec: 300      # Tier A: extra cooldown after a STOP exit (vs
+                              # cooldown_sec after any close). 0 = same as cooldown.
+  z_reset_after_stop: false   # Tier A: after a stop, block same-direction re-entry
+                              # until z re-enters the exit band (stops chasing a trend)
   use_limit_orders: true      # place legs as LIMIT (priced off LTP), not MARKET
   # ── fill-chasing aggressiveness (this is where slippage comes from) ──────────
   # The limit is placed THROUGH the market by limit_offset_pct so it fills fast;

@@ -176,6 +176,21 @@ class TradeLog:
                              for r in self._trades
                              if float(r.get("ts", 0) or 0) >= start), 2)
 
+    def loss_streak(self) -> int:
+        """Count of consecutive most-recent CLOSED trades with net P&L < 0
+        (resets on any non-losing close). Powers the loss-streak circuit
+        breaker (size reduction / auto-pause)."""
+        n = 0
+        with self._lock:
+            for r in reversed(self._trades):
+                if r.get("action") != "CLOSE":
+                    continue
+                if float(r.get("net_pnl", 0) or 0) < 0:
+                    n += 1
+                else:
+                    break
+        return n
+
     def round_trips(self) -> Dict:
         """Completed trades (each settled CLOSE carries full entry+exit detail)
         with a running cumulative P&L, plus the currently-open trade if any.

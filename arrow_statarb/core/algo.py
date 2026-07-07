@@ -104,6 +104,9 @@ class ArrowAutoTrader:
 
         self._pos: Optional[Dict] = None          # open position, or None
         self._cooldown_until = 0.0
+        # After a STOP, block same-direction re-entry until z re-enters the exit
+        # band (z-reset gate) — stops chasing a runaway trend back in. None = clear.
+        self._stop_block_dir: Optional[str] = None
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._exit_failures = 0                    # consecutive failed exit attempts
@@ -253,6 +256,18 @@ class ArrowAutoTrader:
         rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         return gross - rt_fees
 
+    def _reversion_allowed(self, net_pnl: Optional[float], p: Dict) -> bool:
+        """Gate the z-reversion ("target") exit on P&L — never book a losing
+        profit-take. When ``reversion_require_profit`` is on, the reversion exit
+        may fire only if net ≥ ``reversion_gate_inr`` (0 = break-even). Fail-open
+        when P&L can't be priced (net None) so a missing price never traps a
+        position. Off (default) ⇒ unchanged behaviour."""
+        if not bool(p.get("reversion_require_profit", False)):
+            return True
+        if net_pnl is None:
+            return True                              # fail-open
+        return net_pnl >= float(p.get("reversion_gate_inr", 0) or 0)
+
     def _tick(self) -> None:
         p = self._params()
         sig = self._signal() or {}
@@ -302,8 +317,20 @@ class ArrowAutoTrader:
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
+            want_dir = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            # z-reset: clear a post-stop block once z has recovered toward the
+            # mean — a LONG block (entered deep-negative) clears when z ≥ −exit_z;
+            # a SHORT block when z ≤ +exit_z (robust when exit_z = 0).
+            if self._stop_block_dir == "LONG_SPREAD" and z >= -exit_z:
+                self._stop_block_dir = None
+            elif self._stop_block_dir == "SHORT_SPREAD" and z <= exit_z:
+                self._stop_block_dir = None
+            streak = int(p.get("loss_streak", 0) or 0)
+            pause_at = int(p.get("loss_streak_pause_at", 0) or 0)
             if mdl > 0 and day_pnl <= -mdl:
                 snap["status"] = f"daily loss limit reached (₹{day_pnl:.0f} ≤ −₹{mdl:.0f}) — entries halted"
+            elif pause_at > 0 and streak >= pause_at:
+                snap["status"] = f"paused: {streak}-loss streak (≥ {pause_at}) — entries halted"
             elif now < self._cooldown_until:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
@@ -312,13 +339,23 @@ class ArrowAutoTrader:
                 buf = float(p.get("no_entry_buffer_min", 0) or 0)
                 snap["status"] = f"no new entries — within {buf:.0f} min of close"
             elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
+                  and self._stop_block_dir == want_dir):
+                snap["status"] = (f"z-reset: blocking {want_dir.replace('_SPREAD','')} "
+                                  f"re-entry until z re-enters ±{exit_z:.1f} band (z={z:.2f})")
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
                   and max_entry_z > 0 and abs(z) > max_entry_z):
                 snap["status"] = (f"blocked: |z|={abs(z):.2f} exceeds entry cap "
                                   f"{max_entry_z:.2f} (regime-shift guard)")
             elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
-                direction = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+                direction = want_dir
+                # Loss-streak size reducer: shrink size on a losing run.
+                eff_lots = lots
+                reduce_at = int(p.get("loss_streak_reduce_at", 0) or 0)
+                if reduce_at > 0 and streak >= reduce_at:
+                    pct = float(p.get("loss_streak_reduce_pct", 0) or 0) / 100.0
+                    eff_lots = max(1, int(round(lots * (1.0 - pct))))
                 pf = self._build_filter(p)
-                allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=lots)
+                allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=eff_lots)
                 snap["pf_reason"] = reason
                 snap["pf_metrics"] = metrics
                 if not allow:
@@ -329,8 +366,8 @@ class ArrowAutoTrader:
                         extra = f" (P_win={wp*100:.0f}% EV=₹{ev:.0f})"
                     snap["status"] = f"blocked: {reason}{extra}"
                 else:
-                    refused = self._enter(direction, lots, z, sig.get("spread", 0.0))
-                    snap["status"] = refused or f"ENTRY {direction} (z={z:.2f})"
+                    refused = self._enter(direction, eff_lots, z, sig.get("spread", 0.0))
+                    snap["status"] = refused or f"ENTRY {direction} (z={z:.2f}, {eff_lots} lot(s))"
             elif abs(z) >= entry_z:
                 c = max(self._consec_above, self._consec_below)
                 snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
@@ -431,7 +468,7 @@ class ArrowAutoTrader:
                 exit_reason = "trailing_stop"
             elif abs(z) >= stop_z:
                 exit_reason = "stop"
-            elif reverted and not hold_gated:
+            elif reverted and not hold_gated and self._reversion_allowed(net_pnl, p):
                 exit_reason = "target"
             else:
                 exit_reason = None
@@ -558,12 +595,20 @@ class ArrowAutoTrader:
         except TypeError:                       # close_fn without the extra kwargs (tests)
             res = self._close(self._pos["direction"], self._pos["lots"]) or {}
         if res.get("success"):
-            logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))
+            closed_dir = self._pos["direction"]
+            logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))
             self._pos = None
             self._exit_failures = 0
             self._exit_halted = False
             self._exit_retry_at = 0.0
-            cooldown = float(self._params().get("cooldown", 300))
+            p = self._params()
+            cooldown = float(p.get("cooldown", 300))
+            # A STOP earns a longer cooldown and (optionally) arms the z-reset
+            # gate so we don't re-enter the same direction into a runaway move.
+            if reason in ("stop", "dollar_stop"):
+                cooldown = max(cooldown, float(p.get("stop_cooldown", 0) or 0))
+                if bool(p.get("z_reset_after_stop", False)):
+                    self._stop_block_dir = closed_dir
             self._cooldown_until = self._clock() + cooldown
         else:
             # Track consecutive failures; after the ceiling, halt auto-exit retries

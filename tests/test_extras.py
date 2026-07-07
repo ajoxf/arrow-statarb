@@ -253,6 +253,20 @@ def test_trade_log_short_direction(tmp_path):
     # SHORT profits when spread falls: 100 → 90 ⇒ +10 × 2 lots.
     assert rec["spread_pnl"] == 20.0
 
+def test_trade_log_loss_streak(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    assert tl.loss_streak() == 0
+    # two losing round trips (LONG, spread falls → loss)
+    for _ in range(2):
+        tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0, dry_run=False, status="LIVE")
+        tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=90.0, dry_run=False, status="LIVE")
+    assert tl.loss_streak() == 2
+    # a winning close resets the streak
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0, dry_run=False, status="LIVE")
+    tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=115.0, dry_run=False, status="LIVE")
+    assert tl.loss_streak() == 0
+
+
 def test_trade_log_open_position_tracks_unmatched_open(tmp_path):
     tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
     assert tl.open_position() is None

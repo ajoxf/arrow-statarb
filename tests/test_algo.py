@@ -474,3 +474,67 @@ def test_spread_divergence_guard_skipped_without_provider():
     state["sig"] = _sig(2.5, spread=-45.0)
     algo._tick()
     assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+# ── Tier A: gated reversion, z-reset, loss-streak ───────────────────────────
+def test_reversion_gate_blocks_losing_take():
+    algo, state, calls = _pnl_make({"reversion_require_profit": True})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()     # enter LONG @100
+    state["sig"] = _sig(0.1, spread=90.0); algo._tick()       # reverted but net −10
+    assert calls["close"] == []                              # never book a losing take
+    assert "holding" in algo.get_state()["status"]
+
+
+def test_reversion_gate_allows_profit():
+    algo, state, calls = _pnl_make({"reversion_require_profit": True})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()
+    state["sig"] = _sig(0.1, spread=115.0); algo._tick()      # reverted, net +15
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "target" in algo._snap["status"]
+
+
+def test_reversion_allowed_unit():
+    algo, _, _ = _pnl_make()
+    assert algo._reversion_allowed(-5.0, {}) is True                       # gate off
+    on = {"reversion_require_profit": True}
+    assert algo._reversion_allowed(None, on) is True                       # fail-open
+    assert algo._reversion_allowed(5.0, on) is True
+    assert algo._reversion_allowed(-1.0, on) is False
+    assert algo._reversion_allowed(3.0, {**on, "reversion_gate_inr": 5.0}) is False
+
+
+def test_z_reset_blocks_same_direction_after_stop():
+    algo, state, calls = _make({"z_reset_after_stop": True, "cooldown": 0.0, "stop_cooldown": 0.0})
+    state["sig"] = _sig(-2.5); algo._tick()                   # enter LONG
+    state["sig"] = _sig(-4.5); algo._tick()                   # z-stop
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert algo._stop_block_dir == "LONG_SPREAD"
+    calls["execute"].clear()
+    state["sig"] = _sig(-2.5); algo._tick()                   # blocked (same dir, z outside band)
+    assert calls["execute"] == []
+    assert "z-reset" in algo.get_state()["status"]
+    state["sig"] = _sig(0.1); algo._tick()                    # z re-enters band → clears
+    assert algo._stop_block_dir is None
+    state["sig"] = _sig(-2.5); algo._tick()                   # now allowed
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_stop_cooldown_longer_than_normal():
+    algo, state, calls = _make({"cooldown": 10.0, "stop_cooldown": 300.0})
+    state["sig"] = _sig(-2.5); algo._tick()
+    state["sig"] = _sig(-4.5); algo._tick()                   # z-stop
+    assert algo._cooldown_until - algo._clock() > 250         # stop cooldown, not 10s
+
+
+def test_loss_streak_reduces_size():
+    algo, state, calls = _make({"loss_streak": 3, "loss_streak_reduce_at": 3,
+                                "loss_streak_reduce_pct": 20.0, "lots": 10})
+    state["sig"] = _sig(-2.5); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 8)]           # 10 × (1−0.2)
+
+
+def test_loss_streak_pauses_entries():
+    algo, state, calls = _make({"loss_streak": 6, "loss_streak_pause_at": 6})
+    state["sig"] = _sig(-2.5); algo._tick()
+    assert calls["execute"] == []
+    assert "paused" in algo.get_state()["status"]
