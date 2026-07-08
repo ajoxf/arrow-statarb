@@ -110,6 +110,9 @@ class ArrowAutoTrader:
         # Regime guard: once a day is flagged TRENDING, latch a halt on new
         # entries until the next IST day (auto-rearm). Stores the halted day index.
         self._regime_halt_day: Optional[int] = None
+        # z-stop suppression audit: log each would-have-fired occasion exactly
+        # once per excursion so a disabled z-stop stays a scoreable experiment.
+        self._zstop_suppressed_logged = False
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._exit_failures = 0                    # consecutive failed exit attempts
@@ -160,7 +163,8 @@ class ArrowAutoTrader:
                 # P&L reference for a position re-adopted after a restart
                 "entry_fill_spread": pos.get("entry_spread"),
                 "entry_time": float(pos.get("ts") or self._clock()),
-                "peak_pnl": 0.0,                 # trailing-stop high-water mark (fresh)
+                "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes (fresh)
+                "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [],
                 "dry_run": bool(pos.get("dry_run", False)),
                 "restored": True,
@@ -282,32 +286,74 @@ class ArrowAutoTrader:
                 rt_fees += 2.0 * stt_pct * float(ref) * lots * lot_mult
         return gross - rt_fees
 
-    def _reversion_allowed(self, net_pnl: Optional[float], p: Dict) -> bool:
+    def _reversion_allowed(self, net_pnl: Optional[float], p: Dict,
+                           held_sec: float = 0.0, max_hold_sec: float = 0.0) -> bool:
         """Gate the z-reversion ("target") exit on P&L — never book a losing
         profit-take. When ``reversion_require_profit`` is on, the reversion exit
         may fire only if net ≥ ``reversion_gate_inr`` (0 = break-even). Fail-open
         when P&L can't be priced (net None) so a missing price never traps a
-        position. Off (default) ⇒ unchanged behaviour."""
+        position.
+
+        DEADLOCK-PROOF: the gate MUST defer to max-hold — past 1× the trade's
+        max-hold the floor decays to break-even; past 2× the gate releases
+        entirely (the reversion edge is spent — take what's there). Without
+        this, gate + max-hold(needs net>0) + an out-of-reach TP jointly
+        deadlock a fully reverted trade, which then bleeds to the stop."""
         if not bool(p.get("reversion_require_profit", False)):
             return True
+        if max_hold_sec > 0 and held_sec >= 2.0 * max_hold_sec:
+            return True                              # gate releases entirely
         if net_pnl is None:
             return True                              # fail-open
-        return net_pnl >= float(p.get("reversion_gate_inr", 0) or 0)
+        floor = float(p.get("reversion_gate_inr", 0) or 0)
+        if max_hold_sec > 0 and held_sec >= max_hold_sec:
+            floor = 0.0                              # decay to break-even
+        return net_pnl >= floor
 
-    def _round_trip_cost(self, p: Dict) -> float:
+    def _round_trip_cost(self, p: Dict, lots: Optional[int] = None,
+                         ref_price: Optional[float] = None) -> float:
         """Estimated round-trip cost in ₹: brokerage + slippage (both ×2 legs
-        ×2 in/out) + STT (2 sells × %-of-notional). Uses the entry leg price as
-        the notional basis."""
+        ×2 in/out) + STT (2 sells × %-of-notional). Defaults to the open
+        position's size and entry leg price; pass ``lots``/``ref_price`` for a
+        pre-entry (prospective) estimate."""
         pos = self._pos or {}
-        lots = int(pos.get("lots", p.get("lots", 1)) or 1)
+        lots = int(lots if lots is not None
+                   else pos.get("lots", p.get("lots", 1)) or 1)
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
         cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
         stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
-        ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
+        ref = (ref_price if ref_price is not None
+               else pos.get("entry_leg_a") or pos.get("entry_leg_b"))
         if stt_pct > 0 and ref:
             cost += 2.0 * stt_pct * float(ref) * lots * lot_m
         return cost
+
+    def _edge_entry_block(self, z: float, std: float, lots: int,
+                          sig: Dict, p: Dict) -> Optional[str]:
+        """The dead-day gate, evaluated BEFORE entering. Two arithmetic checks
+        against the prospective round-trip cost (brokerage+slippage+STT at this
+        size and leg price):
+          • edge filter — expected capture (target_fraction × |z| × σ × qty)
+            must be ≥ min_edge_multiple × cost;
+          • cost-floor sanity — if cost_floor_mult × cost exceeds the plausible
+            FULL reversion (|z| × σ × qty), the trade can never win: block it.
+        Returns a human-readable block reason, or None to proceed."""
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"))
+        full_move = abs(z) * float(std) * lots * lot_m
+        min_mult = float(p.get("min_edge_multiple", 0) or 0)
+        if min_mult > 0:
+            tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 1.0
+            capture = tfrac * full_move
+            if capture < min_mult * cost:
+                return (f"edge filter: capture ₹{capture:.0f} < "
+                        f"{min_mult:g}× cost ₹{cost:.0f}")
+        cfm = float(p.get("cost_floor_mult", 0) or 0)
+        if cfm > 0 and cfm * cost > full_move:
+            return (f"cost floor ₹{cfm * cost:.0f} exceeds plausible reversion "
+                    f"₹{full_move:.0f} — trade can never win")
+        return None
 
     def _effective_exit_levels(self, p: Dict) -> Tuple[float, float]:
         """Resolve the ₹ (dollar_stop, profit_target) with scale-invariant
@@ -453,11 +499,14 @@ class ArrowAutoTrader:
                 if reduce_at > 0 and streak >= reduce_at:
                     pct = float(p.get("loss_streak_reduce_pct", 0) or 0) / 100.0
                     eff_lots = max(1, int(round(lots * (1.0 - pct))))
+                edge_msg = self._edge_entry_block(z, std, eff_lots, sig, p)
                 pf = self._build_filter(p)
                 allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=eff_lots)
                 snap["pf_reason"] = reason
                 snap["pf_metrics"] = metrics
-                if not allow:
+                if edge_msg:
+                    snap["status"] = f"blocked: {edge_msg}"
+                elif not allow:
                     wp = metrics.get("win_probability")
                     ev = metrics.get("expected_value")
                     extra = ""
@@ -512,19 +561,31 @@ class ArrowAutoTrader:
             # suppressed; the time-stop is a maximum so it is always beyond it.
             hold_gated = reverted and min_hold_sec > 0 and held_sec < min_hold_sec
 
-            # ── Phase 2: peak tracking, max-hold upgrade, trailing stop ──────
-            # Peak P&L high-water mark (drives the trailing stop); reset at entry.
+            # ── Phase 2: peak/trough tracking, max-hold upgrade, trailing stop ──
+            # Lifecycle extremes: peak (drives the trailing stop) and trough net
+            # P&L, WITH minutes-after-entry — persisted on close so the take/hold
+            # can be tuned from the measured peak distribution, not opinion.
             peak = float(self._pos.get("peak_pnl", 0.0) or 0.0)
-            if net_pnl is not None and net_pnl > peak:
-                peak = net_pnl
-                self._pos["peak_pnl"] = peak
+            trough = float(self._pos.get("trough_pnl", 0.0) or 0.0)
+            if net_pnl is not None:
+                if net_pnl > peak:
+                    peak = net_pnl
+                    self._pos["peak_pnl"] = peak
+                    self._pos["peak_min"] = round(held_sec / 60.0, 1)
+                if net_pnl < trough:
+                    trough = net_pnl
+                    self._pos["trough_pnl"] = trough
+                    self._pos["trough_min"] = round(held_sec / 60.0, 1)
             snap["peak_pnl"] = round(peak, 2) if net_pnl is not None else None
+            snap["trough_pnl"] = round(trough, 2) if net_pnl is not None else None
 
             # Max-hold (the time-stop), upgraded:
             #  • silent when losing — but ONLY when a ₹ stop is armed to catch the
             #    loss; without that backstop it still fires (no stuck losers);
             #  • z-progress gate — a WINNING trade that has reverted ≥ the gate
-            #    fraction of the way from entry |z| to exit |z| is let run.
+            #    fraction of the way is let run — but ONLY when a profit target
+            #    exists to eventually take it out (suppression waiting for a TP
+            #    that is configured off = a deadlock, learned the expensive way).
             max_hold_due = max_hold_sec > 0 and held_sec >= max_hold_sec
             max_hold_expired = max_hold_due
             if max_hold_due:
@@ -532,13 +593,37 @@ class ArrowAutoTrader:
                 if silent and net_pnl is not None and net_pnl <= 0:
                     max_hold_due = False
                 z_prog_min = float(p.get("max_hold_z_progress_min", 0) or 0)
-                if max_hold_due and z_prog_min > 0 and net_pnl is not None and net_pnl > 0:
+                if (max_hold_due and z_prog_min > 0 and profit_target > 0
+                        and net_pnl is not None and net_pnl > 0):
                     entry_abs, exit_abs = abs(self._pos["entry_z"]), abs(exit_z)
                     journey = entry_abs - exit_abs
                     z_prog = ((entry_abs - abs(z)) / journey) if journey > 1e-9 else 1.0
                     if z_prog >= z_prog_min:
                         max_hold_due = False        # winning & reverting → run to target
             snap["max_hold_expired"] = bool(max_hold_expired)
+
+            # Hard time-stop (exit-path completeness): a sideways loser — net < 0,
+            # z never reverting — has no clock once max-hold skips losers and the
+            # z-stop is demoted. Past hard_time_stop_mult × max-hold, close ANY
+            # trade regardless of P&L. 0 = off.
+            hard_mult = float(p.get("hard_time_stop_mult", 0) or 0)
+            hard_due = (hard_mult > 0 and max_hold_sec > 0
+                        and held_sec >= hard_mult * max_hold_sec)
+
+            # z-stop demotion: once a ₹ stop is armed, in-trade risk is DOLLARS
+            # only — the rolling mean/σ drift post-entry, so the z-stop's dollar
+            # meaning wanders. FAIL-SAFE: auto-re-enabled whenever NO dollar stop
+            # is armed (a trade must always have a stop). When suppressed, every
+            # would-have-fired occasion is logged so the change is scoreable.
+            z_stop_armed = bool(p.get("z_stop_exit_enabled", True)) or dollar_stop <= 0
+            if abs(z) >= stop_z and not z_stop_armed:
+                if not self._zstop_suppressed_logged:
+                    logger.warning("ArrowAlgo: z-stop SUPPRESSED — would have fired at "
+                                   "z={:.2f} (≥ {:.1f}); dollar stop governs (net {})",
+                                   z, stop_z, _pnl_txt)
+                    self._zstop_suppressed_logged = True
+            elif abs(z) < stop_z:
+                self._zstop_suppressed_logged = False
 
             # Trailing stop: arm once the peak clears the floor (a % of the profit
             # target, or simply 'in profit' when no target/floor is set), then
@@ -554,19 +639,24 @@ class ArrowAutoTrader:
             snap["trailing_armed"] = trailing_armed
 
             # Exit priority (first match wins) — RISK BEFORE REWARD:
-            #   1 dollar stop · 2 profit target · 3 max-hold (silent/gated) ·
-            #   4 trailing stop · 5 emergency z-stop · 6 z-target (min-hold gated)
+            #   1 dollar stop · 2 profit target · 3 hard time-stop (unconditional)
+            #   4 max-hold (silent/gated) · 5 trailing stop · 6 z-stop (if armed)
+            #   7 z-target (min-hold gated; floor decays past 1× max-hold,
+            #     releases past 2× — deadlock-proof)
             if dollar_stop > 0 and net_pnl is not None and net_pnl <= -dollar_stop:
                 exit_reason = "dollar_stop"
             elif profit_target > 0 and net_pnl is not None and net_pnl >= profit_target:
                 exit_reason = "profit_target"
+            elif hard_due:
+                exit_reason = "hard_time_stop"
             elif max_hold_due:
                 exit_reason = "time_stop"
             elif trailing_fire:
                 exit_reason = "trailing_stop"
-            elif abs(z) >= stop_z:
+            elif abs(z) >= stop_z and z_stop_armed:
                 exit_reason = "stop"
-            elif reverted and not hold_gated and self._reversion_allowed(net_pnl, p):
+            elif (reverted and not hold_gated
+                  and self._reversion_allowed(net_pnl, p, held_sec, max_hold_sec)):
                 exit_reason = "target"
             else:
                 exit_reason = None
@@ -587,6 +677,10 @@ class ArrowAutoTrader:
             elif exit_reason == "profit_target":
                 snap["status"] = f"PROFIT TARGET (net {_pnl_txt} ≥ ₹{profit_target:.0f})"
                 self._exit("profit_target", z, spread_now)
+            elif exit_reason == "hard_time_stop":
+                snap["status"] = (f"HARD TIME-STOP ({held_sec:.0f}s ≥ "
+                                  f"{hard_mult:g}× max-hold, net {_pnl_txt}, ANY P&L)")
+                self._exit("hard_time_stop", z, spread_now)
             elif exit_reason == "time_stop":
                 snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s, net {_pnl_txt})"
                 self._exit("time_stop", z, spread_now)
@@ -670,7 +764,8 @@ class ArrowAutoTrader:
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),
                 "entry_time": self._clock(),
-                "peak_pnl": 0.0,                 # trailing-stop high-water mark
+                "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes
+                "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }
@@ -679,6 +774,16 @@ class ArrowAutoTrader:
             self._exit_halted = False
             self._exit_retry_at = 0.0
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
+            # Print the RESOLVED exit geometry at entry, not the configs — a
+            # cost floor or %-form can silently move a level at this size.
+            try:
+                stop_lv, tgt_lv = self._effective_exit_levels(p)
+                logger.info("ArrowAlgo: entry geometry (resolved) — stop ₹{:.0f} / "
+                            "target ₹{:.0f} (fill spread {}, σ={}, cost ₹{:.0f})",
+                            stop_lv, tgt_lv, self._pos.get("entry_fill_spread"),
+                            self._pos.get("entry_std"), self._round_trip_cost(p))
+            except Exception:                        # noqa: BLE001 — log-only path
+                pass
         else:
             self.last_error = f"entry failed: {res.get('error')}"
             logger.error("ArrowAlgo: ENTER failed — {}", res.get("error"))
@@ -689,10 +794,19 @@ class ArrowAutoTrader:
         kw = {"source": "algo", "reason": reason, "z": round(z, 4)}
         if spread is not None:
             kw["spread"] = round(spread, 4)
+        # Lifecycle extremes travel with the close so the journal persists
+        # "Peak/Trough ₹X (Ym) / ₹Z (Wm)" — the data that tunes take/hold.
+        life = {"peak_pnl": self._pos.get("peak_pnl"),
+                "trough_pnl": self._pos.get("trough_pnl"),
+                "peak_min": self._pos.get("peak_min"),
+                "trough_min": self._pos.get("trough_min")}
         try:
-            res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
-        except TypeError:                       # close_fn without the extra kwargs (tests)
-            res = self._close(self._pos["direction"], self._pos["lots"]) or {}
+            res = self._close(self._pos["direction"], self._pos["lots"], **kw, **life) or {}
+        except TypeError:                       # close_fn without the lifecycle kwargs
+            try:
+                res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
+            except TypeError:                   # close_fn without any extras (tests)
+                res = self._close(self._pos["direction"], self._pos["lots"]) or {}
         if res.get("success"):
             closed_dir = self._pos["direction"]
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))

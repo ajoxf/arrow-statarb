@@ -89,6 +89,12 @@ filters:
                               # SELL side. A calendar round trip has 2 sells (one
                               # leg at entry, the other at exit) → charged into net
                               # P&L and break-even. 0 = off. (NSE futures ≈ 0.02%.)
+  min_edge_multiple: 0        # dead-day gate: block an entry unless the expected
+                              # capture (target_fraction × |z| × σ × qty) is ≥ this ×
+                              # the round-trip cost (brokerage+slippage+STT). ~1.5
+                              # typical; 0 = off. Audit vs /api/cost-audit monthly —
+                              # an inflated cost model makes every trade look
+                              # unprofitable and jams this gate.
   time_stop_half_lives: 3.0   # exit if held longer than this × half-life
   half_life_min_sec: 0        # allowed-range lower bound (0 = none)
   half_life_max_sec: 0        # allowed-range upper bound (0 = none)
@@ -159,6 +165,16 @@ exits:
   # Target precedence: σ-fraction > %-of-capital > fixed profit_target_inr,
   # then raised to a cost floor. Stop = min(target/RR, %-capital × CAR) — tighter
   # binds — else fixed dollar_stop_inr. All 0 = use the fixed-₹ fields above.
+  # ── Spec v2: z-stop demotion + hard time-stop (exit-path completeness) ──
+  z_stop_exit_enabled: true        # OFF = in-trade risk is DOLLARS only (recommended
+                                   # once a ₹/% stop is armed — post-entry the rolling
+                                   # z drifts, so its ₹ meaning wanders). FAIL-SAFE:
+                                   # auto re-enabled whenever NO dollar stop is armed;
+                                   # suppressed firings are logged for scoring.
+  hard_time_stop_mult: 0           # close ANY trade (regardless of P&L) after this ×
+                                   # max-hold — the sideways-loser clock. ~3 typical;
+                                   # 0 = off. NOTE: the reversion gate itself already
+                                   # decays to BE past 1× max-hold and releases at 2×.
   profit_target_sigma_frac: 0      # target = frac × |z_entry| × σ_entry × qty (0.5–0.7 typical)
   tp_capital_pct: 0                # else target = this % of capital_at_risk_inr
   cost_floor_mult: 0               # raise target to ≥ this × round-trip cost (1.0–1.5)

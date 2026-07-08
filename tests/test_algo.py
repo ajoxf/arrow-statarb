@@ -414,13 +414,27 @@ def test_max_hold_fires_when_losing_without_stop():
 
 
 def test_max_hold_z_progress_gate_suppresses_winner():
-    algo, state, calls = _pnl_make({"max_hold_z_progress_min": 0.5, "time_stop_half_lives": 1.0})
+    # Suppression requires a TP to exist (spec v2: suppression waiting for a TP
+    # that is configured off = deadlock). TP set here (unreachable) → suppressed.
+    algo, state, calls = _pnl_make({"max_hold_z_progress_min": 0.5, "time_stop_half_lives": 1.0,
+                                    "profit_target_inr": 100000.0})
     state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()   # entry |z|=2.5
     algo._pos["entry_time"] = time.time() - 10_000
     # winning + z reverted 0.6 of the way (entry 2.5 → exit 0): (2.5−1.0)/2.5 = 0.6 ≥ 0.5
     state["sig"] = _sig(-1.0, spread=150.0, half_life=1.0); algo._tick()   # net +50
     assert calls["close"] == []                                # suppressed → let it run
     assert algo.get_state()["max_hold_expired"] is True
+
+
+def test_z_progress_suppression_requires_tp():
+    # With NO profit target configured, suppression must NOT apply — max-hold
+    # takes the winner out (regression for the shipped deadlock).
+    algo, state, calls = _pnl_make({"max_hold_z_progress_min": 0.5, "time_stop_half_lives": 1.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=1.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 10_000
+    state["sig"] = _sig(-1.0, spread=150.0, half_life=1.0); algo._tick()   # net +50, reverting
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "TIME-STOP" in algo._snap["status"]
 
 
 def test_max_hold_fires_when_not_reverted_enough():
@@ -617,3 +631,108 @@ def test_cost_floor_raises_tiny_target():
     _, target = algo._effective_exit_levels(algo._params())
     # round-trip cost = (20+5)×1×4 = 100; floor raises 10 → 100
     assert target == 100.0
+
+
+# ── Spec v2: gate decay/release, hard time-stop, z-stop demotion, edge filter ─
+def test_gate_floor_decays_after_max_hold():
+    # Deadlock regression: gate floor 500, net +100, TP unreachable, z-progress
+    # suppression holding max-hold open. Past 1× max-hold the floor decays to
+    # BE → the reversion exit takes the +100 instead of deadlocking.
+    algo, state, calls = _pnl_make({"reversion_require_profit": True,
+                                    "reversion_gate_inr": 500.0,
+                                    "profit_target_inr": 100000.0,
+                                    "max_hold_z_progress_min": 0.5,
+                                    "time_stop_half_lives": 2.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=100.0); algo._tick()   # max_hold = 100s
+    algo._pos["entry_time"] = time.time() - 150                # held 1.5× max-hold
+    state["sig"] = _sig(0.1, spread=200.0, half_life=100.0); algo._tick()    # reverted, net +100 < 500
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "EXIT target" in algo._snap["status"]
+
+
+def test_gate_releases_entirely_at_2x_max_hold():
+    # Past 2× max-hold the gate releases even at a small loss — the reversion
+    # edge is spent, take what's there (max-hold silent on losers here).
+    algo, state, calls = _pnl_make({"reversion_require_profit": True,
+                                    "reversion_gate_inr": 500.0,
+                                    "max_hold_silent_when_losing": True,
+                                    "dollar_stop_inr": 5000.0,
+                                    "time_stop_half_lives": 2.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=100.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 250                # held 2.5× max-hold
+    state["sig"] = _sig(0.1, spread=90.0, half_life=100.0); algo._tick()     # reverted, net −10
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "EXIT target" in algo._snap["status"]
+
+
+def test_hard_time_stop_closes_sideways_loser():
+    # net < 0, z never reverting, max-hold silent on losers, z-stop not hit —
+    # without the hard clock this trade has NO exit until the dollar stop.
+    algo, state, calls = _pnl_make({"hard_time_stop_mult": 3.0,
+                                    "max_hold_silent_when_losing": True,
+                                    "dollar_stop_inr": 5000.0,
+                                    "time_stop_half_lives": 2.0})
+    state["sig"] = _sig(-2.5, spread=100.0, half_life=100.0); algo._tick()
+    algo._pos["entry_time"] = time.time() - 350                # held 3.5× max-hold
+    state["sig"] = _sig(-1.5, spread=80.0, half_life=100.0); algo._tick()    # net −20, not reverted
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "HARD TIME-STOP" in algo._snap["status"]
+
+
+def test_z_stop_demoted_when_dollar_stop_armed():
+    algo, state, calls = _pnl_make({"z_stop_exit_enabled": False, "dollar_stop_inr": 5000.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()
+    state["sig"] = _sig(-4.5, spread=95.0); algo._tick()       # |z| ≥ stop but demoted
+    assert calls["close"] == []                                # dollars govern
+    assert algo._zstop_suppressed_logged is True               # would-have-fired logged
+
+
+def test_z_stop_failsafe_without_dollar_stop():
+    # FAIL-SAFE: with NO dollar stop armed the z-stop auto re-enables — a trade
+    # must always have a stop.
+    algo, state, calls = _pnl_make({"z_stop_exit_enabled": False, "dollar_stop_inr": 0.0})
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()
+    state["sig"] = _sig(-4.5, spread=95.0); algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+    assert "STOP" in algo._snap["status"]
+
+
+def test_edge_filter_blocks_thin_capture():
+    # capture (1.0 × |z| × σ × qty = 2.5) < 1.5 × cost (60) → blocked.
+    algo, state, calls = _make({"lot_multiplier": 1.0, "min_edge_multiple": 1.5})
+    state["sig"] = _sig(-2.5, std=1.0); algo._tick()
+    assert calls["execute"] == []
+    assert "edge filter" in algo.get_state()["status"]
+
+
+def test_edge_filter_allows_fat_capture():
+    # σ=100 → capture 250 ≥ 1.5 × 60 → entry proceeds.
+    algo, state, calls = _make({"lot_multiplier": 1.0, "min_edge_multiple": 1.5})
+    state["sig"] = _sig(-2.5, std=100.0); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_cost_floor_unwinnable_blocks_entry():
+    # cost floor (1.5 × 60 = 90) > plausible full reversion (2.5) → can never win.
+    algo, state, calls = _make({"lot_multiplier": 1.0, "cost_floor_mult": 1.5})
+    state["sig"] = _sig(-2.5, std=1.0); algo._tick()
+    assert calls["execute"] == []
+    assert "never win" in algo.get_state()["status"]
+
+
+def test_lifecycle_extremes_tracked_and_passed_on_close():
+    captured = {}
+    algo, state, calls = _pnl_make()
+
+    def close_with_kwargs(direction, lots, **kw):
+        captured.update(kw)
+        return {"success": True, "results": []}
+    algo._close = close_with_kwargs
+    state["sig"] = _sig(-2.5, spread=100.0); algo._tick()      # enter LONG @100
+    state["sig"] = _sig(-1.5, spread=150.0); algo._tick()      # peak +50
+    state["sig"] = _sig(-1.5, spread=70.0); algo._tick()       # trough −30
+    state["sig"] = _sig(0.1, spread=120.0); algo._tick()       # reverted, net +20 → target
+    assert algo.get_state()["in_position"] is False
+    assert captured["peak_pnl"] == 50.0
+    assert captured["trough_pnl"] == -30.0
+    assert "peak_min" in captured and "trough_min" in captured

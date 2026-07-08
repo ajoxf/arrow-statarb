@@ -349,3 +349,22 @@ def test_trade_log_cost_audit(tmp_path):
     assert audit["n"] == 1
     assert audit["avg_stt"] > 0                         # STT captured
     assert audit["avg_realized_cost"] >= audit["avg_stt"]
+
+
+def test_trade_log_outcome_tags_and_lifecycle(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0, dry_run=False,
+              status="LIVE", zscore=-3.0)
+    rec = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=90.0, dry_run=False,
+                    status="LIVE", zscore=-4.5, exit_reason="dollar_stop",
+                    peak_pnl=119.0, trough_pnl=-446.0, peak_min=6.0, trough_min=88.0)
+    # z went -3.0 → -4.5 (further from mean) → stopped in trend
+    assert rec["outcome"] == "STOPPED IN TREND — never reverted"
+    assert rec["peak_pnl"] == 119.0 and rec["peak_min"] == 6.0
+    assert rec["trough_pnl"] == -446.0 and rec["trough_min"] == 88.0
+    # a stop AFTER z came home is the execution story
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0, dry_run=False,
+              status="LIVE", zscore=-3.0)
+    rec2 = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=95.0, dry_run=False,
+                     status="LIVE", zscore=0.1, exit_reason="dollar_stop")
+    assert rec2["outcome"] == "STOPPED AFTER FULL REVERSION — price never paid"

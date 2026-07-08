@@ -356,7 +356,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     def _spread_close(direction: str, lots: int, source: str = "manual",
                       reason: str = "", z: Optional[float] = None,
-                      spread: Optional[float] = None) -> Dict:
+                      spread: Optional[float] = None,
+                      peak_pnl: Optional[float] = None,
+                      trough_pnl: Optional[float] = None,
+                      peak_min: Optional[float] = None,
+                      trough_min: Optional[float] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -377,6 +381,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
+                             peak_pnl=peak_pnl, trough_pnl=trough_pnl,
+                             peak_min=peak_min, trough_min=trough_min,
                              name=m["name"], exit_reason=reason)
         return res
 
@@ -576,6 +582,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
             "reversion_gate_inr": float(xo.get("reversion_gate_inr", 0) or 0),
             "stt_pct": float(f.get("stt_pct", 0.02) or 0),   # STT %-of-notional, sell-side
+            # ── Spec v2: z-stop demotion, hard time-stop, edge filter ──
+            "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
+            "hard_time_stop_mult": float(xo.get("hard_time_stop_mult", 0) or 0),
+            "min_edge_multiple": float(f.get("min_edge_multiple", 0) or 0),
             # ── Tier B: scale-invariant exit levels ──
             "profit_target_sigma_frac": float(xo.get("profit_target_sigma_frac", 0) or 0),
             "tp_capital_pct": float(xo.get("tp_capital_pct", 0) or 0),
@@ -1310,6 +1320,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "cost_floor_mult": xo.get("cost_floor_mult", 0),
                     "stop_capital_pct": xo.get("stop_capital_pct", 0),
                     "stop_rr": xo.get("stop_rr", 0),
+                    "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
+                    "hard_time_stop_mult": xo.get("hard_time_stop_mult", 0),
                 },
                 "regime": {
                     "enabled": bool(rg.get("enabled", False)),
@@ -1360,6 +1372,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "brokerage_per_lot": f.get("brokerage_per_lot", 20),
                     "slippage_per_lot": f.get("slippage_per_lot", 5),
                     "stt_pct": f.get("stt_pct", 0.02),
+                    "min_edge_multiple": f.get("min_edge_multiple", 0),
                     "min_win_probability": f.get("min_win_probability", 0.60),
                     "min_expected_value": f.get("min_expected_value", 0),
                     "time_stop_half_lives": f.get("time_stop_half_lives", 3.0),
@@ -1409,7 +1422,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if "commission_basis" in fd:
             fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
         for k, d in (("brokerage_per_lot", 20.0), ("slippage_per_lot", 5.0),
-                     ("stt_pct", 0.02),
+                     ("stt_pct", 0.02), ("min_edge_multiple", 0.0),
                      ("min_win_probability", 0.60), ("min_expected_value", 0.0),
                      ("time_stop_half_lives", 3.0)):
             if k in fd:
@@ -1431,11 +1444,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             xo["max_hold_silent_when_losing"] = bool(xd["max_hold_silent_when_losing"])
         if "reversion_require_profit" in xd:
             xo["reversion_require_profit"] = bool(xd["reversion_require_profit"])
+        if "z_stop_exit_enabled" in xd:
+            xo["z_stop_exit_enabled"] = bool(xd["z_stop_exit_enabled"])
         for k, d in (("dollar_stop_inr", 0.0), ("profit_target_inr", 0.0),
                      ("max_hold_z_progress_min", 0.0), ("trailing_stop_pct", 0.0),
                      ("trailing_stop_floor_pct", 0.0), ("reversion_gate_inr", 0.0),
                      ("profit_target_sigma_frac", 0.0), ("tp_capital_pct", 0.0),
-                     ("cost_floor_mult", 0.0), ("stop_capital_pct", 0.0), ("stop_rr", 0.0)):
+                     ("cost_floor_mult", 0.0), ("stop_capital_pct", 0.0), ("stop_rr", 0.0),
+                     ("hard_time_stop_mult", 0.0)):
             if k in xd:
                 xo[k] = _num(xd[k], d)
 

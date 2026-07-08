@@ -21,6 +21,31 @@ from loguru import logger
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _outcome_tag(reason: str, net: float, entry_z, exit_z) -> str:
+    """Deterministic, rule-based outcome tag for the close report — numbers
+    first, no prose. Distinguishes the two very different stop stories:
+    'STOPPED IN TREND' (z never came home) vs 'STOPPED AFTER FULL REVERSION'
+    (z came home but the price never paid — an execution/slippage story)."""
+    r = str(reason or "").lower()
+    if r == "profit_target":
+        return "TARGET HIT"
+    if r == "target":
+        return "REVERSION BANKED" if net > 0 else "REVERSION RELEASED"
+    if r in ("time_stop", "hard_time_stop"):
+        return "TIME EXIT"
+    if r == "trailing_stop":
+        return "TRAILING BANKED" if net > 0 else "TRAILING STOP"
+    if r in ("stop", "dollar_stop"):
+        try:
+            ez, xz = float(entry_z), float(exit_z)
+            reverted = (abs(xz) <= abs(ez) * 0.3) or (ez < 0 <= xz) or (ez > 0 >= xz)
+        except (TypeError, ValueError):
+            reverted = False
+        return ("STOPPED AFTER FULL REVERSION — price never paid" if reverted
+                else "STOPPED IN TREND — never reverted")
+    return r.upper().replace("_", " ") if r else ""
+
+
 class TradeLog:
     def __init__(self, path: Optional[Path] = None, brokerage_per_lot: float = 20.0):
         # path=None → in-memory only (no file IO), used by the backtester.
@@ -55,7 +80,9 @@ class TradeLog:
                leg_b_price: Optional[float] = None, name: str = "",
                exit_reason: str = "",
                decision_spread: Optional[float] = None,
-               stt_pct: float = 0.0) -> Dict:
+               stt_pct: float = 0.0,
+               peak_pnl: Optional[float] = None, trough_pnl: Optional[float] = None,
+               peak_min: Optional[float] = None, trough_min: Optional[float] = None) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
         matching OPEN to fill in spread/net P&L plus full round-trip detail
         (entry/exit z, per-leg prices, spreads, time-in-trade).
@@ -97,6 +124,10 @@ class TradeLog:
             "entry_leg_a": None, "entry_leg_b": None,
             "exit_leg_a": None, "exit_leg_b": None,
             "held_sec": None,
+            # lifecycle extremes ("Peak/Trough ₹X (Ym) / ₹Z (Wm)") + outcome tag
+            "peak_pnl": peak_pnl, "trough_pnl": trough_pnl,
+            "peak_min": peak_min, "trough_min": trough_min,
+            "outcome": "",
         }
         with self._lock:
             if action == "CLOSE" and spread is not None:
@@ -141,6 +172,8 @@ class TradeLog:
                             rec["exit_leg_b"] = leg_b_price
                             rec["held_sec"] = round(rec["ts"] - float(prev.get("ts", rec["ts"])), 1)
                             rec["name"] = name or prev.get("name", "")
+                            rec["outcome"] = _outcome_tag(exit_reason, rec["net_pnl"],
+                                                          prev.get("zscore"), zscore)
                             prev["_closed"] = True
                         break
             else:

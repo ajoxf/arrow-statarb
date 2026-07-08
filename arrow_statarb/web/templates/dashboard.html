@@ -732,8 +732,9 @@
     function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
     const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark',
                        dollar_stop:'bg-danger', profit_target:'bg-success',
-                       trailing_stop:'bg-info text-dark', manual:'bg-secondary' };
-    const _EXITLBL = { dollar_stop:'stop price' };   // display label (stored code unchanged)
+                       trailing_stop:'bg-info text-dark', hard_time_stop:'bg-warning text-dark',
+                       manual:'bg-secondary' };
+    const _EXITLBL = { dollar_stop:'stop price', hard_time_stop:'hard time' };
     async function pollJournal() {
         try {
             const j = await fetch('/api/trades/journal').then(x => x.json());
@@ -755,10 +756,10 @@
                     <td class="text-end font-monospace">${_arrow2(x.entry_zscore, x.exit_zscore, 2)}</td>
                     <td class="text-end font-monospace">${_arrow2(x.entry_spread, x.exit_spread, 1)}</td>
                     <td class="text-end">${_held2(x.held_sec)}</td>
-                    <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}">${_EXITLBL[ex]||ex.replace('_',' ')}</span></td>
+                    <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}" title="${x.outcome||''}">${_EXITLBL[ex]||ex.replace('_',' ')}</span></td>
                     <td class="text-end font-monospace ${edc}">${_rs(edge)}</td>
                     <td class="text-end font-monospace ${slc}">${_rs(slip)}</td>
-                    <td class="text-end fw-bold ${npc}">${_rs(np)}</td>
+                    <td class="text-end fw-bold ${npc}" title="${x.peak_pnl!=null?`peak ${_rs(x.peak_pnl)} (${x.peak_min??'—'}m) / trough ${_rs(x.trough_pnl)} (${x.trough_min??'—'}m)`:''}">${_rs(np)}</td>
                     <td class="text-end pe-3 font-monospace">${_rs(x.cum_pnl)}</td></tr>`;
             }).join('');
         } catch (e) {}
