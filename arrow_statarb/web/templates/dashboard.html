@@ -950,7 +950,13 @@
         else { const v = Number(s.net_pnl); pEl.textContent = _rs(v, 2);
                pEl.className = 'fw-bold ' + (v > 0 ? 'text-success' : (v < 0 ? 'text-danger' : '')); }
 
-        document.getElementById('sp-target').textContent = s.profit_target != null ? '+' + _rs(s.profit_target, 0) : 'off';
+        const tgtEl = document.getElementById('sp-target');
+        tgtEl.textContent = s.profit_target != null ? '+' + _rs(s.profit_target, 0) : 'off';
+        // 'TP = BE + %': net is post-cost, so target is ₹ above break-even.
+        if (s.profit_target != null && s.break_even != null) {
+            tgtEl.title = `break-even ₹${_rs(s.break_even, 0)} + net +₹${_rs(s.profit_target, 0)}`
+                        + (s.tp_gross_target != null ? ` = ₹${_rs(s.tp_gross_target, 0)} gross` : '');
+        } else { tgtEl.title = ''; }
         document.getElementById('sp-stop').textContent = s.dollar_stop != null ? _rs(s.dollar_stop, 0) : 'off';
 
         // P&L progress bar: net_pnl positioned between stop (left) and target (right).

@@ -113,6 +113,8 @@ class ArrowAutoTrader:
         # z-stop suppression audit: log each would-have-fired occasion exactly
         # once per excursion so a disabled z-stop stays a scoreable experiment.
         self._zstop_suppressed_logged = False
+        # 'BE + %' take-profit misconfig warning latch (fires once).
+        self._tp_cap_warned = False
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
         self._exit_failures = 0                    # consecutive failed exit attempts
@@ -378,7 +380,14 @@ class ArrowAutoTrader:
           target: σ-fraction > %-of-capital > fixed-₹, then raised to a cost floor;
           stop:   min(target/RR, %-of-capital × capital_at_risk) — the TIGHTER
                   binds — with fixed-₹ as the fallback.
-        Fixed-₹ fields are used only when their scale-invariant twin is unset."""
+        Fixed-₹ fields are used only when their scale-invariant twin is unset.
+
+        TAKE PROFIT = BE + %: the returned target is compared against the LIVE
+        NET P&L (`_live_net_pnl`), which is already net of every cost — brokerage,
+        slippage, STT, other charges and CGT — so net = 0 IS break-even. A target
+        of ₹T therefore means "close once you are ₹T ABOVE break-even". The
+        `tp_capital_pct` form makes that ₹T = tp_capital_pct% × capital-at-risk,
+        i.e. exactly BE + % of capital."""
         pos = self._pos or {}
         lots = int(pos.get("lots", p.get("lots", 1)) or 1)
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
@@ -392,7 +401,14 @@ class ArrowAutoTrader:
         if sfrac > 0 and std0 > 0 and absz > 0:
             target = sfrac * absz * std0 * lots * lot_m
         elif tp_cap > 0 and car > 0:
-            target = (tp_cap / 100.0) * car
+            target = (tp_cap / 100.0) * car        # BE + tp_capital_pct% of capital
+        elif tp_cap > 0 and car <= 0 and not self._tp_cap_warned:
+            logger.warning("ArrowAlgo: tp_capital_pct={:.3g}% is set but "
+                           "capital_at_risk_inr is 0 — the 'BE + %' take-profit "
+                           "is INACTIVE; falling back to profit_target_inr "
+                           "(₹{:.0f}). Set capital_at_risk_inr to enable it.",
+                           tp_cap, target)
+            self._tp_cap_warned = True
         cost_mult = float(p.get("cost_floor_mult", 0) or 0)
         if cost_mult > 0 and target > 0:
             target = max(target, cost_mult * self._round_trip_cost(p))
@@ -554,6 +570,13 @@ class ArrowAutoTrader:
             snap["net_pnl"] = round(net_pnl, 2) if net_pnl is not None else None
             snap["dollar_stop"] = -dollar_stop if dollar_stop > 0 else None
             snap["profit_target"] = profit_target if profit_target > 0 else None
+            # 'TP = BE + %': net_pnl is already post-cost, so the ₹ needed to
+            # reach break-even is the round-trip cost, and the take-profit is
+            # profit_target ABOVE that. Surface both so the split is visible.
+            _be_cost = self._round_trip_cost(p)   # uses the position's entry notional
+            snap["break_even"] = round(_be_cost, 2) if _be_cost > 0 else None
+            snap["tp_gross_target"] = (round(_be_cost + profit_target, 2)
+                                       if profit_target > 0 else None)
             _pnl_txt = f"₹{net_pnl:.0f}" if net_pnl is not None else "n/a"
 
             # ── position detail for the Signal & Position card ───────────────

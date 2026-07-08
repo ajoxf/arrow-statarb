@@ -614,6 +614,51 @@ def test_capital_pct_stop_and_target():
     assert stop == 1500.0                               # 1.5% × 100k
 
 
+def test_tp_capital_pct_is_be_plus_percent():
+    # 'Take Profit = BE + %': the target is a NET (post-cost) level, so a net
+    # P&L of tp_capital_pct% × capital-at-risk means BE + that %. The exit fires
+    # exactly when live net P&L reaches it — not one tick before.
+    algo, state, calls = _pnl_make({"lot_multiplier": 65.0, "stt_pct": 0.0,
+                                    "brokerage_per_lot": 0.0, "slippage_per_lot": 0.0,
+                                    "capital_at_risk_inr": 100000.0,
+                                    "tp_capital_pct": 0.5, "entry_zscore": 2.0,
+                                    "exit_zscore": 0.0, "min_hold_sec": 0.0})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG
+    algo._pos["entry_leg_a"] = 24000.0
+    _, target = algo._effective_exit_levels(algo._params())
+    assert target == 500.0                                       # 0.5% × 100k, above BE
+    # net = gross (no fees here) — needs spread +500/65 ≈ 7.69 to reach ₹500 net
+    state["sig"] = _sig(-1.0, spread=7.0); algo._tick()          # net ₹455 < 500 → hold
+    assert algo._pos is not None
+    state["sig"] = _sig(-1.0, spread=8.0); algo._tick()          # net ₹520 ≥ 500 → take
+    assert algo._pos is None
+    assert ("LONG_SPREAD", 1) in calls["close"]
+
+
+def test_break_even_surfaced_in_snapshot():
+    # With real costs, the snapshot exposes break-even (round-trip cost) and the
+    # gross take-profit level (BE + net target) so the '% + BE' split is visible.
+    algo, state, calls = _pnl_make({"lot_multiplier": 65.0, "brokerage_per_lot": 20.0,
+                                    "slippage_per_lot": 5.0, "stt_pct": 0.0,
+                                    "capital_at_risk_inr": 100000.0, "tp_capital_pct": 0.5})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG
+    state["sig"] = _sig(-1.0, spread=1.0); algo._tick()          # hold, refresh snap
+    snap = algo.get_state()
+    assert snap["break_even"] == (20.0 + 5.0) * 1 * 4            # ₹100 round-trip cost
+    assert snap["tp_gross_target"] == 100.0 + 500.0             # BE + 0.5% × 100k
+
+
+def test_tp_capital_pct_inactive_without_capital_falls_back():
+    # tp_capital_pct set but capital_at_risk_inr = 0 → the BE+% form is inactive;
+    # target falls back to fixed profit_target_inr (and a one-time warning fires).
+    algo, _, _ = _pnl_make({"tp_capital_pct": 0.5, "capital_at_risk_inr": 0.0,
+                            "profit_target_inr": 777.0})
+    algo._pos = {"lots": 1, "entry_z": -3.0, "entry_std": 0.0}
+    _, target = algo._effective_exit_levels(algo._params())
+    assert target == 777.0
+    assert algo._tp_cap_warned is True
+
+
 def test_stop_tighter_of_rr_and_capital():
     algo, _, _ = _pnl_make({"capital_at_risk_inr": 100000.0, "profit_target_inr": 3000.0,
                             "stop_rr": 0.3, "stop_capital_pct": 1.5})

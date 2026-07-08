@@ -187,7 +187,10 @@ exits:
                                    # 0 = off. NOTE: the reversion gate itself already
                                    # decays to BE past 1× max-hold and releases at 2×.
   profit_target_sigma_frac: 0      # target = frac × |z_entry| × σ_entry × qty (0.5–0.7 typical)
-  tp_capital_pct: 0                # else target = this % of capital_at_risk_inr
+  tp_capital_pct: 0                # TAKE PROFIT = BE + %: net P&L is post-cost, so
+                                   # net=0 is break-even; close at BE + this % of
+                                   # capital_at_risk_inr (e.g. 0.5 ⇒ BE + 0.5% cap).
+                                   # Needs capital_at_risk_inr > 0. 0 = off.
   cost_floor_mult: 0               # raise target to ≥ this × round-trip cost (1.0–1.5)
   stop_capital_pct: 0              # stop = this % of capital_at_risk_inr (e.g. 1.5)
   stop_rr: 0                       # and/or target ÷ RR (e.g. 0.3 → wide); tighter of the two binds
