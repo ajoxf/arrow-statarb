@@ -75,6 +75,44 @@ def _app(tmp_path, mode="dry_run"):
     return app, broker
 
 
+def test_settings_expose_and_persist_all_knobs(tmp_path):
+    # Every knob a non-technical user might set must be readable AND writable
+    # through the Settings page — no .yaml editing required. GET → POST → GET
+    # must round-trip the value for each newly-surfaced key.
+    app, _ = _app(tmp_path)
+    client = app.test_client()
+    got = client.get("/api/settings").get_json()
+    # newly-surfaced keys grouped by section, with a changed value to write
+    changes = {
+        "signal": {"display_refresh_ms": 750, "persist_window": False,
+                   "resume_max_gap_min": 15, "persist_interval_sec": 45},
+        "filters": {"half_life_min_sec": 30, "half_life_max_sec": 900},
+        "regime": {"window_samples": 200, "vr_lag": 7},
+        "trading_hours": {"close_hour": 15, "close_min": 25, "no_entry_buffer_min": 20},
+        "execution": {"product": "MIS", "cooldown_sec": 120, "use_limit_orders": False,
+                      "price_tick_size": 0.05, "poll_interval_sec": 0.6,
+                      "limit_to_market": False, "unknown_status_grace_polls": 5,
+                      "assume_fill_on_unknown": True, "exit_retry_backoff_sec": 8,
+                      "exit_retry_backoff_max_sec": 90, "verify_flat_before_entry": False,
+                      "verify_flat_fail_open": True, "sim_tick_size": 0.05,
+                      "sim_spread_ticks": 3.0, "sim_extra_slip_ticks": 1.0,
+                      "sim_slow_prob": 0.4, "sim_reject_prob": 0.1,
+                      "sim_orphan_prob": 0.2, "sim_default_lot_size": 50},
+        "broker": {"persist_session": False, "cache_ttl_sec": 5},
+    }
+    # every section+key must already be present in the GET payload
+    for sec, kv in changes.items():
+        assert sec in got, f"section {sec} missing from GET"
+        for k in kv:
+            assert k in got[sec], f"{sec}.{k} not exposed in GET"
+    res = client.post("/api/settings", json=changes).get_json()
+    assert res["success"] is True
+    back = client.get("/api/settings").get_json()
+    for sec, kv in changes.items():
+        for k, v in kv.items():
+            assert back[sec][k] == v, f"{sec}.{k} did not persist: {back[sec][k]!r} != {v!r}"
+
+
 def test_dry_run_does_not_transmit(tmp_path):
     app, broker = _app(tmp_path, mode="dry_run")
     client = app.test_client()

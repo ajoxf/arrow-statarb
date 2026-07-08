@@ -1305,15 +1305,39 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             xo = cfg.section("exits")
             rg = cfg.section("regime")
             rc = cfg.section("reconcile")
+            bk = cfg.section("broker")
             return jsonify({
                 "execution": {
+                    "product": ex.get("product", "NRML"),
+                    "cooldown_sec": ex.get("cooldown_sec", 300),
+                    "use_limit_orders": bool(ex.get("use_limit_orders", True)),
                     "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
                     "amend_step_pct": ex.get("amend_step_pct", 0.05),
                     "amend_interval_sec": ex.get("amend_interval_sec", 1.5),
                     "fill_timeout_sec": ex.get("fill_timeout_sec", 5),
+                    "poll_interval_sec": ex.get("poll_interval_sec", 0.4),
+                    "price_tick_size": ex.get("price_tick_size", 0.10),
+                    "limit_to_market": bool(ex.get("limit_to_market", True)),
+                    "unknown_status_grace_polls": ex.get("unknown_status_grace_polls", 3),
+                    "assume_fill_on_unknown": bool(ex.get("assume_fill_on_unknown", False)),
                     "max_exit_failures": ex.get("max_exit_failures", 0),
+                    "exit_retry_backoff_sec": ex.get("exit_retry_backoff_sec", 5),
+                    "exit_retry_backoff_max_sec": ex.get("exit_retry_backoff_max_sec", 60),
+                    "verify_flat_before_entry": bool(ex.get("verify_flat_before_entry", True)),
+                    "verify_flat_fail_open": bool(ex.get("verify_flat_fail_open", False)),
                     "stop_cooldown_sec": ex.get("stop_cooldown_sec", 0),
                     "z_reset_after_stop": bool(ex.get("z_reset_after_stop", False)),
+                    "sim_tick_size": ex.get("sim_tick_size", 0.10),
+                    "sim_spread_ticks": ex.get("sim_spread_ticks", 2.0),
+                    "sim_extra_slip_ticks": ex.get("sim_extra_slip_ticks", 0.0),
+                    "sim_slow_prob": ex.get("sim_slow_prob", 0.25),
+                    "sim_reject_prob": ex.get("sim_reject_prob", 0.0),
+                    "sim_orphan_prob": ex.get("sim_orphan_prob", 0.0),
+                    "sim_default_lot_size": ex.get("sim_default_lot_size", 75),
+                },
+                "broker": {
+                    "persist_session": bool(bk.get("persist_session", True)),
+                    "cache_ttl_sec": bk.get("cache_ttl_sec", 2),
                 },
                 "exits": {
                     "dollar_stop_inr": xo.get("dollar_stop_inr", 0),
@@ -1339,6 +1363,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "efficiency_ratio_max": rg.get("efficiency_ratio_max", 0.6),
                     "min_zero_crossings": rg.get("min_zero_crossings", 4),
                     "window_samples": rg.get("window_samples", 120),
+                    "vr_lag": rg.get("vr_lag", 5),
                 },
                 "reconcile": {
                     "enabled": bool(rc.get("enabled", False)),
@@ -1350,6 +1375,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "window_minutes": s.get("window_minutes", 120),
                     "min_signal_minutes": s.get("min_signal_minutes", 10),
                     "sample_interval_sec": s.get("sample_interval_sec", 0.5),
+                    "display_refresh_ms": s.get("display_refresh_ms", 500),
+                    "persist_window": bool(s.get("persist_window", True)),
+                    "resume_max_gap_min": s.get("resume_max_gap_min", 10),
+                    "persist_interval_sec": s.get("persist_interval_sec", 30),
                     "min_hold_sec": s.get("min_hold_sec", 0),
                     "entry_zscore": s.get("entry_zscore", 2.0),
                     "exit_zscore": s.get("exit_zscore", 0.0),
@@ -1374,6 +1403,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "enabled": bool(th.get("enabled", False)),
                     "start_hour": th.get("start_hour", 9), "start_min": th.get("start_min", 15),
                     "end_hour": th.get("end_hour", 15), "end_min": th.get("end_min", 30),
+                    "close_hour": th.get("close_hour", 15), "close_min": th.get("close_min", 30),
+                    "no_entry_buffer_min": th.get("no_entry_buffer_min", 0),
                 },
                 "filters": {
                     "enable_probability_filter": bool(f.get("enable_probability_filter", True)),
@@ -1387,6 +1418,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "min_win_probability": f.get("min_win_probability", 0.60),
                     "min_expected_value": f.get("min_expected_value", 0),
                     "time_stop_half_lives": f.get("time_stop_half_lives", 3.0),
+                    "half_life_min_sec": f.get("half_life_min_sec", 0),
+                    "half_life_max_sec": f.get("half_life_max_sec", 0),
                 },
                 "mode": {"paper_trading": cfg.is_dry_run},
             })
@@ -1401,13 +1434,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         raw = cfg.raw
         sig = raw.setdefault("signal", {})
+        sd = data.get("signal") or {}
+        if "persist_window" in sd:
+            sig["persist_window"] = bool(sd["persist_window"])
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
-                     ("sample_interval_sec", 0.5), ("min_hold_sec", 0.0),
+                     ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
+                     ("resume_max_gap_min", 10), ("persist_interval_sec", 30),
+                     ("min_hold_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
                      ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0)):
-            if k in (data.get("signal") or {}):
-                sig[k] = _num(data["signal"][k], d)
+            if k in sd:
+                sig[k] = _num(sd[k], d)
 
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
@@ -1422,7 +1460,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         td = data.get("trading_hours") or {}
         if "enabled" in td:
             th["enabled"] = bool(td["enabled"])
-        for k, d in (("start_hour", 9), ("start_min", 15), ("end_hour", 15), ("end_min", 30)):
+        for k, d in (("start_hour", 9), ("start_min", 15), ("end_hour", 15), ("end_min", 30),
+                     ("close_hour", 15), ("close_min", 30), ("no_entry_buffer_min", 0)):
             if k in td:
                 th[k] = _num(td[k], d)
 
@@ -1436,17 +1475,30 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("stt_pct", 0.02), ("other_cost_pct", 0.005),
                      ("capital_gains_pct", 0.0), ("min_edge_multiple", 0.0),
                      ("min_win_probability", 0.60), ("min_expected_value", 0.0),
-                     ("time_stop_half_lives", 3.0)):
+                     ("time_stop_half_lives", 3.0), ("half_life_min_sec", 0.0),
+                     ("half_life_max_sec", 0.0)):
             if k in fd:
                 fl[k] = _num(fd[k], d)
 
         ex = raw.setdefault("execution", {})
         ed = data.get("execution") or {}
-        if "z_reset_after_stop" in ed:
-            ex["z_reset_after_stop"] = bool(ed["z_reset_after_stop"])
+        for k in ("z_reset_after_stop", "use_limit_orders", "limit_to_market",
+                  "assume_fill_on_unknown", "verify_flat_before_entry",
+                  "verify_flat_fail_open"):
+            if k in ed:
+                ex[k] = bool(ed[k])
+        if "product" in ed:
+            ex["product"] = str(ed["product"] or "NRML")
         for k, d in (("limit_offset_pct", 0.05), ("amend_step_pct", 0.05),
                      ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0),
-                     ("max_exit_failures", 0), ("stop_cooldown_sec", 0.0)):
+                     ("poll_interval_sec", 0.4), ("price_tick_size", 0.10),
+                     ("unknown_status_grace_polls", 3), ("cooldown_sec", 300),
+                     ("exit_retry_backoff_sec", 5), ("exit_retry_backoff_max_sec", 60),
+                     ("max_exit_failures", 0), ("stop_cooldown_sec", 0.0),
+                     ("sim_tick_size", 0.10), ("sim_spread_ticks", 2.0),
+                     ("sim_extra_slip_ticks", 0.0), ("sim_slow_prob", 0.25),
+                     ("sim_reject_prob", 0.0), ("sim_orphan_prob", 0.0),
+                     ("sim_default_lot_size", 75)):
             if k in ed:
                 ex[k] = _num(ed[k], d)
 
@@ -1473,7 +1525,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             if k in rgd:
                 rg[k] = bool(rgd[k])
         for k, d in (("efficiency_ratio_max", 0.6), ("min_zero_crossings", 4),
-                     ("window_samples", 120)):
+                     ("window_samples", 120), ("vr_lag", 5)):
             if k in rgd:
                 rg[k] = _num(rgd[k], d)
 
@@ -1485,6 +1537,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("mismatch_threshold", 3), ("interval_sec", 20)):
             if k in rcd:
                 rc[k] = _num(rcd[k], d)
+
+        bk = raw.setdefault("broker", {})
+        bkd = data.get("broker") or {}
+        if "persist_session" in bkd:
+            bk["persist_session"] = bool(bkd["persist_session"])
+        if "cache_ttl_sec" in bkd:
+            bk["cache_ttl_sec"] = _num(bkd["cache_ttl_sec"], 2)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:

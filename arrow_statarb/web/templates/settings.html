@@ -64,6 +64,28 @@
                         <input type="number" step="0.1" class="form-control" id="s-zmax">
                         <div class="form-text">Regime-shift guard: refuse an entry when |z| exceeds this. 0 = off; keep below the stop.</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Dashboard Refresh (ms)</label>
+                        <input type="number" step="50" class="form-control" id="s-refresh">
+                        <div class="form-text">Live-price poll cadence on the dashboard (min 500 ms).</div>
+                    </div>
+                    <div class="col-12"><hr class="my-1"><small class="text-secondary">Window persistence — resume the warm-up across a quick restart</small></div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="s-persist" role="switch">
+                            <label class="form-check-label" for="s-persist">Persist window</label>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Resume Max Gap (min)</label>
+                        <input type="number" step="1" class="form-control" id="s-resumegap">
+                        <div class="form-text">Refuse resume if off longer than this (stale regime).</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Flush Interval (sec)</label>
+                        <input type="number" step="1" class="form-control" id="s-persistint">
+                        <div class="form-text">How often the window is saved to disk.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -145,6 +167,14 @@
                     <div class="col-3"><label class="form-label">End Hour</label><input type="number" class="form-control" id="th-eh"></div>
                     <div class="col-3"><label class="form-label">End Min</label><input type="number" class="form-control" id="th-em"></div>
                 </div>
+                <hr class="my-3">
+                <div class="form-text mb-2">Exchange close &amp; no-new-entry buffer — applies on NSE/BSE even when the window above is off.</div>
+                <div class="row g-3">
+                    <div class="col-4"><label class="form-label">Close Hour</label><input type="number" class="form-control" id="th-closeh"></div>
+                    <div class="col-4"><label class="form-label">Close Min</label><input type="number" class="form-control" id="th-closem"></div>
+                    <div class="col-4"><label class="form-label">No-entry buffer (min)</label><input type="number" class="form-control" id="th-buffer">
+                        <div class="form-text">No new entries within this many min of close. 0 = off.</div></div>
+                </div>
             </div>
         </div>
     </div>
@@ -224,6 +254,16 @@
                         <input type="number" step="0.1" class="form-control" id="b-tstop">
                         <div class="form-text">Exit after N × half-life if not reverted</div>
                     </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Half-life min (sec)</label>
+                        <input type="number" step="1" class="form-control" id="b-hlmin">
+                        <div class="form-text">Reject if too fast. 0 = none.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Half-life max (sec)</label>
+                        <input type="number" step="1" class="form-control" id="b-hlmax">
+                        <div class="form-text">Reject if too slow. 0 = none.</div>
+                    </div>
                     <div class="col-md-6 d-flex align-items-end">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="b-enabled" role="switch">
@@ -277,6 +317,150 @@
                             <label class="form-check-label" for="e-zreset">z-reset after stop</label>
                             <div class="form-text">Block same-dir re-entry until z re-enters the band.</div>
                         </div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Product</label>
+                        <select class="form-select" id="e-product">
+                            <option value="NRML">NRML (carry)</option>
+                            <option value="MIS">MIS (intraday)</option>
+                            <option value="CNC">CNC</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Cooldown (sec)</label>
+                        <input type="number" step="1" class="form-control" id="e-cooldown">
+                        <div class="form-text">Wait after any close before a new entry.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Price Tick Size</label>
+                        <input type="number" step="0.01" class="form-control" id="e-ticksize">
+                        <div class="form-text">Limit-price rounding fallback (NIFTY = 0.10).</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Poll Interval (sec)</label>
+                        <input type="number" step="0.1" class="form-control" id="e-poll">
+                        <div class="form-text">Order-status (fill) poll cadence.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Retry Backoff (sec)</label>
+                        <input type="number" step="1" class="form-control" id="e-backoff">
+                        <div class="form-text">Base delay between failed exit retries (×2ⁿ). 0 = none.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Retry Backoff Max (sec)</label>
+                        <input type="number" step="1" class="form-control" id="e-backoffmax">
+                        <div class="form-text">Cap on the backoff delay.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Unknown-status grace polls</label>
+                        <input type="number" step="1" class="form-control" id="e-unkgrace">
+                        <div class="form-text">Tolerate this many UNKNOWN reads before deciding.</div>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-uselimit" role="switch">
+                            <label class="form-check-label" for="e-uselimit">Use limit orders</label>
+                            <div class="form-text">Off = MARKET legs.</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-tomarket" role="switch">
+                            <label class="form-check-label" for="e-tomarket">Limit → Market on timeout</label>
+                            <div class="form-text">Keep on so exits always complete.</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-verifyflat" role="switch">
+                            <label class="form-check-label" for="e-verifyflat">Verify flat before entry</label>
+                            <div class="form-text">Skip entry if a leg already has a position.</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-verifyfailopen" role="switch">
+                            <label class="form-check-label" for="e-verifyfailopen">Verify-flat fail-open</label>
+                            <div class="form-text">If positions can't be read: on = allow, off = block (safe).</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="e-assumefill" role="switch">
+                            <label class="form-check-label" for="e-assumefill">Assume fill on UNKNOWN</label>
+                            <div class="form-text text-warning">Only for a broker with no status API.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Live-Sim Broker (paper fills) ─────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-cpu me-2"></i>Live-Sim Broker (paper fills)</div>
+            <div class="card-body">
+                <div class="alert alert-secondary py-2 small mb-3">
+                    The simulated broker the REAL executor runs against in <strong>live_sim</strong> mode —
+                    no real orders. Set the widths/odds to mimic your legs' behaviour.
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Tick Size</label>
+                        <input type="number" step="0.01" class="form-control" id="sim-tick">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Spread (ticks)</label>
+                        <input type="number" step="0.5" class="form-control" id="sim-spread">
+                        <div class="form-text">Synthetic bid-ask width when no live depth.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Extra Slip (ticks)</label>
+                        <input type="number" step="0.5" class="form-control" id="sim-extraslip">
+                        <div class="form-text">Adverse slip beyond the touch.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Slow-fill prob</label>
+                        <input type="number" step="0.05" class="form-control" id="sim-slow">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Reject prob</label>
+                        <input type="number" step="0.05" class="form-control" id="sim-reject">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Orphan prob</label>
+                        <input type="number" step="0.05" class="form-control" id="sim-orphan">
+                        <div class="form-text">Chance a leg never fills.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Default Lot Size</label>
+                        <input type="number" step="1" class="form-control" id="sim-lotsize">
+                        <div class="form-text">Lot size when no live broker is connected.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Broker / Connection ───────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-plug me-2"></i>Broker / Connection</div>
+            <div class="card-body">
+                <div class="form-text mb-3">Credentials come from environment variables (.env) and are never stored here.</div>
+                <div class="row g-3">
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="bk-persist" role="switch">
+                            <label class="form-check-label" for="bk-persist">Persist session token</label>
+                            <div class="form-text">Reuse the ~24h Arrow token across restarts (skips 2FA).</div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Positions cache TTL (sec)</label>
+                        <input type="number" step="1" class="form-control" id="bk-cache">
+                        <div class="form-text">How often positions/funds refresh from Arrow.</div>
                     </div>
                 </div>
             </div>
@@ -400,6 +584,12 @@
                         <input type="number" step="0.05" class="form-control" id="rg-er"></div>
                     <div class="col-md-6"><label class="form-label">Min Zero-Crossings</label>
                         <input type="number" step="1" class="form-control" id="rg-zc"></div>
+                    <div class="col-md-6"><label class="form-label">Window (samples)</label>
+                        <input type="number" step="1" class="form-control" id="rg-window">
+                        <div class="form-text">Trailing window for the metrics.</div></div>
+                    <div class="col-md-6"><label class="form-label">Variance-Ratio lag</label>
+                        <input type="number" step="1" class="form-control" id="rg-vrlag">
+                        <div class="form-text">Diagnostic VR lag.</div></div>
                 </div>
             </div>
         </div>
@@ -472,6 +662,10 @@
         _set('s-zdiv', s.signal.max_entry_z_divergence);
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
+        _set('s-refresh', s.signal.display_refresh_ms);
+        _setChk('s-persist', s.signal.persist_window);
+        _set('s-resumegap', s.signal.resume_max_gap_min);
+        _set('s-persistint', s.signal.persist_interval_sec);
 
         _set('r-lots', s.risk.lots_per_trade);
         _set('r-maxleg', s.risk.max_contracts_per_leg);
@@ -487,6 +681,8 @@
         _setChk('th-enabled', s.trading_hours.enabled);
         _set('th-sh', s.trading_hours.start_hour); _set('th-sm', s.trading_hours.start_min);
         _set('th-eh', s.trading_hours.end_hour);   _set('th-em', s.trading_hours.end_min);
+        _set('th-closeh', s.trading_hours.close_hour); _set('th-closem', s.trading_hours.close_min);
+        _set('th-buffer', s.trading_hours.no_entry_buffer_min);
 
         _setChk('m-paper', s.mode.paper_trading);
 
@@ -500,6 +696,8 @@
         _set('b-other', s.filters.other_cost_pct);
         _set('b-cgt', s.filters.capital_gains_pct);
         _set('b-edgemult', s.filters.min_edge_multiple);
+        _set('b-hlmin', s.filters.half_life_min_sec);
+        _set('b-hlmax', s.filters.half_life_max_sec);
         _setChk('b-enabled', s.filters.enable_probability_filter);
 
         if (s.execution) {
@@ -509,6 +707,29 @@
             _set('e-timeout', s.execution.fill_timeout_sec);
             _set('e-stopcd', s.execution.stop_cooldown_sec);
             _setChk('e-zreset', s.execution.z_reset_after_stop);
+            _set('e-product', s.execution.product);
+            _set('e-cooldown', s.execution.cooldown_sec);
+            _set('e-ticksize', s.execution.price_tick_size);
+            _set('e-poll', s.execution.poll_interval_sec);
+            _set('e-backoff', s.execution.exit_retry_backoff_sec);
+            _set('e-backoffmax', s.execution.exit_retry_backoff_max_sec);
+            _set('e-unkgrace', s.execution.unknown_status_grace_polls);
+            _setChk('e-uselimit', s.execution.use_limit_orders);
+            _setChk('e-tomarket', s.execution.limit_to_market);
+            _setChk('e-verifyflat', s.execution.verify_flat_before_entry);
+            _setChk('e-verifyfailopen', s.execution.verify_flat_fail_open);
+            _setChk('e-assumefill', s.execution.assume_fill_on_unknown);
+            _set('sim-tick', s.execution.sim_tick_size);
+            _set('sim-spread', s.execution.sim_spread_ticks);
+            _set('sim-extraslip', s.execution.sim_extra_slip_ticks);
+            _set('sim-slow', s.execution.sim_slow_prob);
+            _set('sim-reject', s.execution.sim_reject_prob);
+            _set('sim-orphan', s.execution.sim_orphan_prob);
+            _set('sim-lotsize', s.execution.sim_default_lot_size);
+        }
+        if (s.broker) {
+            _setChk('bk-persist', s.broker.persist_session);
+            _set('bk-cache', s.broker.cache_ttl_sec);
         }
         if (s.exits) {
             _set('x-dstop', s.exits.dollar_stop_inr);
@@ -533,6 +754,8 @@
             _setChk('rg-dirfilter', s.regime.trend_direction_filter);
             _set('rg-er', s.regime.efficiency_ratio_max);
             _set('rg-zc', s.regime.min_zero_crossings);
+            _set('rg-window', s.regime.window_samples);
+            _set('rg-vrlag', s.regime.vr_lag);
         }
         if (s.reconcile) {
             _setChk('rc-enabled', s.reconcile.enabled);
@@ -562,6 +785,10 @@
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
                 max_entry_spread_divergence: +document.getElementById('s-sdiv').value,
                 max_entry_zscore: +document.getElementById('s-zmax').value,
+                display_refresh_ms: +document.getElementById('s-refresh').value,
+                persist_window: document.getElementById('s-persist').checked,
+                resume_max_gap_min: +document.getElementById('s-resumegap').value,
+                persist_interval_sec: +document.getElementById('s-persistint').value,
             },
             risk: {
                 lots_per_trade: +document.getElementById('r-lots').value,
@@ -578,6 +805,8 @@
                 enabled: document.getElementById('th-enabled').checked,
                 start_hour: +document.getElementById('th-sh').value, start_min: +document.getElementById('th-sm').value,
                 end_hour: +document.getElementById('th-eh').value, end_min: +document.getElementById('th-em').value,
+                close_hour: +document.getElementById('th-closeh').value, close_min: +document.getElementById('th-closem').value,
+                no_entry_buffer_min: +document.getElementById('th-buffer').value,
             },
             filters: {
                 enable_probability_filter: document.getElementById('b-enabled').checked,
@@ -591,6 +820,8 @@
                 other_cost_pct: +document.getElementById('b-other').value,
                 capital_gains_pct: +document.getElementById('b-cgt').value,
                 min_edge_multiple: +document.getElementById('b-edgemult').value,
+                half_life_min_sec: +document.getElementById('b-hlmin').value,
+                half_life_max_sec: +document.getElementById('b-hlmax').value,
             },
             execution: {
                 limit_offset_pct: +document.getElementById('e-offset').value,
@@ -600,6 +831,29 @@
                 max_exit_failures: +document.getElementById('x-maxfail').value,
                 stop_cooldown_sec: +document.getElementById('e-stopcd').value,
                 z_reset_after_stop: document.getElementById('e-zreset').checked,
+                product: document.getElementById('e-product').value,
+                cooldown_sec: +document.getElementById('e-cooldown').value,
+                price_tick_size: +document.getElementById('e-ticksize').value,
+                poll_interval_sec: +document.getElementById('e-poll').value,
+                exit_retry_backoff_sec: +document.getElementById('e-backoff').value,
+                exit_retry_backoff_max_sec: +document.getElementById('e-backoffmax').value,
+                unknown_status_grace_polls: +document.getElementById('e-unkgrace').value,
+                use_limit_orders: document.getElementById('e-uselimit').checked,
+                limit_to_market: document.getElementById('e-tomarket').checked,
+                verify_flat_before_entry: document.getElementById('e-verifyflat').checked,
+                verify_flat_fail_open: document.getElementById('e-verifyfailopen').checked,
+                assume_fill_on_unknown: document.getElementById('e-assumefill').checked,
+                sim_tick_size: +document.getElementById('sim-tick').value,
+                sim_spread_ticks: +document.getElementById('sim-spread').value,
+                sim_extra_slip_ticks: +document.getElementById('sim-extraslip').value,
+                sim_slow_prob: +document.getElementById('sim-slow').value,
+                sim_reject_prob: +document.getElementById('sim-reject').value,
+                sim_orphan_prob: +document.getElementById('sim-orphan').value,
+                sim_default_lot_size: +document.getElementById('sim-lotsize').value,
+            },
+            broker: {
+                persist_session: document.getElementById('bk-persist').checked,
+                cache_ttl_sec: +document.getElementById('bk-cache').value,
             },
             exits: {
                 dollar_stop_inr: +document.getElementById('x-dstop').value,
@@ -624,6 +878,8 @@
                 trend_direction_filter: document.getElementById('rg-dirfilter').checked,
                 efficiency_ratio_max: +document.getElementById('rg-er').value,
                 min_zero_crossings: +document.getElementById('rg-zc').value,
+                window_samples: +document.getElementById('rg-window').value,
+                vr_lag: +document.getElementById('rg-vrlag').value,
             },
             reconcile: {
                 enabled: document.getElementById('rc-enabled').checked,
