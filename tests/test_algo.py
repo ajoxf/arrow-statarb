@@ -736,3 +736,13 @@ def test_lifecycle_extremes_tracked_and_passed_on_close():
     assert captured["peak_pnl"] == 50.0
     assert captured["trough_pnl"] == -30.0
     assert "peak_min" in captured and "trough_min" in captured
+
+
+def test_live_net_pnl_applies_cgt_and_other():
+    algo, state, calls = _pnl_make({"lot_multiplier": 1.0, "other_cost_pct": 0.0,
+                                    "capital_gains_pct": 20.0})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG @0
+    algo._pos["entry_leg_a"] = 100.0
+    state["sig"] = _sig(-1.0, spread=100.0); algo._tick()        # gross +100
+    # no other cost; CGT 20% on +100 → net 80
+    assert abs(algo.get_state()["net_pnl"] - 80.0) < 0.01

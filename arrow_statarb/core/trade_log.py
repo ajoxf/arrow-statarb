@@ -80,7 +80,8 @@ class TradeLog:
                leg_b_price: Optional[float] = None, name: str = "",
                exit_reason: str = "",
                decision_spread: Optional[float] = None,
-               stt_pct: float = 0.0,
+               stt_pct: float = 0.0, other_cost_pct: float = 0.0,
+               capital_gains_pct: float = 0.0,
                peak_pnl: Optional[float] = None, trough_pnl: Optional[float] = None,
                peak_min: Optional[float] = None, trough_min: Optional[float] = None) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
@@ -115,6 +116,8 @@ class TradeLog:
             "slippage_pnl": 0.0,     # realized − edge: cost paid to execution (≤0 = adverse)
             "brokerage": brokerage,
             "stt": 0.0,              # Securities Transaction Tax (settled on CLOSE)
+            "other_cost": 0.0,       # exchange txn + GST + SEBI + stamp
+            "cgt": 0.0,              # Capital-Gains Tax (haircut on profit)
             "net_pnl": 0.0,
             "status": status,          # DRY-RUN | LIVE-SIM | LIVE | rejected
             "dry_run": dry_run,
@@ -143,15 +146,23 @@ class TradeLog:
                             # STT: sell-side % of notional × the two sells (one leg
                             # at entry, the other at exit); leg prices ≈ equal, so a
                             # representative leg price each side is a good estimate.
-                            stt = 0.0
-                            if stt_pct and stt_pct > 0:
-                                p_in = prev.get("leg_a_price") or prev.get("leg_b_price") or 0
-                                p_out = leg_a_price or leg_b_price or 0
-                                stt = round((stt_pct / 100.0) * lots * mult
-                                            * (abs(float(p_in)) + abs(float(p_out))), 2)
+                            p_in = abs(float(prev.get("leg_a_price") or prev.get("leg_b_price") or 0))
+                            p_out = abs(float(leg_a_price or leg_b_price or 0))
+                            qty = lots * mult
+                            stt = other = 0.0
+                            if stt_pct and stt_pct > 0:                    # 2 sells / round trip
+                                stt = round((stt_pct / 100.0) * qty * (p_in + p_out), 2)
+                            if other_cost_pct and other_cost_pct > 0:      # 4 leg turnovers
+                                other = round((other_cost_pct / 100.0) * qty * 2.0 * (p_in + p_out), 2)
                             rec["stt"] = stt
-                            rec["net_pnl"] = round(rec["spread_pnl"] - brokerage
-                                                   - prev.get("brokerage", 0) - stt, 2)
+                            rec["other_cost"] = other
+                            pre_tax = (rec["spread_pnl"] - brokerage
+                                       - prev.get("brokerage", 0) - stt - other)
+                            cgt = 0.0
+                            if capital_gains_pct and capital_gains_pct > 0 and pre_tax > 0:
+                                cgt = round((capital_gains_pct / 100.0) * pre_tax, 2)
+                            rec["cgt"] = cgt
+                            rec["net_pnl"] = round(pre_tax - cgt, 2)
                             # Decompose realized P&L into signal "edge" (what the
                             # decision spreads implied) and "slippage" (execution
                             # cost = realized − edge). Only when both decision
@@ -247,16 +258,19 @@ class TradeLog:
                       if r.get("action") == "CLOSE" and r.get("entry_spread") is not None][-n:]
         if not closes:
             return {"n": 0, "avg_realized_cost": 0.0, "avg_brokerage": 0.0,
-                    "avg_stt": 0.0, "avg_slippage": 0.0}
-        brk = stt = slip = 0.0
+                    "avg_stt": 0.0, "avg_other": 0.0, "avg_cgt": 0.0, "avg_slippage": 0.0}
+        brk = stt = other = cgt = slip = 0.0
         for r in closes:
             brk += float(r.get("brokerage", 0) or 0) * 2.0          # entry + exit
             stt += float(r.get("stt", 0) or 0)
+            other += float(r.get("other_cost", 0) or 0)
+            cgt += float(r.get("cgt", 0) or 0)
             slip += abs(float(r.get("slippage_pnl", 0) or 0))
         k = len(closes)
         return {"n": k, "avg_brokerage": round(brk / k, 2), "avg_stt": round(stt / k, 2),
+                "avg_other": round(other / k, 2), "avg_cgt": round(cgt / k, 2),
                 "avg_slippage": round(slip / k, 2),
-                "avg_realized_cost": round((brk + stt + slip) / k, 2)}
+                "avg_realized_cost": round((brk + stt + other + cgt + slip) / k, 2)}
 
     def round_trips(self) -> Dict:
         """Completed trades (each settled CLOSE carries full entry+exit detail)

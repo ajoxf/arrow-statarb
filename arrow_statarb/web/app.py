@@ -351,6 +351,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
+                             other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
+                             capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              name=m["name"])
         return res
 
@@ -381,6 +383,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
+                             other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
+                             capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              peak_pnl=peak_pnl, trough_pnl=trough_pnl,
                              peak_min=peak_min, trough_min=trough_min,
                              name=m["name"], exit_reason=reason)
@@ -586,6 +590,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
             "hard_time_stop_mult": float(xo.get("hard_time_stop_mult", 0) or 0),
             "min_edge_multiple": float(f.get("min_edge_multiple", 0) or 0),
+            "other_cost_pct": float(f.get("other_cost_pct", 0) or 0),
+            "capital_gains_pct": float(f.get("capital_gains_pct", 0) or 0),
             # ── Tier B: scale-invariant exit levels ──
             "profit_target_sigma_frac": float(xo.get("profit_target_sigma_frac", 0) or 0),
             "tp_capital_pct": float(xo.get("tp_capital_pct", 0) or 0),
@@ -752,9 +758,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         brk = float(cfg.get("filters.brokerage_per_lot", 20) or 0) * lots * 4
         slp = float(cfg.get("filters.slippage_per_lot", 5) or 0) * lots * 4
         stt_pct = float(cfg.get("filters.stt_pct", 0) or 0) / 100.0
+        other_pct = float(cfg.get("filters.other_cost_pct", 0) or 0) / 100.0
         la, _ = _leg_prices()
-        stt = (2 * stt_pct * float(la) * lots * lot_m) if la else 0.0
-        modeled = round(brk + slp + stt, 2)
+        notional = float(la) * lots * lot_m if la else 0.0
+        stt = 2 * stt_pct * notional
+        other = 4 * other_pct * notional
+        modeled = round(brk + slp + stt + other, 2)
         rc = realized.get("avg_realized_cost", 0.0)
         alarm = bool(rc > 0 and (modeled >= 2 * rc or rc >= 2 * modeled))
         return jsonify({"modeled_cost": modeled, "realized": realized, "alarm": alarm})
@@ -1372,6 +1381,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "brokerage_per_lot": f.get("brokerage_per_lot", 20),
                     "slippage_per_lot": f.get("slippage_per_lot", 5),
                     "stt_pct": f.get("stt_pct", 0.02),
+                    "other_cost_pct": f.get("other_cost_pct", 0.005),
+                    "capital_gains_pct": f.get("capital_gains_pct", 0),
                     "min_edge_multiple": f.get("min_edge_multiple", 0),
                     "min_win_probability": f.get("min_win_probability", 0.60),
                     "min_expected_value": f.get("min_expected_value", 0),
@@ -1422,7 +1433,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if "commission_basis" in fd:
             fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
         for k, d in (("brokerage_per_lot", 20.0), ("slippage_per_lot", 5.0),
-                     ("stt_pct", 0.02), ("min_edge_multiple", 0.0),
+                     ("stt_pct", 0.02), ("other_cost_pct", 0.005),
+                     ("capital_gains_pct", 0.0), ("min_edge_multiple", 0.0),
                      ("min_win_probability", 0.60), ("min_expected_value", 0.0),
                      ("time_stop_half_lives", 3.0)):
             if k in fd:

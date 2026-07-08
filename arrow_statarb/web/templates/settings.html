@@ -13,9 +13,9 @@
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-6">
-                        <label class="form-label">Signal Window <span class="badge bg-secondary">min</span></label>
+                        <label class="form-label">Collection Window <span class="badge bg-secondary">min</span></label>
                         <input type="number" step="1" class="form-control" id="s-window">
-                        <div class="form-text">Rolling window for mean / std / z (data-collection size)</div>
+                        <div class="form-text">Rolling lookback for mean / std / z. Keep a little above the warm-up below (it trims at exactly its length). ~150 for a 2h warm-up.</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Tick Interval (sec)</label>
@@ -23,9 +23,9 @@
                         <div class="form-text">Price update rate (0.5 s default)</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label">Min History Before Trading <span class="badge bg-secondary">min</span></label>
+                        <label class="form-label">Warm-up before trading <span class="badge bg-secondary">min</span></label>
                         <input type="number" step="1" class="form-control" id="s-minhist">
-                        <div class="form-text">Signal must collect this much history before any trade</div>
+                        <div class="form-text">Collect this much data before ANY trade (the "ready" gate). 120 = 2 hours. Must be below the Collection Window.</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Min Hold (sec)</label>
@@ -195,9 +195,19 @@
                         <div class="form-text">Securities Transaction Tax, sell-side. NSE futures ≈ 0.02.</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">Other Charges (% notional)</label>
+                        <input type="number" step="0.001" class="form-control" id="b-other">
+                        <div class="form-text">Exchange txn + GST + SEBI + stamp, on all 4 leg turnovers. Calibrate to your contract note.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Capital-Gains Tax (%)</label>
+                        <input type="number" step="0.5" class="form-control" id="b-cgt">
+                        <div class="form-text">Haircut on positive net profit only. Makes break-even tax-aware. 0 = off.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Min Edge Multiple (× cost)</label>
                         <input type="number" step="0.1" class="form-control" id="b-edgemult">
-                        <div class="form-text">Dead-day gate: block entry unless expected capture ≥ this × round-trip cost. ~1.5 typical. 0 = off.</div>
+                        <div class="form-text">"Only enter when profitable": block entry unless after-tax capture ≥ this × round-trip cost. ~1.5 typical. 0 = off.</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Min Win Probability (%)</label>
@@ -486,6 +496,8 @@
         _set('b-ev', s.filters.min_expected_value);
         _set('b-tstop', s.filters.time_stop_half_lives);
         _set('b-stt', s.filters.stt_pct);
+        _set('b-other', s.filters.other_cost_pct);
+        _set('b-cgt', s.filters.capital_gains_pct);
         _set('b-edgemult', s.filters.min_edge_multiple);
         _setChk('b-enabled', s.filters.enable_probability_filter);
 
@@ -575,6 +587,8 @@
                 min_expected_value: +document.getElementById('b-ev').value,
                 time_stop_half_lives: +document.getElementById('b-tstop').value,
                 stt_pct: +document.getElementById('b-stt').value,
+                other_cost_pct: +document.getElementById('b-other').value,
+                capital_gains_pct: +document.getElementById('b-cgt').value,
                 min_edge_multiple: +document.getElementById('b-edgemult').value,
             },
             execution: {

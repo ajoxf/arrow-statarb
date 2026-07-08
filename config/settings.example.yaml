@@ -40,10 +40,12 @@ instruments:
 
 # Signal — the single server-side source of truth (algo AND dashboard read it).
 signal:
-  window_minutes: 120         # rolling window for mean/std/z (data-collection size)
+  window_minutes: 150         # rolling window for mean/std/z (a little larger than
+                              # the warm-up so a full 2h span is reliably reachable —
+                              # the window trims at exactly its length)
   sample_interval_sec: 0.5    # how often the server samples prices
   display_refresh_ms: 500     # dashboard live-price poll cadence (min 500ms)
-  min_signal_minutes: 30      # history required before any trade (ready gate)
+  min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
   # Window persistence: save the rolling window to data/signal_window.json so a
   # quick restart resumes the warm-up instead of re-collecting it. Restore is
   # REFUSED if the legs changed or the newest saved sample is older than
@@ -89,12 +91,21 @@ filters:
                               # SELL side. A calendar round trip has 2 sells (one
                               # leg at entry, the other at exit) → charged into net
                               # P&L and break-even. 0 = off. (NSE futures ≈ 0.02%.)
-  min_edge_multiple: 0        # dead-day gate: block an entry unless the expected
-                              # capture (target_fraction × |z| × σ × qty) is ≥ this ×
-                              # the round-trip cost (brokerage+slippage+STT). ~1.5
-                              # typical; 0 = off. Audit vs /api/cost-audit monthly —
-                              # an inflated cost model makes every trade look
-                              # unprofitable and jams this gate.
+  other_cost_pct: 0.005       # catch-all % of notional for exchange txn charges +
+                              # GST + SEBI + stamp duty, charged on all 4 leg
+                              # turnovers of a round trip. Calibrate to your real
+                              # contract note. 0 = off.
+  capital_gains_pct: 0        # Capital-Gains / Income Tax %, applied as a haircut on
+                              # POSITIVE net profit only (losses aren't taxed). Makes
+                              # break-even and the profit gates account for tax. NOTE:
+                              # F&O is business income in India (slab rate); this is a
+                              # per-trade approximation. 0 = off.
+  min_edge_multiple: 1.5      # dead-day gate: only take a trade whose expected
+                              # AFTER-TAX capture (target_fraction × |z| × σ × qty,
+                              # less CGT) is ≥ this × the full round-trip cost
+                              # (brokerage+slippage+STT+other). This is "only enter
+                              # when it can be profitable". 0 = off. Audit modeled vs
+                              # realized cost monthly via /api/cost-audit.
   time_stop_half_lives: 3.0   # exit if held longer than this × half-life
   half_life_min_sec: 0        # allowed-range lower bound (0 = none)
   half_life_max_sec: 0        # allowed-range upper bound (0 = none)

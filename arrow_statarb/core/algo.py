@@ -276,15 +276,22 @@ class ArrowAutoTrader:
                   else (entry - cur_spread))
         gross = change * lots * lot_mult
         rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
-        # STT (Securities Transaction Tax): sell-side % of notional. A calendar
-        # round trip has TWO sells (one leg at entry, the other at exit), each on
-        # ~one leg's notional (price × lots × lot_size). Configurable, 0 = off.
-        stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
-        if stt_pct > 0:
-            ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
-            if ref:
-                rt_fees += 2.0 * stt_pct * float(ref) * lots * lot_mult
-        return gross - rt_fees
+        # STT (sell-side, 2 sells/round trip) + other charges (exchange txn + GST
+        # + SEBI + stamp, ×4 leg turnovers) — both %-of-notional. Slippage is NOT
+        # re-added here: it is already embedded in the entry FILL spread.
+        ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
+        if ref:
+            notional = float(ref) * lots * lot_mult
+            rt_fees += 2.0 * (float(p.get("stt_pct", 0) or 0) / 100.0) * notional
+            rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
+        net = gross - rt_fees
+        # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
+        # (losses aren't taxed) — so break-even and the profit gates account for
+        # tax, not just transaction costs. Approximation: applied per-trade.
+        cgt_pct = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        if cgt_pct > 0 and net > 0:
+            net -= cgt_pct * net
+        return net
 
     def _reversion_allowed(self, net_pnl: Optional[float], p: Dict,
                            held_sec: float = 0.0, max_hold_sec: float = 0.0) -> bool:
@@ -312,43 +319,53 @@ class ArrowAutoTrader:
 
     def _round_trip_cost(self, p: Dict, lots: Optional[int] = None,
                          ref_price: Optional[float] = None) -> float:
-        """Estimated round-trip cost in ₹: brokerage + slippage (both ×2 legs
-        ×2 in/out) + STT (2 sells × %-of-notional). Defaults to the open
-        position's size and entry leg price; pass ``lots``/``ref_price`` for a
-        pre-entry (prospective) estimate."""
+        """Estimated round-trip TRANSACTION cost in ₹: brokerage + slippage
+        (both ×2 legs ×2 in/out) + STT (2 sells × %-of-notional) + a catch-all
+        'other charges' % (exchange txn + GST + SEBI + stamp) on all four leg
+        turnovers. Excludes Capital-Gains Tax (that's a haircut on PROFIT, not a
+        transaction cost — applied in the P&L). Defaults to the open position's
+        size/entry leg price; pass ``lots``/``ref_price`` for a pre-entry
+        (prospective) estimate."""
         pos = self._pos or {}
         lots = int(lots if lots is not None
                    else pos.get("lots", p.get("lots", 1)) or 1)
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
         cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
-        stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
         ref = (ref_price if ref_price is not None
                else pos.get("entry_leg_a") or pos.get("entry_leg_b"))
-        if stt_pct > 0 and ref:
-            cost += 2.0 * stt_pct * float(ref) * lots * lot_m
+        if ref:
+            notional = float(ref) * lots * lot_m
+            stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
+            other_pct = float(p.get("other_cost_pct", 0) or 0) / 100.0
+            cost += 2.0 * stt_pct * notional          # STT: 2 sells / round trip
+            cost += 4.0 * other_pct * notional         # other charges: all 4 leg turnovers
         return cost
 
     def _edge_entry_block(self, z: float, std: float, lots: int,
                           sig: Dict, p: Dict) -> Optional[str]:
-        """The dead-day gate, evaluated BEFORE entering. Two arithmetic checks
-        against the prospective round-trip cost (brokerage+slippage+STT at this
-        size and leg price):
-          • edge filter — expected capture (target_fraction × |z| × σ × qty)
-            must be ≥ min_edge_multiple × cost;
+        """The dead-day gate, evaluated BEFORE entering — "only take a trade I
+        know can be profitable after ALL costs". Checks against the prospective
+        round-trip cost (brokerage + slippage + STT + other charges at this size
+        and leg price), with the expected capture haircut by Capital-Gains Tax:
+          • edge filter — after-tax expected capture (target_fraction × |z| × σ ×
+            qty, less CGT) must be ≥ min_edge_multiple × cost;
           • cost-floor sanity — if cost_floor_mult × cost exceeds the plausible
             FULL reversion (|z| × σ × qty), the trade can never win: block it.
         Returns a human-readable block reason, or None to proceed."""
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
         cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"))
         full_move = abs(z) * float(std) * lots * lot_m
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
         min_mult = float(p.get("min_edge_multiple", 0) or 0)
         if min_mult > 0:
-            tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 1.0
-            capture = tfrac * full_move
+            # target fraction: the exit's σ-fraction if set, else a conservative
+            # 0.5 (you rarely capture the full |z|×σ move).
+            tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
+            capture = tfrac * full_move * (1.0 - cgt)         # net of tax
             if capture < min_mult * cost:
-                return (f"edge filter: capture ₹{capture:.0f} < "
-                        f"{min_mult:g}× cost ₹{cost:.0f}")
+                return (f"edge filter: after-tax capture ₹{capture:.0f} < "
+                        f"{min_mult:g}× cost ₹{cost:.0f} — not worth it")
         cfm = float(p.get("cost_floor_mult", 0) or 0)
         if cfm > 0 and cfm * cost > full_move:
             return (f"cost floor ₹{cfm * cost:.0f} exceeds plausible reversion "

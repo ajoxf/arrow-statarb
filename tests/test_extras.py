@@ -368,3 +368,27 @@ def test_trade_log_outcome_tags_and_lifecycle(tmp_path):
     rec2 = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=95.0, dry_run=False,
                      status="LIVE", zscore=0.1, exit_reason="dollar_stop")
     assert rec2["outcome"] == "STOPPED AFTER FULL REVERSION — price never paid"
+
+
+def test_trade_log_other_cost_and_cgt(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=0.0, dry_run=False,
+              status="LIVE", lot_size=1, leg_a_price=100.0, leg_b_price=100.0)
+    rec = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=1000.0, dry_run=False,
+                    status="LIVE", lot_size=1, leg_a_price=100.0, leg_b_price=100.0,
+                    other_cost_pct=0.005, capital_gains_pct=15.0)
+    assert rec["spread_pnl"] == 1000.0
+    # other = 0.005% × qty(1) × 2 × (100+100) = 0.02
+    assert rec["other_cost"] == round(0.00005 * 1 * 2 * 200, 2)
+    pre_tax = 1000.0 - rec["other_cost"]
+    assert rec["cgt"] == round(0.15 * pre_tax, 2)           # 15% haircut on profit
+    assert rec["net_pnl"] == round(pre_tax - rec["cgt"], 2)
+
+
+def test_trade_log_cgt_not_charged_on_loss(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=100.0, dry_run=False,
+              status="LIVE", lot_size=1)
+    rec = tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=90.0, dry_run=False,
+                    status="LIVE", lot_size=1, capital_gains_pct=15.0)
+    assert rec["net_pnl"] == -10.0 and rec["cgt"] == 0.0     # losses aren't taxed
