@@ -590,6 +590,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
             "hard_time_stop_mult": float(xo.get("hard_time_stop_mult", 0) or 0),
             "min_edge_multiple": float(f.get("min_edge_multiple", 0) or 0),
+            "half_life_min_sec": float(f.get("half_life_min_sec", 0) or 0),
+            "half_life_max_sec": float(f.get("half_life_max_sec", 0) or 0),
             "other_cost_pct": float(f.get("other_cost_pct", 0) or 0),
             "capital_gains_pct": float(f.get("capital_gains_pct", 0) or 0),
             # ── Tier B: scale-invariant exit levels ──

@@ -133,6 +133,23 @@ class SpreadExecutor:
         failed = [l for l in legs if not l.complete]
 
         if not failed:
+            # Slippage budget (ENTRY only — an exit must always complete, so we
+            # never unwind it for slippage). If the realized fill slipped more
+            # than ``max_slippage_pct`` of notional vs the LTP-at-placement
+            # baseline, abort the entry and flatten both legs — better a missed
+            # trade than one that starts underwater beyond the budget. 0 = off.
+            max_slip = float(p.get("max_slippage_pct", 0) or 0)
+            if verify_flat and max_slip > 0:
+                slip_pct = self._realized_slippage_pct(legs)
+                if slip_pct is not None and slip_pct > max_slip:
+                    recovered = self._recover_orphan(broker, legs, p)
+                    msg = (f"slippage abort on {label}: realized {slip_pct:.3f}% > "
+                           f"budget {max_slip:.3f}% — entry unwound. "
+                           + ("Flattened both legs." if recovered
+                              else "UNWIND FAILED — check positions NOW."))
+                    logger.error("{}", msg)
+                    return dict(self._fail(legs, msg, recovered=recovered,
+                                           slippage_abort=True), elapsed_sec=elapsed)
             ids = ", ".join(str(l.order_id) for l in legs)
             unconf = any(l.unconfirmed for l in legs)
             tag = " (fills unconfirmed)" if unconf else ""
@@ -354,6 +371,27 @@ class SpreadExecutor:
                 break
             self._sleep(poll)
 
+    @staticmethod
+    def _realized_slippage_pct(legs: List[LegOrder]) -> Optional[float]:
+        """Adverse fill slippage of the whole spread as a % of leg notional:
+        Σ adverse(₹) / Σ ref_notional(₹) × 100. Adverse counts only fills WORSE
+        than the LTP-at-placement baseline (a buy above / a sell below ref);
+        price improvement doesn't offset a bad leg. Returns None if no leg has
+        both a reference and an average fill price to compare."""
+        adverse = 0.0
+        notional = 0.0
+        seen = False
+        for leg in legs:
+            if not leg.ref_price or not leg.avg_price or leg.filled <= 0:
+                continue
+            seen = True
+            sign = 1.0 if leg.side == "buy" else -1.0
+            adverse += max(0.0, sign * (leg.avg_price - leg.ref_price)) * leg.filled
+            notional += leg.ref_price * leg.filled
+        if not seen or notional <= 0:
+            return None
+        return 100.0 * adverse / notional
+
     # ── orphan recovery / pre-entry verification ─────────────────────────────
     def _confirm_fill(self, broker, order_id: str, p: Dict) -> Optional[bool]:
         """Poll an order to confirm it actually filled. Returns True (COMPLETE),
@@ -443,12 +481,13 @@ class SpreadExecutor:
     @staticmethod
     def _ok(legs: List[LegOrder], message: str) -> Dict:
         return {"success": True, "message": message, "error": "", "dry_run": False,
-                "orphan": False, "recovered": False,
+                "orphan": False, "recovered": False, "slippage_abort": False,
                 "results": [l.view() for l in legs]}
 
     @staticmethod
     def _fail(legs: List[LegOrder], error: str, *, orphan: bool = False,
-              recovered: bool = False) -> Dict:
+              recovered: bool = False, slippage_abort: bool = False) -> Dict:
         return {"success": False, "message": "", "error": error, "dry_run": False,
                 "orphan": orphan, "recovered": recovered,
+                "slippage_abort": slippage_abort,
                 "results": [l.view() for l in legs]}

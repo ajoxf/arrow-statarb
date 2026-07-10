@@ -38,9 +38,11 @@ def _make(params_over=None, prices=None):
     return algo, state, calls
 
 
-def _sig(z, ready=True, half_life=0.0, std=1.0, spread=100.0, regime=None, slope=0.0):
+def _sig(z, ready=True, half_life=0.0, std=1.0, spread=100.0, regime=None, slope=0.0,
+         half_life_sec=0.0):
     return {"zscore": z, "std": std, "ready": ready, "leg_a": 110.0, "leg_b": 10.0,
             "spread": spread, "mean": 100.0, "samples": 300, "half_life": half_life,
+            "half_life_sec": half_life_sec,
             "sample_interval_sec": 0.5, "entry_zscore": 2.0, "exit_zscore": 0.0,
             "stop_zscore": 4.0, "min_signal_minutes": 1.0, "span_minutes": 5.0,
             "regime": regime, "regime_detail": {"slope": slope, "state": regime}}
@@ -763,6 +765,38 @@ def test_cost_floor_unwinnable_blocks_entry():
     state["sig"] = _sig(-2.5, std=1.0); algo._tick()
     assert calls["execute"] == []
     assert "never win" in algo.get_state()["status"]
+
+
+# ── half-life acceptance band (real entry gate) ─────────────────────────────
+def test_half_life_below_min_blocks_entry():
+    # half-life 20s < min 60s → reversion too fast (noise) → blocked.
+    algo, state, calls = _make({"lot_multiplier": 100.0, "half_life_min_sec": 60.0})
+    state["sig"] = _sig(-2.5, std=100.0, half_life_sec=20.0); algo._tick()
+    assert calls["execute"] == []
+    assert "too fast" in algo.get_state()["status"]
+
+
+def test_half_life_above_max_blocks_entry():
+    # half-life 900s > max 600s → reverts too slowly → blocked.
+    algo, state, calls = _make({"lot_multiplier": 100.0, "half_life_max_sec": 600.0})
+    state["sig"] = _sig(-2.5, std=100.0, half_life_sec=900.0); algo._tick()
+    assert calls["execute"] == []
+    assert "too slowly" in algo.get_state()["status"]
+
+
+def test_half_life_within_band_allows_entry():
+    algo, state, calls = _make({"lot_multiplier": 100.0, "half_life_min_sec": 60.0,
+                                "half_life_max_sec": 600.0})
+    state["sig"] = _sig(-2.5, std=100.0, half_life_sec=300.0); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_half_life_unknown_does_not_block():
+    # half_life_sec = 0 (unmeasurable) → gate is skipped, entry proceeds.
+    algo, state, calls = _make({"lot_multiplier": 100.0, "half_life_min_sec": 60.0,
+                                "half_life_max_sec": 600.0})
+    state["sig"] = _sig(-2.5, std=100.0, half_life_sec=0.0); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
 
 
 def test_lifecycle_extremes_tracked_and_passed_on_close():

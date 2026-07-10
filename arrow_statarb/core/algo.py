@@ -355,6 +355,21 @@ class ArrowAutoTrader:
           • cost-floor sanity — if cost_floor_mult × cost exceeds the plausible
             FULL reversion (|z| × σ × qty), the trade can never win: block it.
         Returns a human-readable block reason, or None to proceed."""
+        # Half-life acceptance band: reject a reversion that is too FAST (a
+        # half-life below the floor is microstructure noise, not a tradable
+        # edge) or too SLOW (above the ceiling it won't revert inside the hold).
+        # Bounds are in seconds; the signal's half_life_sec is authoritative.
+        # Skipped when it can't be measured (half_life_sec = 0). 0 bound = off.
+        hl_sec = float(sig.get("half_life_sec", 0) or 0)
+        if hl_sec > 0:
+            hl_min = float(p.get("half_life_min_sec", 0) or 0)
+            hl_max = float(p.get("half_life_max_sec", 0) or 0)
+            if hl_min > 0 and hl_sec < hl_min:
+                return (f"half-life {hl_sec:.0f}s < min {hl_min:.0f}s — "
+                        f"reversion too fast (noise)")
+            if hl_max > 0 and hl_sec > hl_max:
+                return (f"half-life {hl_sec:.0f}s > max {hl_max:.0f}s — "
+                        f"reverts too slowly to hold")
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
         cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"))
         full_move = abs(z) * float(std) * lots * lot_m

@@ -114,7 +114,11 @@ filters:
 risk:
   lots_per_trade: 1
   max_contracts_per_leg: 5    # hard position cap per leg
-  max_slippage_pct: 0.5
+  max_slippage_pct: 0.5       # ENTRY slippage budget: if the realized fill slips
+                              # more than this % of notional (vs LTP at placement),
+                              # the entry is UNWOUND (both legs flattened) — better a
+                              # missed trade than one starting underwater. Exits are
+                              # never unwound (they must complete). 0 = off.
   max_daily_loss: 0           # INR; 0 = disabled. Halts new entries when today's
                               # realized P&L ≤ −this.
   min_live_margin: 50000      # INR; the Pre-Live "Account funded" check warns
@@ -225,8 +229,8 @@ trading_hours:
 # LIVE order execution (SpreadExecutor).
 execution:
   product: NRML
-  order_type: limit
-  default_lots: 1
+  default_lots: 1             # startup lot size only; the live count is driven by
+                              # risk.lots_per_trade (Settings → Lots per Trade)
   cooldown_sec: 300
   stop_cooldown_sec: 300      # Tier A: extra cooldown after a STOP exit (vs
                               # cooldown_sec after any close). 0 = same as cooldown.

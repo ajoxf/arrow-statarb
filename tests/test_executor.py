@@ -168,6 +168,39 @@ def test_market_mode_when_limits_disabled():
     assert {s["order_type"] for s in b.submits} == {"market"}
 
 
+# ── max_slippage_pct: entry-only slippage budget ─────────────────────────────
+def test_slippage_over_budget_unwinds_entry():
+    # 1% limit offset → both legs fill ~1% off the LTP baseline → 1% > 0.5%
+    # budget on an ENTRY (verify_flat=True) → unwind both legs, report abort.
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=1.0, max_slippage_pct=0.5)
+    res = _executor(b, p).execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert res["slippage_abort"] is True
+    assert res["recovered"] is True
+    # both legs flattened → an opposing MARKET order was sent for each
+    flat = [s for s in b.submits if s["order_type"] == "market"]
+    assert {s["side"] for s in flat} == {"buy", "sell"}
+
+
+def test_slippage_within_budget_allows_entry():
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=0.05, max_slippage_pct=0.5)   # ~0.05% ≪ 0.5%
+    res = _executor(b, p).execute(_legs(), verify_flat=True)
+    assert res["success"] is True
+    assert res.get("slippage_abort") is False
+
+
+def test_slippage_budget_never_unwinds_an_exit():
+    # Same 1% slippage, but verify_flat=False (an EXIT) → must NOT unwind; an
+    # exit always completes even if it slipped past the budget.
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=1.0, max_slippage_pct=0.5)
+    res = _executor(b, p).execute(_legs(), verify_flat=False)
+    assert res["success"] is True
+    assert res.get("slippage_abort") is False
+
+
 # ── amendment: a slow limit gets re-priced toward the market ─────────────────
 def test_slow_limit_is_amended_then_fills():
     b = MockBroker()
