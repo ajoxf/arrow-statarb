@@ -46,6 +46,23 @@ def test_spread_and_z():
     assert sig["zscore"] > 2.0                      # rich spread
 
 
+def test_hedge_ratio_scales_spread():
+    # Non-1:1 pair: spread = hedge_ratio × leg_a − leg_b. An ETF at ~280 vs a
+    # future at ~24000 only becomes a real basis once leg_a is scaled up ~87×.
+    eng = SignalEngine(prices_provider=lambda: (None, None),
+                       params_provider=lambda: _params(hedge_ratio=87.0))
+    eng.push(280.0, 24000.0, ts=1000.0)             # 87×280 − 24000 = 360
+    sig = eng.get_signal()
+    assert sig["spread"] == 87.0 * 280.0 - 24000.0  # == 360.0
+    assert sig["leg_a"] == 280.0 and sig["leg_b"] == 24000.0   # raw prices preserved
+
+
+def test_hedge_ratio_default_is_raw_difference():
+    eng = SignalEngine(prices_provider=lambda: (None, None), params_provider=_params)
+    eng.push(24080.0, 24000.0, ts=1000.0)           # default k=1 → raw diff
+    assert eng.get_signal()["spread"] == 80.0
+
+
 def test_window_trims_old_samples():
     eng = SignalEngine(prices_provider=lambda: (None, None),
                        params_provider=lambda: _params(window_minutes=1.0))  # 60s window

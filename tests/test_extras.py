@@ -332,7 +332,10 @@ def test_trade_log_stt_charged(tmp_path):
                     dry_run=False, status="LIVE", lot_size=65,
                     leg_a_price=24010.0, leg_b_price=24070.0, stt_pct=0.02)
     assert rec["spread_pnl"] == 650.0                            # +10 × 65
-    assert rec["stt"] == round(0.0002 * 65 * (24000.0 + 24010.0), 2)   # ≈ 624
+    # STT now settles on the CONTRACT leg (leg_b) notional, 2 sells/round trip:
+    # (stt_a+stt_b)% × qty × avg(leg_b entry, exit); rates fall back to stt_pct.
+    pb = (24080.0 + 24070.0) / 2.0
+    assert rec["stt"] == round((0.02 + 0.02) / 100.0 * 65 * pb, 2)   # ≈ 626
     assert rec["net_pnl"] == round(650.0 - rec["stt"], 2)
 
 

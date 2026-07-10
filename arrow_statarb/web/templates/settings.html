@@ -44,6 +44,15 @@
                         <label class="form-label">Stop Loss Z-Score (σ)</label>
                         <input type="number" step="0.1" class="form-control" id="s-stop">
                     </div>
+                    <div class="col-12">
+                        <label class="form-label">Hedge Ratio (k) <span class="badge bg-secondary">pairs</span></label>
+                        <div class="input-group">
+                            <input type="number" step="0.0001" class="form-control" id="s-hedge">
+                            <button class="btn btn-outline-secondary" type="button" onclick="deriveHedge()">Auto-derive</button>
+                            <span class="input-group-text" id="s-hedge-msg" style="display:none"></span>
+                        </div>
+                        <div class="form-text">spread = k × leg_a − leg_b, to put two differently-priced legs on one scale. <strong>1 = same-scale</strong> (calendar / cash-future). For an ETF vs its future, set k ≈ future ÷ ETF (~90). leg_b is the contract leg. Auto-derive reads live prices.</div>
+                    </div>
                     <div class="col-md-6">
                         <label class="form-label">Confirmation Ticks</label>
                         <input type="number" class="form-control" id="s-confirm">
@@ -222,7 +231,17 @@
                     <div class="col-md-6">
                         <label class="form-label">STT (% of notional)</label>
                         <input type="number" step="0.001" class="form-control" id="b-stt">
-                        <div class="form-text">Securities Transaction Tax, sell-side. NSE futures ≈ 0.02.</div>
+                        <div class="form-text">Securities Transaction Tax, sell-side. NSE futures ≈ 0.02. Used when the per-leg rates below are blank.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">STT leg A (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="b-stta" placeholder="uses STT">
+                        <div class="form-text">ETF ≈ 0.001. Blank = use STT.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">STT leg B (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="b-sttb" placeholder="uses STT">
+                        <div class="form-text">Future ≈ 0.02. Blank = use STT.</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Other Charges (% notional)</label>
@@ -662,6 +681,7 @@
         _set('s-zdiv', s.signal.max_entry_z_divergence);
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
+        _set('s-hedge', s.signal.hedge_ratio);
         _set('s-refresh', s.signal.display_refresh_ms);
         _setChk('s-persist', s.signal.persist_window);
         _set('s-resumegap', s.signal.resume_max_gap_min);
@@ -696,6 +716,8 @@
         _set('b-other', s.filters.other_cost_pct);
         _set('b-cgt', s.filters.capital_gains_pct);
         _set('b-edgemult', s.filters.min_edge_multiple);
+        _set('b-stta', s.filters.stt_a_pct == null ? '' : s.filters.stt_a_pct);
+        _set('b-sttb', s.filters.stt_b_pct == null ? '' : s.filters.stt_b_pct);
         _set('b-hlmin', s.filters.half_life_min_sec);
         _set('b-hlmax', s.filters.half_life_max_sec);
         _setChk('b-enabled', s.filters.enable_probability_filter);
@@ -777,6 +799,7 @@
                 window_minutes: +document.getElementById('s-window').value,
                 min_signal_minutes: +document.getElementById('s-minhist').value,
                 min_hold_sec: +document.getElementById('s-minhold').value,
+                hedge_ratio: +document.getElementById('s-hedge').value,
                 sample_interval_sec: +document.getElementById('s-tick').value,
                 entry_zscore: +document.getElementById('s-entry').value,
                 exit_zscore: +document.getElementById('s-exit').value,
@@ -820,6 +843,8 @@
                 other_cost_pct: +document.getElementById('b-other').value,
                 capital_gains_pct: +document.getElementById('b-cgt').value,
                 min_edge_multiple: +document.getElementById('b-edgemult').value,
+                stt_a_pct: document.getElementById('b-stta').value === '' ? null : +document.getElementById('b-stta').value,
+                stt_b_pct: document.getElementById('b-sttb').value === '' ? null : +document.getElementById('b-sttb').value,
                 half_life_min_sec: +document.getElementById('b-hlmin').value,
                 half_life_max_sec: +document.getElementById('b-hlmax').value,
             },
@@ -897,6 +922,19 @@
         msg.innerHTML = res.success ? '<span class="text-success">Saved ✓</span>' : '<span class="text-danger">Save failed</span>';
         setTimeout(() => msg.textContent = '', 3000);
         refreshBadges();
+    }
+
+    async function deriveHedge() {
+        const msg = document.getElementById('s-hedge-msg');
+        msg.style.display = ''; msg.textContent = '…';
+        try {
+            const r = await fetch('/api/hedge-ratio/derive').then(x => x.json());
+            if (r.ok) {
+                document.getElementById('s-hedge').value = r.hedge_ratio;
+                msg.textContent = `k = ${r.leg_b} / ${r.leg_a}`;
+            } else { msg.textContent = r.error || 'no live prices'; }
+        } catch (e) { msg.textContent = 'error'; }
+        setTimeout(() => { msg.style.display = 'none'; }, 6000);
     }
 
     async function runTests() {

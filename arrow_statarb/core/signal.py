@@ -81,6 +81,11 @@ class SignalEngine:
             "entry_zscore": 2.0,
             "exit_zscore": 0.0,
             "stop_zscore": 4.0,
+            # Non-1:1 pairs mode: spread = hedge_ratio × leg_a − leg_b, so the two
+            # legs are put on the SAME price scale (e.g. an ETF vs its index
+            # future, ~90× apart). 1.0 = same-scale legs (calendar / cash-future),
+            # i.e. the original raw-difference behaviour.
+            "hedge_ratio": 1.0,
         }
         try:
             p.update({k: float(v) for k, v in (self._params() or {}).items()
@@ -211,7 +216,8 @@ class SignalEngine:
         la, lb = self._prices()
         if la is None or lb is None or la <= 0 or lb <= 0:
             return
-        spread = float(la) - float(lb)
+        k = self._p().get("hedge_ratio", 1.0) or 1.0
+        spread = k * float(la) - float(lb)         # non-1:1 pairs: scale leg_a to leg_b
         window_sec = self._p()["window_minutes"] * 60.0
         with self._lock:
             self._samples.append((now, float(la), float(lb), spread))
@@ -221,8 +227,9 @@ class SignalEngine:
     def push(self, leg_a: float, leg_b: float, ts: Optional[float] = None) -> None:
         """Inject a sample directly (used by tests)."""
         ts = time.time() if ts is None else ts
+        k = self._p().get("hedge_ratio", 1.0) or 1.0
         with self._lock:
-            self._samples.append((ts, float(leg_a), float(leg_b), float(leg_a) - float(leg_b)))
+            self._samples.append((ts, float(leg_a), float(leg_b), k * float(leg_a) - float(leg_b)))
             self._trim(ts, self._p()["window_minutes"] * 60.0)
             self._update_excursions_locked(ts)
 

@@ -62,6 +62,13 @@ signal:
   entry_zscore: 2.0
   exit_zscore: 0.0
   stop_zscore: 4.0
+  hedge_ratio: 1.0            # NON-1:1 PAIRS: spread = hedge_ratio × leg_a − leg_b,
+                             # to put two differently-priced legs on the same scale
+                             # (e.g. NIFTYBEES ETF vs NIFTY future, ~90× apart —
+                             # set ≈ future_price ÷ ETF_price). 1.0 = same-scale
+                             # legs (calendar / cash-future), i.e. raw leg_a − leg_b.
+                             # leg_b is the CONTRACT leg (its lot size denominates
+                             # P&L); leg_a is sized to match leg_b's exposure × k.
   confirmation_ticks: 3       # consecutive ticks beyond entry before firing
   max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
                               # z re-sampled at order time has moved more than
@@ -87,6 +94,11 @@ filters:
                               # model applies ×2 legs and ×2 (entry+exit), so a
                               # 1-lot spread round trip ≈ ₹80.
   slippage_per_lot: 5         # INR per lot per leg, one way
+  # Per-leg STT for a NON-1:1 pair, % of notional on each leg's sell. Leave unset
+  # (blank) for a same-instrument spread — both then use stt_pct below. Example
+  # for NIFTYBEES/NIFTY-future:  stt_a_pct: 0.001 (ETF) , stt_b_pct: 0.02 (future).
+  # stt_a_pct:
+  # stt_b_pct:
   stt_pct: 0.02               # Securities Transaction Tax, % of notional on the
                               # SELL side. A calendar round trip has 2 sells (one
                               # leg at entry, the other at exit) → charged into net

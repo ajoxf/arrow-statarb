@@ -82,6 +82,7 @@ class TradeLog:
                decision_spread: Optional[float] = None,
                stt_pct: float = 0.0, other_cost_pct: float = 0.0,
                capital_gains_pct: float = 0.0,
+               stt_a_pct: Optional[float] = None, stt_b_pct: Optional[float] = None,
                peak_pnl: Optional[float] = None, trough_pnl: Optional[float] = None,
                peak_min: Optional[float] = None, trough_min: Optional[float] = None) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
@@ -143,17 +144,22 @@ class TradeLog:
                             raw = (spread - entry) if direction == "LONG_SPREAD" else (entry - spread)
                             rec["entry_spread"] = entry
                             rec["spread_pnl"] = round(raw * lots * mult, 2)
-                            # STT: sell-side % of notional × the two sells (one leg
-                            # at entry, the other at exit); leg prices ≈ equal, so a
-                            # representative leg price each side is a good estimate.
-                            p_in = abs(float(prev.get("leg_a_price") or prev.get("leg_b_price") or 0))
-                            p_out = abs(float(leg_a_price or leg_b_price or 0))
+                            # STT: one sell per leg over a round trip. Notional is
+                            # the CONTRACT leg (leg_b) × its lot size (mult), the
+                            # scale the spread is denominated in; per-leg rates
+                            # (stt_a/stt_b) fall back to stt_pct so a same-instrument
+                            # spread is unchanged. leg_b price ≈ leg_a for a
+                            # same-scale pair, so either representative works.
+                            pb = (abs(float(prev.get("leg_b_price") or prev.get("leg_a_price") or 0))
+                                  + abs(float(leg_b_price or leg_a_price or 0))) / 2.0
                             qty = lots * mult
+                            a_pct = stt_a_pct if stt_a_pct is not None else stt_pct
+                            b_pct = stt_b_pct if stt_b_pct is not None else stt_pct
                             stt = other = 0.0
-                            if stt_pct and stt_pct > 0:                    # 2 sells / round trip
-                                stt = round((stt_pct / 100.0) * qty * (p_in + p_out), 2)
+                            if (a_pct or b_pct):                           # leg_a sell + leg_b sell
+                                stt = round(((a_pct + b_pct) / 100.0) * qty * pb, 2)
                             if other_cost_pct and other_cost_pct > 0:      # 4 leg turnovers
-                                other = round((other_cost_pct / 100.0) * qty * 2.0 * (p_in + p_out), 2)
+                                other = round((other_cost_pct / 100.0) * 4.0 * qty * pb, 2)
                             rec["stt"] = stt
                             rec["other_cost"] = other
                             pre_tax = (rec["spread_pnl"] - brokerage

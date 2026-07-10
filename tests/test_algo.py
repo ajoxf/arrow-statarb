@@ -597,6 +597,29 @@ def test_live_net_pnl_includes_stt():
     assert abs(algo.get_state()["net_pnl"] - expected) < 0.01
 
 
+# ── non-1:1 pairs mode: leg_b notional + per-leg STT ────────────────────────
+def test_hedge_pair_per_leg_stt_and_leg_b_notional():
+    # P&L multiplier is leg_b's lot size (25); STT is the sum of per-leg rates
+    # (ETF 0.001% + future 0.02%) on the contract-leg (leg_b) notional.
+    algo, state, calls = _pnl_make({"lot_multiplier": 25.0, "brokerage_per_lot": 0.0,
+                                    "stt_a_pct": 0.001, "stt_b_pct": 0.02,
+                                    "hedge_ratio": 87.0, "min_hold_sec": 0.0})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG
+    algo._pos["entry_leg_b"] = 24000.0                           # contract-leg price
+    state["sig"] = _sig(-1.0, spread=100.0); algo._tick()        # +100 basis
+    # gross = 100 × 1 × 25 = 2500 ; STT = (0.001+0.02)% × (24000 × 1 × 25) = 126
+    expected = 2500.0 - (0.001 + 0.02) / 100.0 * 24000.0 * 25.0
+    assert algo.get_state()["net_pnl"] == round(expected, 2)     # 2374.0
+
+
+def test_per_leg_stt_falls_back_to_single_rate():
+    # No per-leg rates → both legs use stt_pct, reproducing 2×stt_pct exactly.
+    from arrow_statarb.core.algo import _stt_round_trip_pct
+    assert _stt_round_trip_pct({"stt_pct": 0.02}) == 2 * 0.02 / 100.0
+    assert _stt_round_trip_pct({"stt_pct": 0.02, "stt_a_pct": 0.001,
+                                "stt_b_pct": 0.02}) == (0.001 + 0.02) / 100.0
+
+
 # ── Tier B: scale-invariant exit levels ─────────────────────────────────────
 def test_sigma_fraction_target_precedence():
     algo, _, _ = _pnl_make({"lot_multiplier": 65.0, "profit_target_inr": 999.0,

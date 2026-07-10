@@ -223,19 +223,25 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     # ── shared order path (manual + algo) ────────────────────────────────────
     def _order_legs(direction: str, lots: int):
-        """Return [(seg, sym, side, lots_for_leg), ...] for a direction."""
+        """Return [(seg, sym, side, lots_for_leg), ...] for a direction.
+
+        Non-1:1 hedge sizing: leg_b is the contract leg (qty in lots); leg_a is
+        sized so both legs carry EQUAL rupee exposure —
+            units_a = units_b × hedge_ratio  (units_b = lots × lot_size_b)
+        so leg_a's lot count = round(units_a ÷ lot_size_a). With hedge_ratio = 1
+        and equal lot sizes (a same-instrument calendar) this reduces to the
+        original equal-lots behaviour exactly."""
         legs = _read_legs()
         if not _have_both_legs(legs):
             raise ValueError("Both legs must be assigned in Setup")
-
-        def _leg(lk):
-            seg = legs[lk]["segment"]
-            sym = legs[lk]["symbol"]
-            qty = max(1, round(lots * legs[lk]["ratio"]))
-            return seg, sym, qty
-
-        sa, ya, qa = _leg("leg_a")
-        sb, yb, qb = _leg("leg_b")
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        sa, ya = legs["leg_a"]["segment"], legs["leg_a"]["symbol"]
+        sb, yb = legs["leg_b"]["segment"], legs["leg_b"]["symbol"]
+        ls_a = _resolve_lot_size(sa, ya)
+        ls_b = _resolve_lot_size(sb, yb)
+        qb = max(1, round(lots * float(legs["leg_b"].get("ratio", 1) or 1)))
+        units_a = qb * ls_b * k                       # match leg_b exposure × k
+        qa = max(1, round(units_a / ls_a)) if ls_a > 0 else max(1, round(units_a))
         # LONG_SPREAD = buy A / sell B ; SHORT_SPREAD = sell A / buy B
         if direction == "LONG_SPREAD":
             return [(sa, ya, "buy", qa), (sb, yb, "sell", qb)]
@@ -297,8 +303,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return meta
         meta["name"] = f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
         try:
+            # Contract leg (leg_b) drives the σ→₹ / P&L multiplier in the
+            # hedge-scaled spread; for a same-lot calendar this equals leg_a.
             meta["lot_size"] = int(broker.resolve_lot_size(
-                legs["leg_a"]["segment"], legs["leg_a"]["symbol"]))
+                legs["leg_b"]["segment"], legs["leg_b"]["symbol"]))
         except Exception:
             pass
         # Executed fill prices from the live executor results, keyed by symbol.
@@ -316,7 +324,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         meta["leg_a_price"] = a
         meta["leg_b_price"] = b
         if a is not None and b is not None:
-            meta["spread"] = round(a - b, 4)
+            # Fill spread on the SAME hedge-scaled basis as the signal, so the
+            # algo's live-P&L reference matches its z-score world.
+            k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+            meta["spread"] = round(k * a - b, 4)
         meta["zscore"] = signal_engine.get_signal().get("zscore")
         return meta
 
@@ -377,6 +388,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              zscore=(z if z is not None else m["zscore"]),
                              leg_a_price=m["leg_a_price"], leg_b_price=m["leg_b_price"],
                              stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
+                             stt_a_pct=(float(cfg.get("filters.stt_a_pct"))
+                                        if cfg.get("filters.stt_a_pct") is not None else None),
+                             stt_b_pct=(float(cfg.get("filters.stt_b_pct"))
+                                        if cfg.get("filters.stt_b_pct") is not None else None),
                              other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
                              capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              name=m["name"])
@@ -551,6 +566,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "entry_zscore": float(s.get("entry_zscore", 2.0)),
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
+            # non-1:1 pairs: spread = hedge_ratio × leg_a − leg_b (1 = same scale)
+            "hedge_ratio": float(s.get("hedge_ratio", 1) or 1),
             # window persistence (resume warm-up across a quick restart)
             "persist_window": bool(s.get("persist_window", True)),
             "resume_max_gap_min": float(s.get("resume_max_gap_min", 10) or 0),
@@ -579,17 +596,26 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     _algo_lots = {"lots": int(cfg.get("execution.default_lots", 1))}
 
-    def _lot_multiplier() -> float:
-        """Lot size (units per lot) of leg A — turns σ (₹/unit) into ₹ per lot
-        for the EV gate. 1 if the broker/master isn't ready yet."""
-        broker = active.get()
-        legs = _read_legs()
-        if not broker or "leg_a" not in legs:
+    def _resolve_lot_size(seg: str, sym: str) -> float:
+        """Units-per-lot for a leg from the active resolver (sim broker in
+        live_sim, else the live broker). 1.0 when nothing can resolve it yet."""
+        resolver = sim_broker if _mode() == "live_sim" else active.get()
+        if not resolver:
             return 1.0
         try:
-            return float(broker.resolve_lot_size(legs["leg_a"]["segment"], legs["leg_a"]["symbol"]))
+            return float(resolver.resolve_lot_size(seg, sym)) or 1.0
         except Exception:
             return 1.0
+
+    def _lot_multiplier() -> float:
+        """Spread σ→₹ multiplier = the CONTRACT leg's (leg_b) lot size. The
+        non-1:1 spread is denominated in leg_b price units, and a position holds
+        lots × lot_size_b of it, so P&L = lots × lot_size_b × Δspread. For a
+        same-lot calendar (leg_a lot == leg_b lot) this is unchanged."""
+        legs = _read_legs()
+        if "leg_b" not in legs:
+            return 1.0
+        return _resolve_lot_size(legs["leg_b"]["segment"], legs["leg_b"]["symbol"])
 
     def _algo_params() -> Dict:
         s = cfg.section("signal")
@@ -624,6 +650,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "reversion_require_profit": bool(xo.get("reversion_require_profit", True)),
             "reversion_gate_inr": float(xo.get("reversion_gate_inr", 0) or 0),
             "stt_pct": float(f.get("stt_pct", 0.02) or 0),   # STT %-of-notional, sell-side
+            # per-leg STT for a non-1:1 pair (ETF ≈ 0.001 / future ≈ 0.02); each
+            # falls back to stt_pct so a same-instrument spread is unchanged.
+            "stt_a_pct": (float(f["stt_a_pct"]) if f.get("stt_a_pct") is not None else None),
+            "stt_b_pct": (float(f["stt_b_pct"]) if f.get("stt_b_pct") is not None else None),
+            "hedge_ratio": float(cfg.get("signal.hedge_ratio", 1) or 1),
             # ── Spec v2: z-stop demotion, hard time-stop, edge filter ──
             "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
             "hard_time_stop_mult": float(xo.get("hard_time_stop_mult", 0) or 0),
@@ -1415,6 +1446,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "window_minutes": s.get("window_minutes", 120),
                     "min_signal_minutes": s.get("min_signal_minutes", 10),
                     "sample_interval_sec": s.get("sample_interval_sec", 0.5),
+                    "hedge_ratio": s.get("hedge_ratio", 1.0),
                     "display_refresh_ms": s.get("display_refresh_ms", 500),
                     "persist_window": bool(s.get("persist_window", True)),
                     "resume_max_gap_min": s.get("resume_max_gap_min", 10),
@@ -1452,6 +1484,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "brokerage_per_lot": f.get("brokerage_per_lot", 20),
                     "slippage_per_lot": f.get("slippage_per_lot", 5),
                     "stt_pct": f.get("stt_pct", 0.02),
+                    "stt_a_pct": f.get("stt_a_pct"),        # None = fall back to stt_pct
+                    "stt_b_pct": f.get("stt_b_pct"),
                     "other_cost_pct": f.get("other_cost_pct", 0.005),
                     "capital_gains_pct": f.get("capital_gains_pct", 0),
                     "min_edge_multiple": f.get("min_edge_multiple", 0),
@@ -1480,7 +1514,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
                      ("resume_max_gap_min", 10), ("persist_interval_sec", 30),
-                     ("min_hold_sec", 0.0),
+                     ("min_hold_sec", 0.0), ("hedge_ratio", 1.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
                      ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0)):
@@ -1511,6 +1545,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             fl["enable_probability_filter"] = bool(fd["enable_probability_filter"])
         if "commission_basis" in fd:
             fl["commission_basis"] = "per_order" if fd["commission_basis"] == "per_order" else "per_lot"
+        # Per-leg STT: empty/None clears the override (falls back to stt_pct).
+        for k in ("stt_a_pct", "stt_b_pct"):
+            if k in fd:
+                v = fd[k]
+                if v is None or v == "":
+                    fl.pop(k, None)
+                else:
+                    fl[k] = _num(v, 0.0)
         for k, d in (("brokerage_per_lot", 20.0), ("slippage_per_lot", 5.0),
                      ("stt_pct", 0.02), ("other_cost_pct", 0.005),
                      ("capital_gains_pct", 0.0), ("min_edge_multiple", 0.0),
@@ -1594,6 +1636,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         _algo_lots["lots"] = int(rk.get("lots_per_trade", _algo_lots["lots"]))
         logger.info("Settings saved")
         return jsonify({"success": True})
+
+    @app.route("/api/hedge-ratio/derive", methods=["GET"])
+    def api_hedge_ratio_derive():
+        """Suggest the hedge ratio k = leg_b_price ÷ leg_a_price from live prices,
+        so the ETF/near leg is scaled to the future/contract leg. The UI fills the
+        field with this; the operator can accept or pin their own."""
+        la, lb = _leg_prices()
+        if not la or not lb or la <= 0:
+            return jsonify({"ok": False, "error": "live prices for both legs unavailable"})
+        return jsonify({"ok": True, "hedge_ratio": round(float(lb) / float(la), 4),
+                        "leg_a": la, "leg_b": lb})
 
     # ── signal quality (win-prob / EV / breakeven / half-life gate) ──────────
     @app.route("/api/signal/quality", methods=["GET"])

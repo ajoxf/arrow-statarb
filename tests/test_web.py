@@ -127,6 +127,39 @@ def test_slippage_abort_charged_to_untracked_ledger(tmp_path):
     assert ev["est_cost"] > 0
 
 
+class TwoLotBroker(FakeBroker):
+    """Per-symbol lot sizes: an ETF (1 unit) vs a future (25/lot)."""
+    def __init__(self, sizes):
+        super().__init__()
+        self._sizes = sizes
+    def resolve_lot_size(self, seg, sym):
+        return self._sizes.get(sym.upper(), 1)
+
+
+def test_hedge_ratio_order_sizing(tmp_path):
+    # NIFTYBEES (leg_a, lot 1) vs NIFTY future (leg_b, lot 25), hedge_ratio 87.
+    # leg_b (contract): 1 lot × 25 = 25 units. leg_a: matched exposure =
+    # 25 × 87 = 2175 units. Both legs must carry equal, opposite exposure.
+    import arrow_statarb.web.app as appmod
+    app, _ = _app(tmp_path, mode="live")
+    # reassign legs to the ETF/future pair
+    appmod.LEG_ASSIGNMENTS_FILE.write_text(
+        "leg_a:\n  mapping_id: nse_cm|NIFTYBEES\n  ratio: 1\n"
+        "leg_b:\n  mapping_id: nse_fo|NIFTY\n  ratio: 1\n")
+    broker = TwoLotBroker({"NIFTYBEES": 1, "NIFTY": 25})
+    app.extensions["arrow"]["active"].set(broker)
+    client = app.test_client()
+    client.post("/api/settings", json={"signal": {"hedge_ratio": 87.0}})
+    res = client.post("/api/manual-trade/execute",
+                      json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert res["success"] is True
+    by_sym = {o["symbol"].upper(): o for o in broker.orders}
+    assert by_sym["NIFTY"]["quantity"] == 25         # 1 lot × 25
+    assert by_sym["NIFTY"]["side"] == "sell"         # LONG_SPREAD = sell future
+    assert by_sym["NIFTYBEES"]["quantity"] == 2175   # 25 × 87 matched exposure
+    assert by_sym["NIFTYBEES"]["side"] == "buy"      # buy the ETF
+
+
 def test_settings_expose_and_persist_all_knobs(tmp_path):
     # Every knob a non-technical user might set must be readable AND writable
     # through the Settings page — no .yaml editing required. GET → POST → GET
@@ -137,8 +170,10 @@ def test_settings_expose_and_persist_all_knobs(tmp_path):
     # newly-surfaced keys grouped by section, with a changed value to write
     changes = {
         "signal": {"display_refresh_ms": 750, "persist_window": False,
-                   "resume_max_gap_min": 15, "persist_interval_sec": 45},
-        "filters": {"half_life_min_sec": 30, "half_life_max_sec": 900},
+                   "resume_max_gap_min": 15, "persist_interval_sec": 45,
+                   "hedge_ratio": 87.5},
+        "filters": {"half_life_min_sec": 30, "half_life_max_sec": 900,
+                    "stt_a_pct": 0.001, "stt_b_pct": 0.02},
         "regime": {"window_samples": 200, "vr_lag": 7},
         "trading_hours": {"close_hour": 15, "close_min": 25, "no_entry_buffer_min": 20},
         "execution": {"product": "MIS", "cooldown_sec": 120, "use_limit_orders": False,

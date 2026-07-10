@@ -75,6 +75,20 @@ def _entry_cutoff_reached(p: Dict) -> bool:
     return minutes_to_close <= buf
 
 
+def _stt_round_trip_pct(p: Dict) -> float:
+    """Fractional STT charged over one round trip = leg_a sell + leg_b sell.
+    Per-leg rates (``stt_a_pct``/``stt_b_pct``) let a non-1:1 pair charge the
+    right tax on each instrument (e.g. ETF ≈ 0.001% + future ≈ 0.02%); both fall
+    back to the single ``stt_pct`` so a same-instrument spread keeps the original
+    2×stt_pct behaviour exactly."""
+    base = float(p.get("stt_pct", 0) or 0)
+    a = p.get("stt_a_pct")
+    b = p.get("stt_b_pct")
+    a = float(a) if a is not None else base
+    b = float(b) if b is not None else base
+    return (a + b) / 100.0
+
+
 class ArrowAutoTrader:
     def __init__(
         self,
@@ -281,10 +295,12 @@ class ArrowAutoTrader:
         # STT (sell-side, 2 sells/round trip) + other charges (exchange txn + GST
         # + SEBI + stamp, ×4 leg turnovers) — both %-of-notional. Slippage is NOT
         # re-added here: it is already embedded in the entry FILL spread.
-        ref = pos.get("entry_leg_a") or pos.get("entry_leg_b")
+        # Notional off the CONTRACT leg (leg_b) × its lot size (lot_mult) — the
+        # scale the spread is denominated in for the non-1:1 pairs model.
+        ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
         if ref:
             notional = float(ref) * lots * lot_mult
-            rt_fees += 2.0 * (float(p.get("stt_pct", 0) or 0) / 100.0) * notional
+            rt_fees += _stt_round_trip_pct(p) * notional
             rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
         net = gross - rt_fees
         # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
@@ -335,12 +351,11 @@ class ArrowAutoTrader:
         cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
         ref = (ref_price if ref_price is not None
-               else pos.get("entry_leg_a") or pos.get("entry_leg_b"))
+               else pos.get("entry_leg_b") or pos.get("entry_leg_a"))
         if ref:
             notional = float(ref) * lots * lot_m
-            stt_pct = float(p.get("stt_pct", 0) or 0) / 100.0
             other_pct = float(p.get("other_cost_pct", 0) or 0) / 100.0
-            cost += 2.0 * stt_pct * notional          # STT: 2 sells / round trip
+            cost += _stt_round_trip_pct(p) * notional  # STT: leg_a sell + leg_b sell
             cost += 4.0 * other_pct * notional         # other charges: all 4 leg turnovers
         return cost
 
@@ -789,7 +804,8 @@ class ArrowAutoTrader:
                 la, lb = self._prices()
             except Exception:
                 la = lb = None
-            live_spread = (float(la) - float(lb)) if (la is not None and lb is not None) else None
+            k = float(p.get("hedge_ratio", 1.0) or 1.0)
+            live_spread = (k * float(la) - float(lb)) if (la is not None and lb is not None) else None
             if live_spread is None or abs(live_spread - spread) > max_sdiv:
                 shown = "n/a" if live_spread is None else f"{live_spread:.1f}"
                 msg = (f"stale signal: decision spread={spread:.1f} vs live={shown} "
