@@ -320,6 +320,32 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         meta["zscore"] = signal_engine.get_signal().get("zscore")
         return meta
 
+    def _unwind_cost(res: Dict, legs: Dict, lots: int) -> float:
+        """Estimated ₹ lost on a slippage-aborted entry: brokerage + STT + other
+        charges on the four leg fills (entry 2 + unwind 2), plus the ACTUAL
+        realized adverse slippage measured on the entry fills. Fees follow the
+        same convention as the algo's round-trip cost (2 sells for STT, 4 leg
+        turnovers for 'other'), so the ledger reconciles with the cost audit.
+        The unwind-side (market) slippage isn't separately measured."""
+        f = cfg.section("filters")
+        by_sym = {str(r.get("symbol", "")).upper(): r for r in (res.get("results") or [])}
+        ra = by_sym.get(str(legs["leg_a"]["symbol"]).upper(), {})
+        ref_a = float(ra.get("ref_price") or ra.get("avg_price") or 0)
+        filled_a = int(ra.get("filled") or 0) or (lots * (ra.get("units") or 0))
+        notional = ref_a * filled_a                       # one-leg notional (algo convention)
+        brk = float(f.get("brokerage_per_lot", 20) or 0) * max(1, lots) * 4.0
+        stt = 2.0 * (float(f.get("stt_pct", 0) or 0) / 100.0) * notional
+        other = 4.0 * (float(f.get("other_cost_pct", 0) or 0) / 100.0) * notional
+        adverse = 0.0                                     # actual entry slippage (₹)
+        for r in (res.get("results") or []):
+            ref = float(r.get("ref_price") or 0)
+            avg = float(r.get("avg_price") or 0)
+            filled = int(r.get("filled") or 0)
+            if ref > 0 and avg > 0 and filled > 0:
+                sign = 1.0 if r.get("side") == "buy" else -1.0
+                adverse += max(0.0, sign * (avg - ref)) * filled
+        return round(brk + stt + other + adverse, 2)
+
     def _spread_execute(direction: str, lots: int, source: str = "manual",
                         z: Optional[float] = None, spread: Optional[float] = None) -> Dict:
         mode = _mode()
@@ -354,6 +380,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
                              capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              name=m["name"])
+        elif res.get("slippage_abort"):
+            # The entry filled but slipped past the budget and was unwound — no
+            # position results, yet real money moved (fees on 4 fills + the
+            # realized slippage). Book it to the untracked ledger so it counts
+            # against max_daily_loss (day_cost is subtracted from day P&L).
+            la = _read_legs()
+            est = _unwind_cost(res, la, lots)
+            untracked_ledger.record(
+                reason="slippage_abort",
+                symbol=f"{la['leg_a']['symbol']}/{la['leg_b']['symbol']}",
+                qty=lots, est_cost=est,
+                detail=res.get("error", "entry unwound — slippage over budget"))
         return res
 
     def _spread_close(direction: str, lots: int, source: str = "manual",

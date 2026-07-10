@@ -75,6 +75,58 @@ def _app(tmp_path, mode="dry_run"):
     return app, broker
 
 
+class SlippingBroker(FakeBroker):
+    """Reports an LTP and fills every limit at its (crossed) submitted price, so
+    a large limit offset produces measurable slippage. Recovery MARKET orders
+    (price=None) fill at the LTP — confirming the unwind."""
+    def __init__(self, ltp=100.0):
+        super().__init__()
+        self._ltp = ltp
+        self._px = {}
+
+    def start_price_stream(self, syms):
+        return True
+
+    def get_streamed_ltp(self, syms):
+        return {str(s).upper(): self._ltp for s in syms}
+
+    def submit_order(self, **kw):
+        r = super().submit_order(**kw)
+        self._px[r["order_id"]] = kw.get("price")
+        return r
+
+    def get_order_status(self, order_id):
+        price = self._px.get(order_id)
+        avg = float(price) if price else self._ltp        # market recovery → LTP
+        return {"order_id": order_id, "status": "COMPLETE", "filled_qty": 150,
+                "pending_qty": 0, "avg_price": avg, "raw": {}}
+
+
+def test_slippage_abort_charged_to_untracked_ledger(tmp_path):
+    # A live entry that slips past the budget is unwound; the real money spent
+    # (fees on 4 fills + realized slippage) must be booked to the untracked
+    # ledger so it counts against max_daily_loss.
+    import arrow_statarb.web.app as appmod
+    appmod.UNTRACKED_FILE = tmp_path / "untracked.json"
+    app, _ = _app(tmp_path, mode="live")
+    app.extensions["arrow"]["active"].set(SlippingBroker(ltp=100.0))
+    client = app.test_client()
+    # 1% limit offset ≫ 0.5% budget → the fill will breach and unwind
+    client.post("/api/settings", json={
+        "execution": {"use_limit_orders": True, "limit_offset_pct": 1.0},
+        "risk": {"max_slippage_pct": 0.5},
+    })
+    res = client.post("/api/manual-trade/execute",
+                      json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert res["success"] is False
+    assert res["slippage_abort"] is True
+    led = client.get("/api/untracked").get_json()
+    assert led["day_cost"] > 0
+    ev = led["events"][0]
+    assert ev["reason"] == "slippage_abort"
+    assert ev["est_cost"] > 0
+
+
 def test_settings_expose_and_persist_all_knobs(tmp_path):
     # Every knob a non-technical user might set must be readable AND writable
     # through the Settings page — no .yaml editing required. GET → POST → GET
