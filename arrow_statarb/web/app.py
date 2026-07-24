@@ -1858,6 +1858,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         """The book on one sheet, in R: win rate, R:R, PF, break-even WR, EV/R."""
         return jsonify(trade_log.expectancy())
 
+    @app.route("/api/calibration", methods=["GET"])
+    def api_calibration():
+        """Take/hold calibration from measured lifecycle extremes — the peak
+        distribution and data-driven take-profit / max-hold suggestions."""
+        return jsonify(trade_log.take_hold_calibration())
+
     @app.route("/api/trades/clear", methods=["POST"])
     def api_trades_clear():
         trade_log.clear()

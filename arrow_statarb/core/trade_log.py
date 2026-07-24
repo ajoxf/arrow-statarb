@@ -21,6 +21,32 @@ from loguru import logger
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _percentile(sorted_vals, pct: float):
+    """Linear-interpolated percentile of an ALREADY-SORTED list. None if empty."""
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    k = (len(sorted_vals) - 1) * (float(pct) / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_vals) - 1)
+    if f == c:
+        return sorted_vals[f]
+    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
+
+def _z_reversion_pct(entry_z, exit_z):
+    """How far z came home toward 0, as a %: (|ez|−|xz|)/|ez| × 100. Negative if z
+    DIVERGED (widened) instead of reverting — the 'stopped in trend' story."""
+    try:
+        ez, xz = abs(float(entry_z)), abs(float(exit_z))
+    except (TypeError, ValueError):
+        return None
+    if ez <= 1e-9:
+        return None
+    return round(100.0 * (ez - xz) / ez, 1)
+
+
 def _outcome_tag(reason: str, net: float, entry_z, exit_z) -> str:
     """Deterministic, rule-based outcome tag for the close report — numbers
     first, no prose. Distinguishes the two very different stop stories:
@@ -294,6 +320,8 @@ class TradeLog:
         for r in closed:                       # oldest → newest for a running total
             cum = round(cum + float(r.get("net_pnl", 0) or 0), 2)
             r["cum_pnl"] = cum
+            # how far z reverted toward 0 (negative = diverged / stopped in trend)
+            r["z_reversion_pct"] = _z_reversion_pct(r.get("entry_zscore"), r.get("exit_zscore"))
         return {"trips": list(reversed(closed)),   # newest first for display
                 "open": open_rec,
                 "total_pnl": cum,
@@ -311,6 +339,37 @@ class TradeLog:
             win_rate = round(100.0 * wins / len(closed), 1) if closed else 0.0
             return {"count": len(self._trades), "closed": len(closed),
                     "total_pnl": total, "win_rate": win_rate}
+
+    def take_hold_calibration(self) -> Dict:
+        """Set the take-profit and max-hold from MEASURED lifecycle extremes, not
+        opinion (reference §9). Reads the per-trade peak/trough net P&L and the
+        minute each peaked, and returns the peak DISTRIBUTION plus data-driven
+        suggestions: take near the 60–70th percentile of peaks ('70% of trades
+        peaked above ₹X'), and max-hold at the median minute winners peaked."""
+        with self._lock:
+            closed = [t for t in self._trades if t.get("action") == "CLOSE"
+                      and t.get("peak_pnl") is not None]
+        peaks = sorted(float(t.get("peak_pnl", 0) or 0) for t in closed)
+        troughs = sorted(float(t.get("trough_pnl", 0) or 0) for t in closed)
+        winners = [t for t in closed if float(t.get("net_pnl", 0) or 0) > 0]
+        win_peak_min = sorted(float(t.get("peak_min", 0) or 0) for t in winners
+                              if t.get("peak_min") is not None)
+
+        def pk(p):
+            v = _percentile(peaks, p)
+            return round(v, 2) if v is not None else None
+
+        med_winmin = _percentile(win_peak_min, 50)
+        return {
+            "n": len(closed), "winners": len(winners),
+            "peak_pctile": {str(p): pk(p) for p in (50, 60, 70, 80, 90)},
+            "trough_p10": (round(_percentile(troughs, 10), 2) if troughs else None),
+            "trough_median": (round(_percentile(troughs, 50), 2) if troughs else None),
+            "median_winner_peak_min": (round(med_winmin, 1) if med_winmin is not None else None),
+            # data-driven knobs (feed these into the exit settings)
+            "suggested_take_inr": pk(65),
+            "suggested_max_hold_min": (round(med_winmin, 1) if med_winmin is not None else None),
+        }
 
     def expectancy(self) -> Dict:
         """The whole book on one sheet, in R (= one average loss). Ported from the

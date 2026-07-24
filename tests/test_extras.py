@@ -360,6 +360,45 @@ def test_expectancy_sheet(tmp_path):
     assert e["positive"] is True
 
 
+def test_take_hold_calibration(tmp_path):
+    from arrow_statarb.core.trade_log import _percentile
+    assert _percentile([], 50) is None
+    assert _percentile([5.0], 90) == 5.0
+    assert _percentile([0.0, 10.0], 50) == 5.0          # midpoint interpolation
+
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+
+    def rt(exit_spread, peak, peak_min):
+        tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=0.0,
+                  dry_run=False, status="LIVE", lot_size=1)
+        tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=exit_spread,
+                  dry_run=False, status="LIVE", lot_size=1,
+                  peak_pnl=peak, peak_min=peak_min, trough_pnl=-10.0, trough_min=1.0)
+
+    # three winners peaking at 100/200/300 at minutes 5/6/7
+    rt(100, 100.0, 5.0); rt(200, 200.0, 6.0); rt(300, 300.0, 7.0)
+    c = tl.take_hold_calibration()
+    assert c["n"] == 3 and c["winners"] == 3
+    assert c["peak_pctile"]["50"] == 200.0              # median peak
+    assert c["median_winner_peak_min"] == 6.0           # median minute winners peaked
+    assert c["suggested_max_hold_min"] == 6.0
+    assert c["suggested_take_inr"] is not None
+
+
+def test_z_reversion_pct_in_journal(tmp_path):
+    from arrow_statarb.core.trade_log import _z_reversion_pct
+    assert _z_reversion_pct(-3.0, 0.0) == 100.0         # fully reverted
+    assert _z_reversion_pct(-3.0, -1.5) == 50.0         # halfway home
+    assert _z_reversion_pct(-3.0, -4.0) == round(100 * (3 - 4) / 3, 1)  # diverged → negative
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+    tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=0.0,
+              dry_run=False, status="LIVE", lot_size=1, zscore=-3.0)
+    tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=50.0,
+              dry_run=False, status="LIVE", lot_size=1, zscore=-0.3)
+    trip = tl.round_trips()["trips"][0]
+    assert trip["z_reversion_pct"] == 90.0              # −3.0 → −0.3
+
+
 def test_expectancy_empty_book(tmp_path):
     e = TradeLog(tmp_path / "t.json").expectancy()
     assert e["closed"] == 0
