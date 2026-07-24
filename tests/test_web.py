@@ -68,6 +68,8 @@ def _app(tmp_path, mode="dry_run"):
     appmod.LEG_ASSIGNMENTS_FILE = legs
     appmod.TRADES_FILE = tmp_path / "trades.json"
     appmod.SHADOW_FILE = tmp_path / "shadow.json"
+    appmod.HEARTBEAT_FILE = tmp_path / "heartbeat.txt"
+    appmod.SIGNAL_WINDOW_FILE = tmp_path / "signal_window.json"
 
     cfg = Config(settings)
     app, _sio = appmod.create_app(cfg)
@@ -159,6 +161,15 @@ def test_hedge_ratio_order_sizing(tmp_path):
     assert by_sym["NIFTY"]["side"] == "sell"         # LONG_SPREAD = sell future
     assert by_sym["NIFTYBEES"]["quantity"] == 2175   # 25 × 87 matched exposure
     assert by_sym["NIFTYBEES"]["side"] == "buy"      # buy the ETF
+
+
+def test_health_endpoint(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    client = app.test_client()
+    h = client.get("/api/health").get_json()
+    # heartbeat was written at startup → fresh, and no feed staleness with no data
+    assert h["heartbeat_age_sec"] is not None and h["heartbeat_age_sec"] < 60
+    assert h["ok"] is True and "problems" in h
 
 
 def test_backtest_endpoint(tmp_path):

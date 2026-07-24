@@ -273,6 +273,13 @@ trading_hours:
 # LIVE order execution (SpreadExecutor).
 execution:
   product: NRML
+  # ── liveness (reference §8): the app writes data/heartbeat.txt every
+  # heartbeat_sec from a timer thread (proves the loop is alive, not that data
+  # flows). /api/health reports heartbeat age AND last-tick age separately; run
+  # scripts/watchdog.py beside the app to auto-restart on a freeze.
+  heartbeat_sec: 10
+  health_max_heartbeat_sec: 60   # heartbeat older than this ⇒ loop may be frozen
+  health_max_tick_sec: 120       # no price tick for this long ⇒ feed stalled
   default_lots: 1             # startup lot size only; the live count is driven by
                               # risk.lots_per_trade (Settings → Lots per Trade)
   cooldown_sec: 300

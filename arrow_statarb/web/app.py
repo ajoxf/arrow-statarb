@@ -41,6 +41,7 @@ from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core.whatif_shadow import ShadowTracker
+from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
@@ -58,6 +59,7 @@ SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
 SIGNAL_WINDOW_FILE = PROJECT_ROOT / "data" / "signal_window.json"
 UNTRACKED_FILE = PROJECT_ROOT / "data" / "untracked_closes.json"
 SHADOW_FILE = PROJECT_ROOT / "data" / "whatif_shadow.json"
+HEARTBEAT_FILE = PROJECT_ROOT / "data" / "heartbeat.txt"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -870,6 +872,30 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         threading.Thread(target=loop, daemon=True, name="ShadowWatch").start()
 
     _start_shadow_loop()
+
+    # Liveness heartbeat — proves the process loop is spinning (independent of the
+    # data feed), so an external watchdog can catch a FREEZE a crash-only
+    # supervisor never sees. Data staleness is reported separately in /api/health.
+    _heartbeat = Heartbeat(HEARTBEAT_FILE,
+                           interval_sec=float(cfg.get("execution.heartbeat_sec", 10) or 10))
+    _heartbeat.start()
+
+    @app.route("/api/health", methods=["GET"])
+    def api_health():
+        """Loop liveness (heartbeat age) + feed liveness (last-tick age), reported
+        separately: a frozen loop vs a stalled feed need different fixes."""
+        hb_age = Heartbeat.age(HEARTBEAT_FILE)
+        bars = signal_engine.export_bars()
+        tick_age = (time.time() - bars[-1][0]) if bars else None
+        v = health_verdict(hb_age, tick_age,
+                           max_heartbeat_sec=float(cfg.get("execution.health_max_heartbeat_sec", 60) or 60),
+                           max_tick_sec=float(cfg.get("execution.health_max_tick_sec", 120) or 120))
+        return jsonify({
+            "heartbeat_age_sec": round(hb_age, 1) if hb_age is not None else None,
+            "last_tick_age_sec": round(tick_age, 1) if tick_age is not None else None,
+            "running": bool(arrow_algo.get_state().get("running")),
+            **v,
+        })
 
     @app.route("/api/shadow", methods=["GET"])
     def api_shadow():
