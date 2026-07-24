@@ -31,6 +31,20 @@
     </div>
 </div>
 <div class="card mt-3">
+    <div class="card-header"><i class="bi bi-hourglass-split me-2"></i>What-If-Held Shadow
+        <span class="text-secondary small ms-1">— did the spread revert AFTER we exited? (premature-exit detector)</span></div>
+    <div class="card-body">
+        <div class="row text-center g-3">
+            <div class="col"><div class="metric" id="sh-active">0</div><div class="metric-label">Tracking</div></div>
+            <div class="col"><div class="metric" id="sh-done">0</div><div class="metric-label">Completed</div></div>
+            <div class="col"><div class="metric" id="sh-berate">—</div><div class="metric-label">Reverted to BE</div></div>
+            <div class="col"><div class="metric" id="sh-tgtrate">—</div><div class="metric-label">Reverted to Target</div></div>
+            <div class="col"><div class="metric" id="sh-avgmin">—</div><div class="metric-label">Avg revert (min)</div></div>
+        </div>
+        <div class="form-text mt-2">High revert-to-target rate ⇒ exits are premature (cutting winners / stops too tight). Low ⇒ the exits were right and the move was real. Clean target hits aren't tracked.</div>
+    </div>
+</div>
+<div class="card mt-3">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="bi bi-activity me-2"></i>Z-Score Excursions
             <span class="text-secondary small ms-1">since <span id="x-since">—</span></span></span>
@@ -142,6 +156,17 @@
             set('cal-p50', pk['50'], true); set('cal-p70', pk['70'], true); set('cal-p90', pk['90'], true);
             set('cal-take', c.suggested_take_inr, true);
             set('cal-hold', c.suggested_max_hold_min);
+        } catch (e) { /* leave */ }
+
+        // What-if-held shadow.
+        try {
+            const sh = await fetch('/api/shadow').then(x => x.json());
+            const T = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            T('sh-active', sh.active || 0);
+            T('sh-done', sh.completed || 0);
+            T('sh-berate', sh.revert_be_rate == null ? '—' : sh.revert_be_rate.toFixed(0) + '%');
+            T('sh-tgtrate', sh.revert_target_rate == null ? '—' : sh.revert_target_rate.toFixed(0) + '%');
+            T('sh-avgmin', sh.avg_revert_min == null ? '—' : sh.avg_revert_min.toFixed(0));
         } catch (e) { /* leave */ }
 
         // Trade Journal — round-trips with full entry/exit detail.

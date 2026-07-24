@@ -67,6 +67,7 @@ def _app(tmp_path, mode="dry_run"):
     import pytest as _pt  # noqa
     appmod.LEG_ASSIGNMENTS_FILE = legs
     appmod.TRADES_FILE = tmp_path / "trades.json"
+    appmod.SHADOW_FILE = tmp_path / "shadow.json"
 
     cfg = Config(settings)
     app, _sio = appmod.create_app(cfg)
@@ -158,6 +159,20 @@ def test_hedge_ratio_order_sizing(tmp_path):
     assert by_sym["NIFTY"]["side"] == "sell"         # LONG_SPREAD = sell future
     assert by_sym["NIFTYBEES"]["quantity"] == 2175   # 25 × 87 matched exposure
     assert by_sym["NIFTYBEES"]["side"] == "buy"      # buy the ETF
+
+
+def test_close_arms_whatif_shadow(tmp_path):
+    # A non-target close arms a what-if-held watch (clean target hits don't).
+    app, _ = _app(tmp_path, mode="live")
+    app.extensions["arrow"]["active"].set(SlippingBroker(ltp=100.0))
+    client = app.test_client()
+    assert client.post("/api/manual-trade/execute",
+                       json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    assert client.post("/api/manual-trade/close",
+                       json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    sh = client.get("/api/shadow").get_json()
+    assert sh["active"] == 1
+    assert sh["watches"][0]["direction"] == "LONG_SPREAD"
 
 
 def test_settings_expose_and_persist_all_knobs(tmp_path):

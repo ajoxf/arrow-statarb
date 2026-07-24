@@ -248,6 +248,11 @@ exits:
   trailing_stop_pct: 0        # % pullback from the peak net P&L that triggers an
                               # exit. 0 = off. e.g. 20 = exit when P&L drops 20% off
                               # its high-water mark.
+  # ── what-if-held shadow: after a non-target exit, keep marking the position's
+  # P&L on the frozen fills to see if it WOULD have reverted (premature-exit
+  # detector). Surfaced on the Analysis page; /api/shadow.
+  whatif_window_min: 60       # how long to track each closed trade (minutes)
+  whatif_update_sec: 5        # how often the shadow marks the live spread
   trailing_stop_floor_pct: 0  # only arm the trailing stop once the peak reaches this
                               # % of profit_target_inr. 0 = arm from first profit.
                               # e.g. 70 = arm at 70% of target.

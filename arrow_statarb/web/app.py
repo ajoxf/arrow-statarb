@@ -40,6 +40,7 @@ from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
+from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
@@ -56,6 +57,7 @@ TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
 SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
 SIGNAL_WINDOW_FILE = PROJECT_ROOT / "data" / "signal_window.json"
 UNTRACKED_FILE = PROJECT_ROOT / "data" / "untracked_closes.json"
+SHADOW_FILE = PROJECT_ROOT / "data" / "whatif_shadow.json"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -107,6 +109,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     trade_log = TradeLog(TRADES_FILE,
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 20)))
     untracked_ledger = UntrackedLedger(UNTRACKED_FILE)
+    shadow = ShadowTracker(SHADOW_FILE,
+                           window_sec=float(cfg.get("exits.whatif_window_min", 60) or 60) * 60.0)
     execution_log = ExecutionLog()
 
     # ── broker-read cache (positions + funds) ─────────────────────────────────
@@ -432,7 +436,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         res = _spread_order(legs, "Close")
         if res.get("success"):
             m = _trade_meta(res)
-            trade_log.record(action="CLOSE", direction=direction, lots=lots,
+            rec = trade_log.record(action="CLOSE", direction=direction, lots=lots,
                              spread=m["spread"],  # actual fill spread — see OPEN note
                              decision_spread=(spread if spread is not None else _current_spread()),
                              dry_run=(mode != "live"),
@@ -446,6 +450,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              peak_pnl=peak_pnl, trough_pnl=trough_pnl,
                              peak_min=peak_min, trough_min=trough_min,
                              name=m["name"], exit_reason=reason)
+            # Arm the what-if-held shadow (skips a clean target hit internally) so
+            # premature exits become logged data, not an argument.
+            if rec.get("entry_spread") is not None:
+                try:
+                    cost = float(rec.get("spread_pnl", 0) or 0) - float(rec.get("net_pnl", 0) or 0)
+                    shadow.arm(direction=direction, entry_spread=float(rec["entry_spread"]),
+                               lots=lots, lot_mult=float(rec.get("lot_size", 1) or 1),
+                               cost_inr=cost, exit_reason=reason or "",
+                               target_net=rec.get("target"))
+                except Exception:                        # noqa: BLE001 — never block a close
+                    pass
         return res
 
     # ── live leg prices (stream first, REST fallback) ────────────────────────
@@ -841,6 +856,26 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         threading.Thread(target=loop, daemon=True, name="Reconcile").start()
 
     _start_reconcile_loop()
+
+    def _start_shadow_loop() -> None:
+        """Mark active what-if-held watches against the live spread; finalize any
+        whose window elapsed (incl. during downtime, on the first tick)."""
+        def loop():
+            while True:
+                try:
+                    shadow.update(signal_engine.get_signal().get("spread"))
+                except Exception:                        # noqa: BLE001
+                    pass
+                time.sleep(max(2.0, float(cfg.get("exits.whatif_update_sec", 5) or 5)))
+        threading.Thread(target=loop, daemon=True, name="ShadowWatch").start()
+
+    _start_shadow_loop()
+
+    @app.route("/api/shadow", methods=["GET"])
+    def api_shadow():
+        """What-if-held shadow: active watches + reversion stats (did the spread
+        revert to break-even / target after we exited)."""
+        return jsonify(shadow.summary())
 
     @app.route("/api/cost-audit", methods=["GET"])
     def api_cost_audit():
