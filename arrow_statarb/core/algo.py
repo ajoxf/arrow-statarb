@@ -36,6 +36,7 @@ from typing import Callable, Dict, Optional, Tuple
 from loguru import logger
 
 from arrow_statarb.models.probability_filter import ProbabilityFilter
+from arrow_statarb.core import costs
 
 # India Standard Time (UTC+5:30) — trading-hours window is evaluated in IST.
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -73,6 +74,23 @@ def _entry_cutoff_reached(p: Dict) -> bool:
     # now.replace(hour=…) would. Block only inside the buffer BEFORE the close.
     minutes_to_close = (close_mod - now_mod) % 1440
     return minutes_to_close <= buf
+
+
+def _expiry_blocks_entry(p: Dict, sig: Dict) -> Optional[str]:
+    """Block NEW entries within ``no_entry_days_before_expiry`` days of the
+    contract's expiry — a basis position must not be held into settlement (roll
+    or flatten instead). Needs ``days_to_expiry`` on the signal (broker master);
+    off when the gate is 0 or expiry is unknown. Exits are never blocked."""
+    gate = float(p.get("no_entry_days_before_expiry", 0) or 0)
+    if gate <= 0:
+        return None
+    dte = sig.get("days_to_expiry")
+    if dte is None:
+        return None
+    if float(dte) <= gate:
+        return (f"expiry guard: {float(dte):.1f}d to expiry ≤ {gate:g}d — "
+                f"no new entries (roll or flatten)")
+    return None
 
 
 def _stt_round_trip_pct(p: Dict) -> float:
@@ -291,17 +309,20 @@ class ArrowAutoTrader:
         change = ((cur_spread - entry) if pos["direction"] == "LONG_SPREAD"
                   else (entry - cur_spread))
         gross = change * lots * lot_mult
-        rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
-        # STT (sell-side, 2 sells/round trip) + other charges (exchange txn + GST
-        # + SEBI + stamp, ×4 leg turnovers) — both %-of-notional. Slippage is NOT
-        # re-added here: it is already embedded in the entry FILL spread.
-        # Notional off the CONTRACT leg (leg_b) × its lot size (lot_mult) — the
-        # scale the spread is denominated in for the non-1:1 pairs model.
-        ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
-        if ref:
-            notional = float(ref) * lots * lot_mult
-            rt_fees += _stt_round_trip_pct(p) * notional
-            rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
+        # Round-trip fees, EXCLUDING slippage (already embedded in the entry FILL
+        # spread). With use_segment_costs on, the per-segment Indian stack; else
+        # the legacy brokerage + STT + catch-all 'other' model. Notional off the
+        # CONTRACT leg (leg_b), the scale the spread is denominated in.
+        if bool(p.get("use_segment_costs", False)):
+            rt_fees = self._segment_round_trip_cost(p, lots, lot_mult, None, None,
+                                                    include_slippage=False)
+        else:
+            rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+            ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
+            if ref:
+                notional = float(ref) * lots * lot_mult
+                rt_fees += _stt_round_trip_pct(p) * notional
+                rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
         net = gross - rt_fees
         # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
         # (losses aren't taxed) — so break-even and the profit gates account for
@@ -335,19 +356,47 @@ class ArrowAutoTrader:
             floor = 0.0                              # decay to break-even
         return net_pnl >= floor
 
+    def _segment_round_trip_cost(self, p: Dict, lots: int, lot_m: float,
+                                 ref_a: Optional[float], ref_b: Optional[float],
+                                 include_slippage: bool) -> float:
+        """Per-segment Indian cost stack (STT/CTT + txn + GST + SEBI + stamp +
+        brokerage [+ slippage]) via ``core.costs``. Notional is per-leg: the
+        contract leg (leg_b) at its price × lots × lot_size, and leg_a hedged to
+        leg_b's exposure × k. Rates come from ``cost_rates_a``/``cost_rates_b``
+        (resolved from each leg's segment). Used only when use_segment_costs on."""
+        pos = self._pos or {}
+        brk = float(p.get("brokerage_per_lot", 20.0) or 0)
+        slip = float(p.get("slippage_per_lot", 5.0) or 0) if include_slippage else 0.0
+        rb = ref_b if ref_b is not None else (pos.get("entry_leg_b") or pos.get("entry_leg_a"))
+        ra = ref_a if ref_a is not None else (pos.get("entry_leg_a") or rb)
+        if not rb:
+            return brk * lots * 4.0 + slip * lots * 4.0        # no price → fees only
+        k = float(p.get("hedge_ratio", 1.0) or 1.0)
+        notional_b = float(rb) * lots * lot_m
+        notional_a = float(ra) * lots * lot_m * k if ra else notional_b
+        gst = float(p.get("gst_pct", costs.GST_PCT) or costs.GST_PCT)
+        return costs.round_trip_cost(p.get("cost_rates_a") or {}, notional_a,
+                                     p.get("cost_rates_b") or {}, notional_b,
+                                     brk, lots, slip, gst)
+
     def _round_trip_cost(self, p: Dict, lots: Optional[int] = None,
-                         ref_price: Optional[float] = None) -> float:
+                         ref_price: Optional[float] = None,
+                         ref_b: Optional[float] = None) -> float:
         """Estimated round-trip TRANSACTION cost in ₹: brokerage + slippage
         (both ×2 legs ×2 in/out) + STT (2 sells × %-of-notional) + a catch-all
         'other charges' % (exchange txn + GST + SEBI + stamp) on all four leg
         turnovers. Excludes Capital-Gains Tax (that's a haircut on PROFIT, not a
         transaction cost — applied in the P&L). Defaults to the open position's
-        size/entry leg price; pass ``lots``/``ref_price`` for a pre-entry
-        (prospective) estimate."""
+        size/entry leg price; pass ``lots``/``ref_price`` (leg_a) and ``ref_b``
+        (leg_b) for a pre-entry (prospective) estimate. With use_segment_costs on,
+        the per-segment Indian stack replaces the STT+other catch-all."""
         pos = self._pos or {}
         lots = int(lots if lots is not None
                    else pos.get("lots", p.get("lots", 1)) or 1)
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        if bool(p.get("use_segment_costs", False)):
+            return self._segment_round_trip_cost(p, lots, lot_m, ref_price, ref_b,
+                                                 include_slippage=True)
         cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
         ref = (ref_price if ref_price is not None
@@ -386,7 +435,8 @@ class ArrowAutoTrader:
                 return (f"half-life {hl_sec:.0f}s > max {hl_max:.0f}s — "
                         f"reverts too slowly to hold")
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
-        cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"))
+        cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"),
+                                     ref_b=sig.get("leg_b"))
         full_move = abs(z) * float(std) * lots * lot_m
         cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
         min_mult = float(p.get("min_edge_multiple", 0) or 0)
@@ -543,6 +593,8 @@ class ArrowAutoTrader:
             elif _entry_cutoff_reached(p):
                 buf = float(p.get("no_entry_buffer_min", 0) or 0)
                 snap["status"] = f"no new entries — within {buf:.0f} min of close"
+            elif _expiry_blocks_entry(p, sig):
+                snap["status"] = _expiry_blocks_entry(p, sig)
             elif (abs(z) >= entry_z and (confirmed_long or confirmed_short) and trend_blocks):
                 snap["status"] = (f"trend filter: {'SHORT' if reg_slope > 0 else 'LONG'}-only "
                                   f"(S {'rising' if reg_slope > 0 else 'falling'})")

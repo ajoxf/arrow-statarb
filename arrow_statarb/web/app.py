@@ -39,6 +39,7 @@ from arrow_statarb.core.execution_log import ExecutionLog
 from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
+from arrow_statarb.core import costs
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
@@ -206,7 +207,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 if "|" in mid:
                     seg, sym = mid.split("|", 1)
                     legs[lk] = {"segment": seg.strip(), "symbol": sym.strip(),
-                                "ratio": float(entry.get("ratio", 1) or 1)}
+                                "ratio": float(entry.get("ratio", 1) or 1),
+                                "cost_key": (str(entry.get("cost_key")).strip()
+                                             if entry.get("cost_key") else "")}
         if "leg_a" in legs and "leg_b" in legs:
             return legs
         # Fall back to config defaults
@@ -215,7 +218,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             if d.get("segment") and d.get("symbol"):
                 legs[lk] = {"segment": str(d["segment"]).strip(),
                             "symbol": str(d["symbol"]).strip(),
-                            "ratio": float(d.get("ratio", 1) or 1)}
+                            "ratio": float(d.get("ratio", 1) or 1),
+                            "cost_key": (str(d.get("cost_key")).strip()
+                                         if d.get("cost_key") else "")}
         return legs
 
     def _have_both_legs(legs: Dict) -> bool:
@@ -622,10 +627,19 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         f = cfg.section("filters")
         r = cfg.section("risk")
         xo = cfg.section("exits")          # dollar-P&L exit overrides (Phase 1)
+        co = cfg.section("costs")          # per-segment Indian cost model (opt-in)
         cap = int(r.get("max_contracts_per_leg", 0) or 0)
         lots = int(_algo_lots["lots"])
         if cap > 0:
             lots = min(lots, cap)            # hard position cap per leg
+        # Per-segment cost rates for each leg — resolved from its segment (or an
+        # explicit cost_key override), only when the segment model is enabled.
+        use_seg = bool(co.get("use_segment_costs", False))
+        seg_overrides = co.get("segments") or {}
+        _clegs = _read_legs() if use_seg else {}
+        def _cost_key(lk):
+            e = _clegs.get(lk) or {}
+            return e.get("cost_key") or e.get("segment") or ""
         return {
             "entry_zscore": float(s.get("entry_zscore", 2.0)),
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
@@ -654,6 +668,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # falls back to stt_pct so a same-instrument spread is unchanged.
             "stt_a_pct": (float(f["stt_a_pct"]) if f.get("stt_a_pct") is not None else None),
             "stt_b_pct": (float(f["stt_b_pct"]) if f.get("stt_b_pct") is not None else None),
+            # ── per-segment Indian cost model (STT/CTT+txn+GST+SEBI+stamp) ──
+            "use_segment_costs": use_seg,
+            "gst_pct": float(co.get("gst_pct", costs.GST_PCT) or costs.GST_PCT),
+            "cost_rates_a": (costs.resolve_segment_costs(_cost_key("leg_a"), seg_overrides)
+                             if use_seg else None),
+            "cost_rates_b": (costs.resolve_segment_costs(_cost_key("leg_b"), seg_overrides)
+                             if use_seg else None),
+            "no_entry_days_before_expiry": float(co.get("no_entry_days_before_expiry", 0) or 0),
             "hedge_ratio": float(cfg.get("signal.hedge_ratio", 1) or 1),
             # ── Spec v2: z-stop demotion, hard time-stop, edge filter ──
             "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),

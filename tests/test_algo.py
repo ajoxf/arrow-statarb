@@ -620,6 +620,47 @@ def test_per_leg_stt_falls_back_to_single_rate():
                                 "stt_b_pct": 0.02}) == (0.001 + 0.02) / 100.0
 
 
+# ── per-segment Indian cost model (opt-in) ──────────────────────────────────
+def test_segment_costs_drive_net_pnl():
+    from arrow_statarb.core import costs
+    rates_a = costs.resolve_segment_costs("etf")        # 0.001% STT
+    rates_b = costs.resolve_segment_costs("nse_fo")     # 0.02% STT
+    algo, state, calls = _pnl_make({"lot_multiplier": 25.0, "brokerage_per_lot": 0.0,
+                                    "slippage_per_lot": 0.0, "hedge_ratio": 1.0,
+                                    "use_segment_costs": True, "gst_pct": 18.0,
+                                    "cost_rates_a": rates_a, "cost_rates_b": rates_b,
+                                    "min_hold_sec": 0.0})
+    state["sig"] = _sig(-2.5, spread=0.0); algo._tick()          # enter LONG
+    algo._pos["entry_leg_a"] = 24000.0
+    algo._pos["entry_leg_b"] = 24000.0
+    state["sig"] = _sig(-1.0, spread=100.0); algo._tick()        # +100 basis
+    # gross = 100 × 1 × 25 = 2500. Fees = per-segment stack on notional
+    # 24000×25 = 600000 each leg (brokerage/slippage 0 here).
+    n = 24000.0 * 25.0
+    fees = (costs.leg_round_trip_cost(rates_a, n, 0.0)
+            + costs.leg_round_trip_cost(rates_b, n, 0.0))
+    assert algo.get_state()["net_pnl"] == round(2500.0 - fees, 2)
+
+
+def test_expiry_guard_blocks_entry():
+    algo, state, calls = _make({"no_entry_days_before_expiry": 2.0})
+    sig = _sig(-2.5); sig["days_to_expiry"] = 1.0                # inside the window
+    state["sig"] = sig; algo._tick()
+    assert calls["execute"] == []
+    assert "expiry guard" in algo.get_state()["status"]
+
+
+def test_expiry_guard_allows_when_far_or_unknown():
+    algo, state, calls = _make({"no_entry_days_before_expiry": 2.0})
+    sig = _sig(-2.5); sig["days_to_expiry"] = 10.0              # far from expiry
+    state["sig"] = sig; algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+    # unknown expiry (no days_to_expiry) → not blocked
+    algo2, state2, calls2 = _make({"no_entry_days_before_expiry": 2.0})
+    state2["sig"] = _sig(-2.5); algo2._tick()
+    assert calls2["execute"] == [("LONG_SPREAD", 1)]
+
+
 # ── Tier B: scale-invariant exit levels ─────────────────────────────────────
 def test_sigma_fraction_target_precedence():
     algo, _, _ = _pnl_make({"lot_multiplier": 65.0, "profit_target_inr": 999.0,
