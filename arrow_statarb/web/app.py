@@ -1399,7 +1399,22 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             rg = cfg.section("regime")
             rc = cfg.section("reconcile")
             bk = cfg.section("broker")
+            co = cfg.section("costs")
+            _cseg = co.get("segments") or {}
+            def _segrate(seg, rate):
+                v = (_cseg.get(seg) or {}).get(rate)
+                return v if v is not None else None
             return jsonify({
+                "costs": {
+                    "use_segment_costs": bool(co.get("use_segment_costs", False)),
+                    "gst_pct": co.get("gst_pct", 18.0),
+                    "no_entry_days_before_expiry": co.get("no_entry_days_before_expiry", 0),
+                    # dominant per-segment STT/CTT overrides (blank = default)
+                    "stt_etf": _segrate("etf", "stt_sell_pct"),
+                    "stt_nse_fo": _segrate("nse_fo", "stt_sell_pct"),
+                    "ctt_mcx_fo": _segrate("mcx_fo", "stt_sell_pct"),
+                    "stt_nse_cm": _segrate("nse_cm", "stt_sell_pct"),
+                },
                 "execution": {
                     "product": ex.get("product", "NRML"),
                     "cooldown_sec": ex.get("cooldown_sec", 300),
@@ -1648,6 +1663,27 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             bk["persist_session"] = bool(bkd["persist_session"])
         if "cache_ttl_sec" in bkd:
             bk["cache_ttl_sec"] = _num(bkd["cache_ttl_sec"], 2)
+
+        co = raw.setdefault("costs", {})
+        cod = data.get("costs") or {}
+        if "use_segment_costs" in cod:
+            co["use_segment_costs"] = bool(cod["use_segment_costs"])
+        for k, d in (("gst_pct", 18.0), ("no_entry_days_before_expiry", 0)):
+            if k in cod:
+                co[k] = _num(cod[k], d)
+        # Dominant per-segment STT/CTT overrides → costs.segments.{seg}.stt_sell_pct.
+        # Blank/None clears the override (falls back to the core/costs.py default).
+        _seg = co.setdefault("segments", {})
+        for field, seg in (("stt_etf", "etf"), ("stt_nse_fo", "nse_fo"),
+                           ("ctt_mcx_fo", "mcx_fo"), ("stt_nse_cm", "nse_cm")):
+            if field in cod:
+                v = cod[field]
+                if v is None or v == "":
+                    (_seg.get(seg) or {}).pop("stt_sell_pct", None)
+                    if seg in _seg and not _seg[seg]:
+                        _seg.pop(seg, None)
+                else:
+                    _seg.setdefault(seg, {})["stt_sell_pct"] = _num(v, 0.0)
 
         md = data.get("mode") or {}
         if "paper_trading" in md:

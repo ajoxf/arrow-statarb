@@ -294,6 +294,55 @@
         </div>
     </div>
 
+    <!-- ── Indian Costs (per segment) ────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-receipt me-2"></i>Indian Costs (per segment)</div>
+            <div class="card-body">
+                <div class="alert alert-info py-2 small mb-3">
+                    Statutory + broker costs by exchange segment (STT/CTT + exchange txn + GST +
+                    SEBI + stamp). When ON, each leg pays <strong>its own segment's</strong> rates —
+                    e.g. an ETF leg at 0.001% vs a future leg at 0.02%. When OFF, the single
+                    STT / Other-charges fields above are used. <strong>Calibrate to a real contract note.</strong>
+                </div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="c-useseg" role="switch">
+                    <label class="form-check-label fw-bold" for="c-useseg">Use per-segment cost model</label>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">GST (%)</label>
+                        <input type="number" step="0.5" class="form-control" id="c-gst">
+                        <div class="form-text">On brokerage + txn + SEBI (not notional). Usually 18.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">No-entry days before expiry</label>
+                        <input type="number" step="1" class="form-control" id="c-expdays">
+                        <div class="form-text">Block new entries within N days of expiry (roll/flatten). 0 = off.</div>
+                    </div>
+                    <div class="col-12"><hr class="my-1"><small class="text-secondary">Per-segment STT / CTT overrides (blank = built-in default)</small></div>
+                    <div class="col-md-3">
+                        <label class="form-label">ETF STT (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="c-stt-etf" placeholder="0.001">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">NSE Future STT (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="c-stt-nsefo" placeholder="0.02">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">MCX CTT (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="c-ctt-mcx" placeholder="0.01">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">NSE Cash STT (%)</label>
+                        <input type="number" step="0.001" class="form-control" id="c-stt-nsecm" placeholder="0.1">
+                    </div>
+                    <div class="col-12"><div class="form-text">Finer rates (txn, stamp, SEBI, delivery vs intraday) live in <code>settings.yaml → costs.segments</code>; a leg can pin an instrument kind via <code>cost_key</code> (etf / nse_cm_delivery / nse_cm_intraday).</div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── Execution / Fill-Chasing ──────────────────────────────────────── -->
     <div class="col-lg-6">
         <div class="card h-100">
@@ -667,6 +716,8 @@
 <script>
     function _set(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
     function _setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = !!v; }
+    // blank field → null (clears an optional override); else its number
+    function _blankNull(id) { const el = document.getElementById(id); return (!el || el.value === '') ? null : +el.value; }
 
     async function loadSettings() {
         const s = await fetch('/api/settings').then(r => r.json());
@@ -784,6 +835,15 @@
             _setChk('rc-autoclose', s.reconcile.auto_close);
             _set('rc-thresh', s.reconcile.mismatch_threshold);
             _set('rc-interval', s.reconcile.interval_sec);
+        }
+        if (s.costs) {
+            _setChk('c-useseg', s.costs.use_segment_costs);
+            _set('c-gst', s.costs.gst_pct);
+            _set('c-expdays', s.costs.no_entry_days_before_expiry);
+            _set('c-stt-etf', s.costs.stt_etf == null ? '' : s.costs.stt_etf);
+            _set('c-stt-nsefo', s.costs.stt_nse_fo == null ? '' : s.costs.stt_nse_fo);
+            _set('c-ctt-mcx', s.costs.ctt_mcx_fo == null ? '' : s.costs.ctt_mcx_fo);
+            _set('c-stt-nsecm', s.costs.stt_nse_cm == null ? '' : s.costs.stt_nse_cm);
         }
     }
 
@@ -911,6 +971,15 @@
                 auto_close: document.getElementById('rc-autoclose').checked,
                 mismatch_threshold: +document.getElementById('rc-thresh').value,
                 interval_sec: +document.getElementById('rc-interval').value,
+            },
+            costs: {
+                use_segment_costs: document.getElementById('c-useseg').checked,
+                gst_pct: +document.getElementById('c-gst').value,
+                no_entry_days_before_expiry: +document.getElementById('c-expdays').value,
+                stt_etf: _blankNull('c-stt-etf'),
+                stt_nse_fo: _blankNull('c-stt-nsefo'),
+                ctt_mcx_fo: _blankNull('c-ctt-mcx'),
+                stt_nse_cm: _blankNull('c-stt-nsecm'),
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

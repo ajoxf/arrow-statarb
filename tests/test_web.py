@@ -186,6 +186,9 @@ def test_settings_expose_and_persist_all_knobs(tmp_path):
                       "sim_slow_prob": 0.4, "sim_reject_prob": 0.1,
                       "sim_orphan_prob": 0.2, "sim_default_lot_size": 50},
         "broker": {"persist_session": False, "cache_ttl_sec": 5},
+        "costs": {"use_segment_costs": True, "gst_pct": 18.0,
+                  "no_entry_days_before_expiry": 3, "stt_etf": 0.001,
+                  "stt_nse_fo": 0.02, "ctt_mcx_fo": 0.01, "stt_nse_cm": 0.1},
     }
     # every section+key must already be present in the GET payload
     for sec, kv in changes.items():
