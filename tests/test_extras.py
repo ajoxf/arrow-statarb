@@ -339,6 +339,34 @@ def test_trade_log_stt_charged(tmp_path):
     assert rec["net_pnl"] == round(650.0 - rec["stt"], 2)
 
 
+def test_expectancy_sheet(tmp_path):
+    tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=0)
+
+    def rt(entry, exit_):
+        tl.record(action="OPEN", direction="LONG_SPREAD", lots=1, spread=entry,
+                  dry_run=False, status="LIVE", lot_size=1)
+        tl.record(action="CLOSE", direction="LONG_SPREAD", lots=1, spread=exit_,
+                  dry_run=False, status="LIVE", lot_size=1)
+
+    rt(0, 100); rt(0, 100); rt(0, -50)          # 2 winners (+100), 1 loser (−50)
+    e = tl.expectancy()
+    assert e["closed"] == 3 and e["wins"] == 2 and e["losses"] == 1
+    assert e["avg_win"] == 100.0 and e["avg_loss"] == 50.0
+    assert e["reward_risk"] == 2.0
+    assert e["profit_factor"] == 4.0            # 200 / 50
+    assert e["breakeven_win_rate"] == 33.3      # 1/(1+2)
+    assert e["expectancy_r"] == 1.0             # (2/3)(1+2) − 1
+    assert e["expectancy_inr"] == 50.0          # (100+100−50)/3
+    assert e["positive"] is True
+
+
+def test_expectancy_empty_book(tmp_path):
+    e = TradeLog(tmp_path / "t.json").expectancy()
+    assert e["closed"] == 0
+    assert e["reward_risk"] is None and e["expectancy_r"] is None
+    assert e["positive"] is False
+
+
 def test_trade_log_cost_audit(tmp_path):
     tl = TradeLog(tmp_path / "t.json", brokerage_per_lot=20)
     assert tl.cost_audit()["n"] == 0

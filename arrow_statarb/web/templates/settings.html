@@ -23,6 +23,11 @@
                         <div class="form-text">Price update rate (0.5 s default)</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label">Stats Update Interval (sec)</label>
+                        <input type="number" step="1" class="form-control" id="s-statsint">
+                        <div class="form-text">Recompute mean/std every N s so the bands stay steady (z still uses the live spread). 0 = every tick. ~300 for stable bands.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Warm-up before trading <span class="badge bg-secondary">min</span></label>
                         <input type="number" step="1" class="form-control" id="s-minhist">
                         <div class="form-text">Collect this much data before ANY trade (the "ready" gate). 120 = 2 hours. Must be below the Collection Window.</div>
@@ -733,6 +738,7 @@
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
         _set('s-hedge', s.signal.hedge_ratio);
+        _set('s-statsint', s.signal.stats_update_interval_sec);
         _set('s-refresh', s.signal.display_refresh_ms);
         _setChk('s-persist', s.signal.persist_window);
         _set('s-resumegap', s.signal.resume_max_gap_min);
@@ -860,6 +866,7 @@
                 min_signal_minutes: +document.getElementById('s-minhist').value,
                 min_hold_sec: +document.getElementById('s-minhold').value,
                 hedge_ratio: +document.getElementById('s-hedge').value,
+                stats_update_interval_sec: +document.getElementById('s-statsint').value,
                 sample_interval_sec: +document.getElementById('s-tick').value,
                 entry_zscore: +document.getElementById('s-entry').value,
                 exit_zscore: +document.getElementById('s-exit').value,

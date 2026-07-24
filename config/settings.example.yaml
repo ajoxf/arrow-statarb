@@ -46,6 +46,9 @@ signal:
                               # the warm-up so a full 2h span is reliably reachable —
                               # the window trims at exactly its length)
   sample_interval_sec: 0.5    # how often the server samples prices
+  stats_update_interval_sec: 0  # recompute rolling mean/std only every N s (bands
+                              # stay stable; z still uses the live spread). 0 = every
+                              # tick (bands drift). ~300 (5 min) for steady bands.
   display_refresh_ms: 500     # dashboard live-price poll cadence (min 500ms)
   min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
   # Window persistence: save the rolling window to data/signal_window.json so a

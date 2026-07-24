@@ -312,6 +312,47 @@ class TradeLog:
             return {"count": len(self._trades), "closed": len(closed),
                     "total_pnl": total, "win_rate": win_rate}
 
+    def expectancy(self) -> Dict:
+        """The whole book on one sheet, in R (= one average loss). Ported from the
+        reference system's hard-won discipline: chase REWARD:RISK, not win rate —
+        a system with RR 1.5 is *allowed* to lose 60% of the time. If the measured
+        win rate is below the break-even WR, the book is −EV no matter how any
+        single trade 'felt'.
+
+        p = win rate; RR = avg_win/avg_loss; PF = Σwin/Σloss;
+        break-even WR = 1/(1+RR); expectancy EV/R = p·(1+RR) − 1; ₹/trade."""
+        with self._lock:
+            closed = [t for t in self._trades if t.get("action") == "CLOSE"
+                      and t.get("entry_spread") is not None]
+        n = len(closed)
+        pnls = [float(t.get("net_pnl", 0) or 0) for t in closed]
+        wins = [x for x in pnls if x > 0]
+        losses = [-x for x in pnls if x < 0]        # positive magnitudes
+        nw, nl = len(wins), len(losses)
+        gross_win, gross_loss = round(sum(wins), 2), round(sum(losses), 2)
+        avg_win = round(gross_win / nw, 2) if nw else 0.0
+        avg_loss = round(gross_loss / nl, 2) if nl else 0.0
+        p = (nw / n) if n else 0.0
+        rr = (avg_win / avg_loss) if avg_loss > 0 else None
+        pf = (gross_win / gross_loss) if gross_loss > 0 else None
+        be_wr = (1.0 / (1.0 + rr)) if rr else None
+        ev_r = (p * (1.0 + rr) - 1.0) if rr else None
+        ev_inr = round(sum(pnls) / n, 2) if n else 0.0
+        return {
+            "closed": n, "wins": nw, "losses": nl,
+            "win_rate": round(100.0 * p, 1),
+            "avg_win": avg_win, "avg_loss": avg_loss,
+            "gross_win": gross_win, "gross_loss": gross_loss,
+            "reward_risk": (round(rr, 2) if rr is not None else None),
+            "profit_factor": (round(pf, 2) if pf is not None else None),
+            "breakeven_win_rate": (round(100.0 * be_wr, 1) if be_wr is not None else None),
+            "expectancy_r": (round(ev_r, 3) if ev_r is not None else None),
+            "expectancy_inr": ev_inr,
+            # WR minus break-even WR: >0 = +EV geometry, the number that matters.
+            "edge": (round(100.0 * p - 100.0 * be_wr, 1) if be_wr is not None else None),
+            "positive": ev_inr > 0,
+        }
+
     def clear(self) -> None:
         with self._lock:
             self._trades = []

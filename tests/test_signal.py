@@ -57,6 +57,24 @@ def test_hedge_ratio_scales_spread():
     assert sig["leg_a"] == 280.0 and sig["leg_b"] == 24000.0   # raw prices preserved
 
 
+def test_stats_update_interval_caches_bands():
+    # With a stats interval, the mean/std are cached: a new deviating sample moves
+    # the z (live spread vs cached bands) but NOT the mean/std until the interval
+    # elapses. With interval 0 the bands recompute every tick.
+    eng = SignalEngine(prices_provider=lambda: (None, None),
+                       params_provider=lambda: _params(stats_update_interval_sec=3600.0))
+    t = 1000.0
+    for i in range(50):
+        eng.push(110.0 + (i % 3), 10.0, ts=t + i)   # spread ≈ 100 with some variation
+    s1 = eng.get_signal()
+    mean1, std1 = s1["mean"], s1["std"]
+    assert std1 > 0
+    eng.push(150.0, 10.0, ts=t + 50)            # big deviation → spread 140
+    s2 = eng.get_signal()
+    assert s2["mean"] == mean1 and s2["std"] == std1   # bands cached (unchanged)
+    assert abs(s2["zscore"]) > abs(s1["zscore"])       # z moved on the live spread
+
+
 def test_hedge_ratio_default_is_raw_difference():
     eng = SignalEngine(prices_provider=lambda: (None, None), params_provider=_params)
     eng.push(24080.0, 24000.0, ts=1000.0)           # default k=1 → raw diff

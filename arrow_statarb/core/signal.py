@@ -81,6 +81,11 @@ class SignalEngine:
             "entry_zscore": 2.0,
             "exit_zscore": 0.0,
             "stop_zscore": 4.0,
+            # Stats-update interval (s): recompute the rolling mean/std only this
+            # often (cache between), so the bands stay STABLE instead of shifting
+            # every tick — the z still uses the live spread against the (possibly
+            # slightly older) mean/std. 0 = recompute every tick (bands drift).
+            "stats_update_interval_sec": 0.0,
             # Non-1:1 pairs mode: spread = hedge_ratio × leg_a − leg_b, so the two
             # legs are put on the SAME price scale (e.g. an ETF vs its index
             # future, ~90× apart). 1.0 = same-scale legs (calendar / cash-future),
@@ -452,7 +457,17 @@ class SignalEngine:
         tsN, la, lb, spread = samples[-1]
         span_min = (tsN - ts0) / 60.0
         spreads = [s[3] for s in samples]
-        mean, std = self.compute_stats(spreads)
+        # Stats-update interval: reuse a cached mean/std for up to N seconds so the
+        # bands stay stable (easier to track entries/exits). z always uses the LIVE
+        # spread against the (cached) mean/std. 0 = recompute every tick.
+        interval = float(p.get("stats_update_interval_sec", 0) or 0)
+        now = time.time()
+        cache = getattr(self, "_stats_cache", None)
+        if interval > 0 and cache is not None and (now - cache[2]) < interval:
+            mean, std = cache[0], cache[1]
+        else:
+            mean, std = self.compute_stats(spreads)
+            self._stats_cache = (mean, std, now)
         hl = self.half_life(spreads)
         z = (spread - mean) / std if std > 1e-12 else 0.0
 

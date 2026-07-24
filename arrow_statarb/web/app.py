@@ -573,6 +573,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             # non-1:1 pairs: spread = hedge_ratio × leg_a − leg_b (1 = same scale)
             "hedge_ratio": float(s.get("hedge_ratio", 1) or 1),
+            "stats_update_interval_sec": float(s.get("stats_update_interval_sec", 0) or 0),
             # window persistence (resume warm-up across a quick restart)
             "persist_window": bool(s.get("persist_window", True)),
             "resume_max_gap_min": float(s.get("resume_max_gap_min", 10) or 0),
@@ -1483,6 +1484,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "window_minutes": s.get("window_minutes", 120),
                     "min_signal_minutes": s.get("min_signal_minutes", 10),
                     "sample_interval_sec": s.get("sample_interval_sec", 0.5),
+                    "stats_update_interval_sec": s.get("stats_update_interval_sec", 0),
                     "hedge_ratio": s.get("hedge_ratio", 1.0),
                     "display_refresh_ms": s.get("display_refresh_ms", 500),
                     "persist_window": bool(s.get("persist_window", True)),
@@ -1552,6 +1554,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
                      ("resume_max_gap_min", 10), ("persist_interval_sec", 30),
                      ("min_hold_sec", 0.0), ("hedge_ratio", 1.0),
+                     ("stats_update_interval_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
                      ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0)):
@@ -1849,6 +1852,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_trades_journal():
         """Round-trip trades with full entry/exit detail for the Trade Journal."""
         return jsonify(trade_log.round_trips())
+
+    @app.route("/api/expectancy", methods=["GET"])
+    def api_expectancy():
+        """The book on one sheet, in R: win rate, R:R, PF, break-even WR, EV/R."""
+        return jsonify(trade_log.expectancy())
 
     @app.route("/api/trades/clear", methods=["POST"])
     def api_trades_clear():

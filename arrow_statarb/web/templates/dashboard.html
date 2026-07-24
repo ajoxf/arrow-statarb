@@ -65,6 +65,26 @@
                 <div class="metric" id="t-winrate">0.0%</div><div class="metric-label">Win Rate</div></div></div></div>
         </div>
 
+        <!-- Expectancy sheet (the book in R) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-calculator me-2"></i>Expectancy <span class="text-secondary small">(the book in R)</span></span>
+                <span id="e-verdict" class="badge bg-secondary">—</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-2 text-center small">
+                    <div class="col"><div class="metric" id="e-wr">—</div><div class="metric-label">Win Rate</div></div>
+                    <div class="col"><div class="metric" id="e-bewr">—</div><div class="metric-label">Break-even WR</div></div>
+                    <div class="col"><div class="metric" id="e-rr">—</div><div class="metric-label">Reward : Risk</div></div>
+                    <div class="col"><div class="metric" id="e-pf">—</div><div class="metric-label">Profit Factor</div></div>
+                    <div class="col"><div class="metric" id="e-evr">—</div><div class="metric-label">EV / R</div></div>
+                    <div class="col"><div class="metric" id="e-evinr">—</div><div class="metric-label">EV / trade</div></div>
+                    <div class="col"><div class="metric" id="e-edge">—</div><div class="metric-label">Edge (WR−BE)</div></div>
+                </div>
+                <div class="form-text mt-2">Chase <strong>R:R</strong>, not win rate — a book with RR 1.5 may lose 60% and still print. If Win Rate is below Break-even WR, the geometry is −EV.</div>
+            </div>
+        </div>
+
         <!-- Z-Score Monitor -->
         <div class="card mt-3">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -735,6 +755,31 @@
                        trailing_stop:'bg-info text-dark', hard_time_stop:'bg-warning text-dark',
                        manual:'bg-secondary' };
     const _EXITLBL = { dollar_stop:'stop price', hard_time_stop:'hard time' };
+    async function pollExpectancy() {
+        try {
+            const e = await fetch('/api/expectancy').then(x => x.json());
+            const T = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            const num = (v, s) => v == null ? '—' : (typeof v === 'number' ? v.toFixed(s) : v);
+            T('e-wr', e.closed ? e.win_rate.toFixed(1) + '%' : '—');
+            T('e-bewr', e.breakeven_win_rate == null ? '—' : e.breakeven_win_rate.toFixed(1) + '%');
+            T('e-rr', num(e.reward_risk, 2));
+            T('e-pf', num(e.profit_factor, 2));
+            T('e-evr', num(e.expectancy_r, 3));
+            T('e-evinr', e.closed ? _rs(e.expectancy_inr) : '—');
+            T('e-edge', e.edge == null ? '—' : (e.edge > 0 ? '+' : '') + e.edge.toFixed(1) + '%');
+            const vb = document.getElementById('e-verdict');
+            if (vb) {
+                if (!e.closed) { vb.textContent = 'no trades'; vb.className = 'badge bg-secondary'; }
+                else if (e.positive) { vb.textContent = '+EV'; vb.className = 'badge bg-success'; }
+                else { vb.textContent = '−EV'; vb.className = 'badge bg-danger'; }
+            }
+            // colour EV/R and edge by sign
+            const evrEl = document.getElementById('e-evr');
+            if (evrEl) evrEl.className = 'metric ' + (e.expectancy_r > 0 ? 'text-success' : (e.expectancy_r < 0 ? 'text-danger' : ''));
+            const edgeEl = document.getElementById('e-edge');
+            if (edgeEl) edgeEl.className = 'metric ' + (e.edge > 0 ? 'text-success' : (e.edge < 0 ? 'text-danger' : ''));
+        } catch (err) { /* leave last values */ }
+    }
     async function pollJournal() {
         try {
             const j = await fetch('/api/trades/journal').then(x => x.json());
@@ -1072,6 +1117,7 @@
     pollMode();     setInterval(pollMode, 3000);
     pollPreflight(); setInterval(pollPreflight, 3000);
     pollJournal();  setInterval(pollJournal, 3000);
+    pollExpectancy(); setInterval(pollExpectancy, 4000);
     pollExecution(); setInterval(pollExecution, 2000);
     pollExchangeOrders(); setInterval(pollExchangeOrders, 5000);
     pollTrades();   setInterval(pollTrades, 3000);
