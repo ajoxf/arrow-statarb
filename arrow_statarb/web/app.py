@@ -1899,6 +1899,32 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         distribution and data-driven take-profit / max-hold suggestions."""
         return jsonify(trade_log.take_hold_calibration())
 
+    @app.route("/api/backtest", methods=["POST"])
+    def api_backtest():
+        """Replay the CURRENT collected signal window (real data) through the live
+        strategy + Indian cost model, and return the metrics + expectancy sheet.
+        No fabricated data — only what's actually been collected this session."""
+        from arrow_statarb.core.backtest import Backtester
+        bars = signal_engine.export_bars()
+        if len(bars) < 2:
+            return jsonify({"error": "not enough collected data yet — let the "
+                                     "signal window fill first"})
+        sp, al, f = _signal_params(), _algo_params(), cfg.section("filters")
+        bt = Backtester(
+            signal_params=sp, strategy_params=al,
+            lot_size=int(_lot_multiplier() or 1),
+            brokerage_per_lot=float(f.get("brokerage_per_lot", 20)),
+            slippage_per_lot=float(f.get("slippage_per_lot", 5)),
+            lots=int(_algo_lots["lots"]),
+            capital=float(cfg.get("risk.capital_at_risk_inr", 0) or 0) or None,
+            hedge_ratio=float(cfg.get("signal.hedge_ratio", 1) or 1),
+            stt_pct=float(f.get("stt_pct", 0.02) or 0),
+            other_cost_pct=float(f.get("other_cost_pct", 0) or 0),
+            capital_gains_pct=float(f.get("capital_gains_pct", 0) or 0),
+            stt_a_pct=(float(f["stt_a_pct"]) if f.get("stt_a_pct") is not None else None),
+            stt_b_pct=(float(f["stt_b_pct"]) if f.get("stt_b_pct") is not None else None))
+        return jsonify(bt.run(bars))
+
     @app.route("/api/trades/clear", methods=["POST"])
     def api_trades_clear():
         trade_log.clear()

@@ -430,6 +430,12 @@ class SignalEngine:
                 "variance_ratio": round(vr, 3), "slope": float(arr[-1] - arr[0]),
                 "anchor": round(anchor, 4)}
 
+    def export_bars(self):
+        """The collected window as [(ts, leg_a, leg_b), …] — real data to backtest
+        the strategy on (no fabricated numbers)."""
+        with self._lock:
+            return [(ts, la, lb) for (ts, la, lb, _sp) in self._samples]
+
     def get_signal(self) -> Dict:
         """Return the live signal snapshot — the ONE z the algo + dashboard use."""
         p = self._p()

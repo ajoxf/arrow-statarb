@@ -161,6 +161,20 @@ def test_hedge_ratio_order_sizing(tmp_path):
     assert by_sym["NIFTYBEES"]["side"] == "buy"      # buy the ETF
 
 
+def test_backtest_endpoint(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    client = app.test_client()
+    # no data collected yet → graceful error, not a crash
+    assert "error" in client.post("/api/backtest").get_json()
+    # feed the signal window some bars, then backtest runs on the real data
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(400):
+        eng.push(24000.0 + (i % 5) - 2, 24080.0, ts=1000.0 + i)
+    m = client.post("/api/backtest").get_json()
+    assert m.get("bars") == 400
+    assert "expectancy" in m and "below_cost_pct" in m
+
+
 def test_close_arms_whatif_shadow(tmp_path):
     # A non-target close arms a what-if-held watch (clean target hits don't).
     app, _ = _app(tmp_path, mode="live")

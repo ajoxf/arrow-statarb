@@ -38,8 +38,14 @@ class Backtester:
         slippage_per_lot: float = 5.0,
         lots: int = 1,
         capital: Optional[float] = None,
+        hedge_ratio: float = 1.0,
+        stt_pct: float = 0.0,
+        other_cost_pct: float = 0.0,
+        capital_gains_pct: float = 0.0,
+        stt_a_pct: Optional[float] = None,
+        stt_b_pct: Optional[float] = None,
     ):
-        self.signal_params = signal_params or {}
+        self.signal_params = dict(signal_params or {})
         self.strategy_params = dict(strategy_params or {})
         self.strategy_params.setdefault("lots", lots)
         self.lot_size = int(lot_size)
@@ -47,6 +53,16 @@ class Backtester:
         self.slippage_per_lot = float(slippage_per_lot)
         self.lots = int(lots)
         self.capital = capital
+        # Non-1:1 pairs: scale leg_a by k so the settled spread matches the signal.
+        self.hedge_ratio = float(hedge_ratio)
+        self.signal_params.setdefault("hedge_ratio", self.hedge_ratio)
+        # Indian costs applied at settlement (STT/CTT + other charges + CGT), so
+        # the backtest P&L reflects real net, not just brokerage. 0 = off.
+        self.stt_pct = float(stt_pct)
+        self.other_cost_pct = float(other_cost_pct)
+        self.capital_gains_pct = float(capital_gains_pct)
+        self.stt_a_pct = stt_a_pct
+        self.stt_b_pct = stt_b_pct
 
     # ── fills (slippage applied adversely, per leg, in ₹/unit) ────────────────
     def _fill(self, direction: str, a: float, b: float, opening: bool) -> Tuple[float, float]:
@@ -77,11 +93,17 @@ class Backtester:
             elif entry_ts["t"] is not None:
                 holds.append(st["ts"] - entry_ts["t"])
                 entry_ts["t"] = None
+            # Settle on the hedge-scaled spread (k×a − b) so the P&L matches the
+            # z the algo traded, and apply the Indian cost stack on close.
             tlog.record(action=action, direction=direction, lots=lots,
-                        spread=round(a_fill - b_fill, 4), dry_run=True, status="BACKTEST",
+                        spread=round(self.hedge_ratio * a_fill - b_fill, 4),
+                        dry_run=True, status="BACKTEST",
                         source="algo", lot_size=self.lot_size, zscore=z,
                         leg_a_price=a_fill, leg_b_price=b_fill, name="backtest",
-                        exit_reason=reason)
+                        exit_reason=reason,
+                        stt_pct=self.stt_pct, other_cost_pct=self.other_cost_pct,
+                        capital_gains_pct=self.capital_gains_pct,
+                        stt_a_pct=self.stt_a_pct, stt_b_pct=self.stt_b_pct)
 
         def execute_fn(direction, lots, source=None, z=None, spread=None, **_):
             _record("OPEN", direction, lots, opening=True, z=z)
@@ -131,6 +153,17 @@ class Backtester:
         span_days = max((bars[-1][0] - bars[0][0]) / 86400.0, 1e-9)
         avg_notional = (sum(0.5 * (b[1] + b[2]) for b in bars) / len(bars)) * self.lot_size * self.lots
 
+        # Dead-market check (reference §12's hardest truth): fraction of trades
+        # whose GROSS move was below the round-trip cost. High ⇒ trading toll-
+        # sized wiggles that just donate the toll — a selection/regime problem,
+        # not a tuning one.
+        below = 0
+        for t in trips:
+            gross = abs(float(t.get("spread_pnl", 0) or 0))
+            cost = float(t.get("spread_pnl", 0) or 0) - float(t.get("net_pnl", 0) or 0)
+            if gross < cost:
+                below += 1
+
         out = {
             "bars": len(bars), "span_days": round(span_days, 2),
             "trades": n, "wins": wins,
@@ -146,6 +179,10 @@ class Backtester:
             "avg_notional": round(avg_notional, 2),
             "equity_curve": equity,
             "return_on_notional_pct": round(100.0 * total / avg_notional, 3) if avg_notional else None,
+            "below_cost_trades": below,
+            "below_cost_pct": round(100.0 * below / n, 1) if n else 0.0,
+            # the book on one sheet, in R (win rate, R:R, PF, break-even WR, EV/R)
+            "expectancy": tlog.expectancy(),
         }
         if self.capital:
             roi = 100.0 * total / self.capital

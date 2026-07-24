@@ -46,6 +46,16 @@
 </div>
 <div class="card mt-3">
     <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-play-circle me-2"></i>Backtest — collected window
+            <span class="text-secondary small ms-1">replays the REAL collected data through the live strategy + Indian costs</span></span>
+        <button class="btn btn-sm btn-primary" id="bt-run" onclick="runBacktest()"><i class="bi bi-play"></i> Run</button>
+    </div>
+    <div class="card-body">
+        <div id="bt-out" class="text-secondary small">Click Run to backtest the strategy on the data collected this session. No fabricated numbers — only what's been sampled.</div>
+    </div>
+</div>
+<div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="bi bi-activity me-2"></i>Z-Score Excursions
             <span class="text-secondary small ms-1">since <span id="x-since">—</span></span></span>
         <button class="btn btn-sm btn-outline-secondary" onclick="resetExc()"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
@@ -136,6 +146,31 @@
         if (s == null) return '—';
         s = Math.round(s); const m = Math.floor(s/60), sec = s%60;
         return m ? `${m}m ${sec}s` : `${sec}s`;
+    }
+    async function runBacktest() {
+        const btn = document.getElementById('bt-run'), out = document.getElementById('bt-out');
+        btn.disabled = true; out.textContent = 'Running…';
+        try {
+            const m = await fetch('/api/backtest', { method: 'POST' }).then(x => x.json());
+            if (m.error) { out.innerHTML = '<span class="text-warning">' + m.error + '</span>'; }
+            else {
+                const e = m.expectancy || {};
+                const g = (l, v) => `<div class="col"><div class="metric">${v}</div><div class="metric-label">${l}</div></div>`;
+                out.innerHTML = '<div class="row text-center g-3">'
+                    + g('Bars', m.bars) + g('Trades', m.trades)
+                    + g('Total P&amp;L', _rs(m.total_pnl))
+                    + g('Win Rate', (m.win_rate_pct || 0).toFixed(1) + '%')
+                    + g('R:R', e.reward_risk == null ? '—' : e.reward_risk.toFixed(2))
+                    + g('EV/R', e.expectancy_r == null ? '—' : e.expectancy_r.toFixed(3))
+                    + g('Max DD', _rs(m.max_drawdown))
+                    + g('Below-cost', (m.below_cost_pct || 0).toFixed(0) + '%')
+                    + '</div>'
+                    + `<div class="form-text mt-2">Window span ${m.span_days}d · avg hold ${m.avg_held_sec == null ? '—' : m.avg_held_sec + 's'}`
+                    + (m.below_cost_pct > 50 ? ' · <span class="text-warning">most moves were below cost — a dead/trending market, not a tuning problem</span>' : '')
+                    + '</div>';
+            }
+        } catch (e) { out.innerHTML = '<span class="text-danger">backtest failed: ' + e + '</span>'; }
+        btn.disabled = false;
     }
     async function load() {
         // Session summary from the per-event stats.
