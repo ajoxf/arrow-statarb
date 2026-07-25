@@ -163,6 +163,22 @@ def test_hedge_ratio_order_sizing(tmp_path):
     assert by_sym["NIFTYBEES"]["side"] == "buy"      # buy the ETF
 
 
+def test_telegram_status_and_settings(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    client = app.test_client()
+    st = client.get("/api/telegram/status").get_json()
+    assert "token_set" in st and "configured" in st
+    # settings round-trip for the telegram section (token never posted)
+    client.post("/api/settings", json={"telegram": {"enabled": True, "chat_id": "555",
+                                                     "notify_health": True}})
+    back = client.get("/api/settings").get_json()["telegram"]
+    assert back["enabled"] is True and back["chat_id"] == "555"
+    assert back["notify_health"] is True
+    # test send without a token → graceful failure message
+    res = client.post("/api/telegram/test").get_json()
+    assert res["ok"] is False and "ARROW_TELEGRAM_BOT_TOKEN" in res["message"]
+
+
 def test_health_endpoint(tmp_path):
     app, _ = _app(tmp_path, mode="dry_run")
     client = app.test_client()

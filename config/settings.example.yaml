@@ -257,6 +257,16 @@ exits:
                               # % of profit_target_inr. 0 = arm from first profit.
                               # e.g. 70 = arm at 70% of target.
 
+# Telegram alerts (entry/exit/health). The bot TOKEN is a credential and is read
+# ONLY from the environment (ARROW_TELEGRAM_BOT_TOKEN) — never stored here. The
+# chat id + toggles below are non-secret. Off by default.
+telegram:
+  enabled: false
+  chat_id: ""                 # your Telegram chat id (not secret)
+  notify_trades: true         # entry / exit notifications
+  notify_health: false        # loop-frozen / feed-stalled alerts
+  notify_errors: true         # exit failures, halts
+
 # Only trade inside this window (IST).
 trading_hours:
   enabled: false              # optional hard window (start..end); see also the close buffer

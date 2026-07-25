@@ -540,6 +540,48 @@
         </div>
     </div>
 
+    <!-- ── Telegram Alerts ───────────────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-telegram me-2"></i>Telegram Alerts</div>
+            <div class="card-body">
+                <div class="alert alert-secondary py-2 small mb-3">
+                    Entry / exit / health alerts to a Telegram chat. The bot <strong>token is a secret</strong>
+                    and lives in <code>.env</code> as <code>ARROW_TELEGRAM_BOT_TOKEN</code> — never here.
+                    Create a bot with <em>@BotFather</em>, then put your chat id below.
+                </div>
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <span class="small text-secondary">Bot token (.env):</span>
+                    <span id="tg-token-status" class="badge bg-secondary">unknown</span>
+                </div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="tg-enabled" role="switch">
+                    <label class="form-check-label fw-bold" for="tg-enabled">Enable Telegram alerts</label>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Chat ID</label>
+                        <input type="text" class="form-control" id="tg-chat" placeholder="e.g. 123456789">
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <button class="btn btn-outline-primary" type="button" onclick="testTelegram()">
+                            <i class="bi bi-send me-1"></i>Send test</button>
+                        <span id="tg-test-msg" class="small ms-2"></span>
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end"><div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="tg-trades" role="switch">
+                        <label class="form-check-label" for="tg-trades">Trades</label></div></div>
+                    <div class="col-md-4 d-flex align-items-end"><div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="tg-health" role="switch">
+                        <label class="form-check-label" for="tg-health">Health</label></div></div>
+                    <div class="col-md-4 d-flex align-items-end"><div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="tg-errors" role="switch">
+                        <label class="form-check-label" for="tg-errors">Errors</label></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── Fast-Exit Overrides (dollar P&L) ──────────────────────────────── -->
     <div class="col-lg-6">
         <div class="card h-100">
@@ -842,6 +884,16 @@
             _set('rc-thresh', s.reconcile.mismatch_threshold);
             _set('rc-interval', s.reconcile.interval_sec);
         }
+        if (s.telegram) {
+            _setChk('tg-enabled', s.telegram.enabled);
+            _set('tg-chat', s.telegram.chat_id);
+            _setChk('tg-trades', s.telegram.notify_trades);
+            _setChk('tg-health', s.telegram.notify_health);
+            _setChk('tg-errors', s.telegram.notify_errors);
+            const tb = document.getElementById('tg-token-status');
+            if (tb) { tb.textContent = s.telegram.token_set ? 'set ✓' : 'missing';
+                      tb.className = 'badge ' + (s.telegram.token_set ? 'bg-success' : 'bg-danger'); }
+        }
         if (s.costs) {
             _setChk('c-useseg', s.costs.use_segment_costs);
             _set('c-gst', s.costs.gst_pct);
@@ -988,6 +1040,13 @@
                 ctt_mcx_fo: _blankNull('c-ctt-mcx'),
                 stt_nse_cm: _blankNull('c-stt-nsecm'),
             },
+            telegram: {
+                enabled: document.getElementById('tg-enabled').checked,
+                chat_id: document.getElementById('tg-chat').value,
+                notify_trades: document.getElementById('tg-trades').checked,
+                notify_health: document.getElementById('tg-health').checked,
+                notify_errors: document.getElementById('tg-errors').checked,
+            },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,
             },
@@ -998,6 +1057,18 @@
         msg.innerHTML = res.success ? '<span class="text-success">Saved ✓</span>' : '<span class="text-danger">Save failed</span>';
         setTimeout(() => msg.textContent = '', 3000);
         refreshBadges();
+    }
+
+    async function testTelegram() {
+        const msg = document.getElementById('tg-test-msg');
+        msg.textContent = 'sending…'; msg.className = 'small ms-2 text-secondary';
+        // save current settings first so the chat id/enable are applied
+        await saveSettings();
+        try {
+            const r = await fetch('/api/telegram/test', { method: 'POST' }).then(x => x.json());
+            msg.textContent = r.message || (r.ok ? 'sent' : 'failed');
+            msg.className = 'small ms-2 ' + (r.ok ? 'text-success' : 'text-danger');
+        } catch (e) { msg.textContent = 'error: ' + e; msg.className = 'small ms-2 text-danger'; }
     }
 
     async function deriveHedge() {

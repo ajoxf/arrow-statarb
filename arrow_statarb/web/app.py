@@ -16,6 +16,7 @@ mpp market orders, gated by the dry-run/live mode.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -42,6 +43,7 @@ from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
+from arrow_statarb.core.telegram import TelegramNotifier
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 _MODE_STATUS = {"dry_run": "DRY-RUN", "live_sim": "LIVE-SIM", "live": "LIVE"}
@@ -113,6 +115,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     untracked_ledger = UntrackedLedger(UNTRACKED_FILE)
     shadow = ShadowTracker(SHADOW_FILE,
                            window_sec=float(cfg.get("exits.whatif_window_min", 60) or 60) * 60.0)
+
+    def _telegram_params() -> Dict:
+        t = cfg.section("telegram")
+        return {"enabled": bool(t.get("enabled", False)),
+                "chat_id": str(t.get("chat_id", "") or ""),
+                "notify_trades": bool(t.get("notify_trades", True)),
+                "notify_health": bool(t.get("notify_health", False)),
+                "notify_errors": bool(t.get("notify_errors", True))}
+    telegram = TelegramNotifier(params_provider=_telegram_params)  # token from env only
+
     execution_log = ExecutionLog()
 
     # ── broker-read cache (positions + funds) ─────────────────────────────────
@@ -406,6 +418,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
                              capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              name=m["name"])
+            _zt = z if z is not None else m["zscore"]
+            _zx = f"{float(_zt):+.2f}" if _zt is not None else "n/a"
+            telegram.notify(
+                f"🟢 ENTRY {direction.replace('_SPREAD','')} · {m['name']} · "
+                f"z={_zx} · {lots} lot(s) · {mode}", "trade")
         elif res.get("slippage_abort"):
             # The entry filled but slipped past the budget and was unwound — no
             # position results, yet real money moved (fees on 4 fills + the
@@ -463,6 +480,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                target_net=rec.get("target"))
                 except Exception:                        # noqa: BLE001 — never block a close
                     pass
+            _np = float(rec.get("net_pnl", 0) or 0)
+            _emoji = "🟢" if _np > 0 else ("🔴" if _np < 0 else "⚪")
+            telegram.notify(
+                f"{_emoji} EXIT {reason or 'manual'} · {m['name']} · net ₹{_np:.0f}",
+                "trade")
         return res
 
     # ── live leg prices (stream first, REST fallback) ────────────────────────
@@ -896,6 +918,20 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "running": bool(arrow_algo.get_state().get("running")),
             **v,
         })
+
+    @app.route("/api/telegram/status", methods=["GET"])
+    def api_telegram_status():
+        """Whether the bot token (env) and chat id are set — the token is never
+        returned, only whether it exists."""
+        return jsonify({"token_set": telegram.token_set(),
+                        "configured": telegram.configured(),
+                        **_telegram_params()})
+
+    @app.route("/api/telegram/test", methods=["POST"])
+    def api_telegram_test():
+        """Send a test message to the configured chat."""
+        ok, msg = telegram.test()
+        return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/shadow", methods=["GET"])
     def api_shadow():
@@ -1509,6 +1545,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "persist_session": bool(bk.get("persist_session", True)),
                     "cache_ttl_sec": bk.get("cache_ttl_sec", 2),
                 },
+                "telegram": {
+                    "enabled": bool(cfg.section("telegram").get("enabled", False)),
+                    "chat_id": str(cfg.section("telegram").get("chat_id", "") or ""),
+                    "notify_trades": bool(cfg.section("telegram").get("notify_trades", True)),
+                    "notify_health": bool(cfg.section("telegram").get("notify_health", False)),
+                    "notify_errors": bool(cfg.section("telegram").get("notify_errors", True)),
+                    "token_set": bool(os.environ.get("ARROW_TELEGRAM_BOT_TOKEN", "")),
+                },
                 "exits": {
                     "dollar_stop_inr": xo.get("dollar_stop_inr", 0),
                     "profit_target_inr": xo.get("profit_target_inr", 0),
@@ -1748,6 +1792,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                         _seg.pop(seg, None)
                 else:
                     _seg.setdefault(seg, {})["stt_sell_pct"] = _num(v, 0.0)
+
+        tg = raw.setdefault("telegram", {})
+        tgd = data.get("telegram") or {}
+        for k in ("enabled", "notify_trades", "notify_health", "notify_errors"):
+            if k in tgd:
+                tg[k] = bool(tgd[k])
+        if "chat_id" in tgd:
+            tg["chat_id"] = str(tgd["chat_id"] or "")        # non-secret; token stays in env
 
         md = data.get("mode") or {}
         if "paper_trading" in md:
