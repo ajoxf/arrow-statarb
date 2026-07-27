@@ -40,3 +40,7 @@ data/signal_window.json
 data/untracked_closes.json
 # Cached Arrow session token (a credential — never commit)
 data/arrow_session.json
+# What-if-held shadow watches — runtime only
+data/whatif_shadow.json
+# Liveness heartbeat (written every few seconds) — runtime only
+data/heartbeat.txt
