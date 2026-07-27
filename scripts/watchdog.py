@@ -23,7 +23,7 @@ from arrow_statarb.core.health import Heartbeat, should_restart   # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEARTBEAT = ROOT / "data" / "heartbeat.txt"
-START_CMD = [sys.executable, str(ROOT / "scripts" / "run_arrow.py")]
+START_CMD = [sys.executable, str(ROOT / "run_arrow.py")]
 
 CHECK_SEC = float(os.environ.get("WATCHDOG_CHECK_SEC", "15"))
 MAX_HEARTBEAT_SEC = float(os.environ.get("WATCHDOG_MAX_HEARTBEAT_SEC", "60"))
