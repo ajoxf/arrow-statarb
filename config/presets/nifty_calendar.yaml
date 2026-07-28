@@ -1,0 +1,365 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PRESET — NIFTY near-vs-far calendar spread (same underlying, both NSE futures).
+#
+# APPLY IT (copy over your live config, which is gitignored so this preset can
+# ship via git):
+#     Linux/Mac:  cp config/presets/nifty_calendar.yaml config/settings.yaml
+#     Windows:    copy config\presets\nifty_calendar.yaml config\settings.yaml
+# Then restart the app WHEN FLAT (no open position).
+#
+# BEFORE LIVE — review the 4 account-specific values (search "SET TO YOUR NUMBER"):
+#     risk.capital_at_risk_inr   (sizing dial; start 150000 → stop ≈ ₹2,250)
+#     risk.max_daily_loss        (start 12000 ≈ 5 stops)
+#     risk.min_live_margin       (your broker's calendar-spread margin + buffer)
+#     execution.sim_default_lot_size (verify the CURRENT NIFTY lot size)
+#
+# Calendar essentials already set: hedge_ratio 1.0 · per-segment costs on ·
+# no-entry 3 days before expiry · stats interval 300 · cost floor 0 ·
+# max_entry_spread_divergence 4 (stale far-leg guard).
+#
+# MODE = live_sim (real executor, SIMULATED broker — no real orders) so you can
+# measure amplitude first (Analysis → Backtest → Below-cost %, and the Take/Hold
+# Calibration card). Flip mode to `live` — or use the dashboard toggle — once the
+# backtest shows the edge actually pays the cost. A calendar is a THIN spread.
+#
+# Credentials are NEVER stored here — they come from environment variables
+# (ARROW_APP_ID, ARROW_USER_ID, ARROW_PASSWORD, ARROW_API_SECRET,
+# ARROW_TOTP_SECRET); see .env.example.
+# ═══════════════════════════════════════════════════════════════════════════
+
+broker:
+  name: arrow
+  # Cache the Arrow session token (valid ~24h) to a gitignored local file so a
+  # restart reuses it and skips the 2FA login. Cleared on explicit Disconnect.
+  persist_session: true
+  # Segment key → Arrow ExchSeg (the master's exchange+segment field).
+  segments:
+    nse_cm: NSECM
+    nse_fo: NSEFO
+    bse_cm: BSECM
+    bse_fo: BSEFO
+    mcx_fo: MCXFO
+  # Segment key → Arrow Exchange enum used on orders/quotes.
+  exchange_enum:
+    nse_cm: NSE
+    nse_fo: NFO
+    bse_cm: BSE
+    bse_fo: BFO
+    mcx_fo: MCX
+  lot_overrides: {}
+  # How often a background thread refreshes positions/funds from Arrow. The
+  # dashboard + pre-entry flat check read this cache, so a slow/flaky Arrow API
+  # never piles up request threads or blanks the funds card.
+  cache_ttl_sec: 2
+
+# Default 2-leg spread. The dashboard picker overrides these into
+# config/leg_assignments.yaml.
+instruments:
+  leg_a: { segment: nse_fo, symbol: NIFTY30JUN26F, ratio: 1 }
+  leg_b: { segment: nse_fo, symbol: NIFTY28JUL26F, ratio: 1 }
+
+# Signal — the single server-side source of truth (algo AND dashboard read it).
+signal:
+  window_minutes: 150         # rolling window for mean/std/z (a little larger than
+                              # the warm-up so a full 2h span is reliably reachable —
+                              # the window trims at exactly its length)
+  sample_interval_sec: 0.5    # how often the server samples prices
+  stats_update_interval_sec: 300  # recompute rolling mean/std only every N s (bands
+                              # stay stable; z still uses the live spread). 0 = every
+                              # tick (bands drift). ~300 (5 min) for steady bands.
+  display_refresh_ms: 500     # dashboard live-price poll cadence (min 500ms)
+  min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
+  # Window persistence: save the rolling window to data/signal_window.json so a
+  # quick restart resumes the warm-up instead of re-collecting it. Restore is
+  # REFUSED if the legs changed or the newest saved sample is older than
+  # resume_max_gap_min (stale regime → collect fresh). Safe for short restarts;
+  # overnight gaps fall outside the window and re-collect automatically.
+  persist_window: true
+  resume_max_gap_min: 10      # max minutes the program can be off and still resume
+  persist_interval_sec: 30    # how often the window is flushed to disk
+  min_hold_sec: 30             # suppress the reversion/target exit for this long
+                              # after entry, so a single noisy tick can't trigger a
+                              # 1-second round trip (paying the bid-ask twice for
+                              # microstructure noise). Stop-loss is NEVER suppressed;
+                              # the time-stop is a maximum, always beyond this. 0 = off.
+  entry_zscore: 2.0
+  exit_zscore: 0.0
+  stop_zscore: 4.0
+  hedge_ratio: 1.0            # NON-1:1 PAIRS: spread = hedge_ratio × leg_a − leg_b,
+                             # to put two differently-priced legs on the same scale
+                             # (e.g. NIFTYBEES ETF vs NIFTY future, ~90× apart —
+                             # set ≈ future_price ÷ ETF_price). 1.0 = same-scale
+                             # legs (calendar / cash-future), i.e. raw leg_a − leg_b.
+                             # leg_b is the CONTRACT leg (its lot size denominates
+                             # P&L); leg_a is sized to match leg_b's exposure × k.
+  confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+  max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
+                              # z re-sampled at order time has moved more than
+                              # this from the decision z. 0 = disabled.
+  max_entry_spread_divergence: 4.0  # stale-FAR-LEG guard (in spread points): at
+                              # order time, read the live leg prices (fresher than
+                              # the sampled signal) and refuse the entry if the real
+                              # spread has diverged from the decision spread by more
+                              # than this. Catches a phantom z from a stale far-month
+                              # quote — the failure the z-guard cannot see. 0 = off.
+  max_entry_zscore: 3.5       # regime-shift guard: refuse an entry when |z|
+                              # exceeds this (a blowout is rarely a reversion).
+                              # 0 = disabled. Keep below stop_zscore.
+
+# Probability / EV / cost gate (OU gambler's-ruin model).
+filters:
+  enable_probability_filter: true
+  commission_basis: per_lot   # per_lot | per_order
+  min_win_probability: 0.6
+  min_expected_value: 0
+  brokerage_per_lot: 20       # Arrow charges a flat ₹20 per lot per order (per
+                              # leg, one way). No maker/taker distinction. The
+                              # model applies ×2 legs and ×2 (entry+exit), so a
+                              # 1-lot spread round trip ≈ ₹80.
+  slippage_per_lot: 10         # INR per lot per leg, one way
+  # Per-leg STT for a NON-1:1 pair, % of notional on each leg's sell. Leave unset
+  # (blank) for a same-instrument spread — both then use stt_pct below. Example
+  # for NIFTYBEES/NIFTY-future:  stt_a_pct: 0.001 (ETF) , stt_b_pct: 0.02 (future).
+  # stt_a_pct:
+  # stt_b_pct:
+  stt_pct: 0.02               # Securities Transaction Tax, % of notional on the
+                              # SELL side. A calendar round trip has 2 sells (one
+                              # leg at entry, the other at exit) → charged into net
+                              # P&L and break-even. 0 = off. (NSE futures ≈ 0.02%.)
+  other_cost_pct: 0.005       # catch-all % of notional for exchange txn charges +
+                              # GST + SEBI + stamp duty, charged on all 4 leg
+                              # turnovers of a round trip. Calibrate to your real
+                              # contract note. 0 = off.
+  capital_gains_pct: 0        # Capital-Gains / Income Tax %, applied as a haircut on
+                              # POSITIVE net profit only (losses aren't taxed). Makes
+                              # break-even and the profit gates account for tax. NOTE:
+                              # F&O is business income in India (slab rate); this is a
+                              # per-trade approximation. 0 = off.
+  min_edge_multiple: 2.0      # dead-day gate: only take a trade whose expected
+                              # AFTER-TAX capture (target_fraction × |z| × σ × qty,
+                              # less CGT) is ≥ this × the full round-trip cost
+                              # (brokerage+slippage+STT+other). This is "only enter
+                              # when it can be profitable". 0 = off. Audit modeled vs
+                              # realized cost monthly via /api/cost-audit.
+  time_stop_half_lives: 3.0   # exit if held longer than this × half-life
+  half_life_min_sec: 30        # allowed-range lower bound (0 = none)
+  half_life_max_sec: 0        # allowed-range upper bound (0 = none)
+
+# Per-segment Indian transaction costs (STT/CTT + exchange txn + GST + SEBI +
+# stamp), replacing the single stt_pct / other_cost_pct catch-all above. OPT-IN:
+# when use_segment_costs is true, the cost of each leg is computed from ITS
+# segment's rates (so an ETF leg pays 0.001% STT while the future leg pays 0.02%
+# / MCX pays 0.01% CTT). When false (default) the legacy stt_pct/other_cost_pct
+# model is used and nothing changes. Defaults for each segment ship in
+# core/costs.py — override individual rates here and CALIBRATE to a real Arrow
+# contract note (an inflated cost estimate breaks the edge filter / cost floor).
+costs:
+  use_segment_costs: true
+  gst_pct: 18.0               # GST on (brokerage + exchange txn + SEBI), not notional
+  no_entry_days_before_expiry: 3   # block NEW entries within N days of expiry
+                                   # (roll/flatten — never hold a basis to settle);
+                                   # needs days_to_expiry from the broker master. 0 = off.
+  # Optional per-segment rate overrides (% of notional). A leg picks its rates by
+  # its segment key, or an explicit cost_key in the leg assignment ('etf',
+  # 'nse_cm_delivery', 'nse_cm_intraday'). Only the keys you set are overridden.
+  segments: {}
+  #   etf:    { stt_sell_pct: 0.001 }
+  #   nse_fo: { stt_sell_pct: 0.02, txn_pct: 0.0019, stamp_buy_pct: 0.002, sebi_pct: 0.0001 }
+  #   mcx_fo: { stt_sell_pct: 0.01, txn_pct: 0.0021, stamp_buy_pct: 0.002, sebi_pct: 0.0001 }
+
+# Risk management.
+risk:
+  lots_per_trade: 1
+  max_contracts_per_leg: 5    # hard position cap per leg
+  max_slippage_pct: 0.3       # ENTRY slippage budget: if the realized fill slips
+                              # more than this % of notional (vs LTP at placement),
+                              # the entry is UNWOUND (both legs flattened) — better a
+                              # missed trade than one starting underwater. Exits are
+                              # never unwound (they must complete). 0 = off.
+  max_daily_loss: 12000           # INR; 0 = disabled. Halts new entries when today's ‹SET TO YOUR NUMBER›
+                              # realized P&L ≤ −this.
+  min_live_margin: 50000      # INR; the Pre-Live "Account funded" check warns ‹SET TO YOUR NUMBER›
+                              # until usable margin ≥ this (your broker's SPAN+
+                              # exposure for 1 lot of the spread). 0 = just > 0.
+  capital_at_risk_inr: 150000      # your SPAN+exposure margin per trade (₹), the basis ‹SET TO YOUR NUMBER›
+                              # for %-of-capital stop/target. 0 = %-forms disabled.
+  # ── Tier A: loss-streak circuit breaker (consecutive losing closes) ──
+  loss_streak_reduce_at: 3    # after N consecutive losing closes, cut size by
+                              # loss_streak_reduce_pct. 0 = off.
+  loss_streak_reduce_pct: 20  # % size reduction once the reduce threshold hits.
+  loss_streak_pause_at: 5     # after N consecutive losing closes, HALT new
+                              # entries entirely (manual resume). 0 = off.
+
+# Self-healing reconciliation (Tier B). Compares engine belief vs the exchange's
+# bot-leg positions on a cadence; after N consecutive mismatches it force-clears a
+# ghost engine position (safe) and — only when auto_close is on — flattens exchange
+# orphans (REAL market orders). Cleanup costs go to the untracked-close ledger and
+# count against the daily-loss limit. Never touches non-bot instruments.
+reconcile:
+  enabled: true            # run the self-healing loop
+  interval_sec: 20
+  mismatch_threshold: 3     # act only after N consecutive mismatches
+  auto_close: false         # flatten exchange orphans automatically (REAL orders!)
+
+# Regime / trend-day guard (Tier A). Classifies the spread TRENDING vs RANGE over
+# a trailing window (Kaufman efficiency ratio + zero-crossings of a per-IST-day
+# 'morning anchor' + variance ratio). On TRENDING it halts NEW entries for the day
+# and auto-rearms next morning — the one macro failure a calendar spread has no
+# other defense against. All off by default.
+regime:
+  enabled: true
+  halt_on_trending: true          # latch a day-long entry halt when TRENDING
+  trend_direction_filter: false   # rising spread → SHORT-only, falling → LONG-only
+  window_samples: 120             # trailing window (samples) for the metrics
+  efficiency_ratio_max: 0.6       # ER ≥ this AND few crossings ⇒ TRENDING
+  min_zero_crossings: 4           # ≤ this many anchor crossings supports TRENDING
+  vr_lag: 5                       # variance-ratio lag (diagnostic)
+
+# Fast-exit overrides (Phase 1). Dollar-P&L exits evaluated EVERY tick in strict
+# priority ABOVE the z-score exit:  1) dollar stop  2) profit target  3) z-stop
+# 4) z-score target  5) time-stop. P&L is the live mark-to-market of the open
+# position (entry FILL spread vs current mid, × lots × lot_size, − round-trip
+# brokerage). The dollar stop is never gated by min-hold — risk before reward.
+exits:
+  dollar_stop_inr: 0          # INR; hard loss floor per trade — exit when net P&L
+                              # ≤ −this. 0 = off. (The z-stop still applies.)
+  profit_target_inr: 0        # INR; bank profit — exit when net P&L ≥ this. Note
+                              # the live figure does not pre-deduct EXIT slippage,
+                              # so leave a margin above round-trip cost. 0 = off.
+  # ── Tier A: gated reversion exit — never book a losing "profit-take" ──
+  reversion_require_profit: true   # exits only AFTER break-even — the z-reversion
+                                   # exit may fire only when net P&L ≥
+                                   # reversion_gate_inr (BE includes STT; fail-open
+                                   # if P&L can't be priced). Recommended ON.
+  reversion_gate_inr: 0            # ₹ floor above BE for the reversion exit (0 = BE;
+                                   # set >0 for "BE + profit")
+  # ── Tier B: scale-invariant exit levels (survive resizing / re-vol) ──
+  # Target precedence: σ-fraction > %-of-capital > fixed profit_target_inr,
+  # then raised to a cost floor. Stop = min(target/RR, %-capital × CAR) — tighter
+  # binds — else fixed dollar_stop_inr. All 0 = use the fixed-₹ fields above.
+  # ── Spec v2: z-stop demotion + hard time-stop (exit-path completeness) ──
+  z_stop_exit_enabled: false        # OFF = in-trade risk is DOLLARS only (recommended
+                                   # once a ₹/% stop is armed — post-entry the rolling
+                                   # z drifts, so its ₹ meaning wanders). FAIL-SAFE:
+                                   # auto re-enabled whenever NO dollar stop is armed;
+                                   # suppressed firings are logged for scoring.
+  hard_time_stop_mult: 3           # close ANY trade (regardless of P&L) after this ×
+                                   # max-hold — the sideways-loser clock. ~3 typical;
+                                   # 0 = off. NOTE: the reversion gate itself already
+                                   # decays to BE past 1× max-hold and releases at 2×.
+  profit_target_sigma_frac: 0      # target = frac × |z_entry| × σ_entry × qty (0.5–0.7 typical)
+  tp_capital_pct: 0.5                # TAKE PROFIT = BE + %: net P&L is post-cost, so
+                                   # net=0 is break-even; close at BE + this % of
+                                   # capital_at_risk_inr (e.g. 0.5 ⇒ BE + 0.5% cap).
+                                   # Needs capital_at_risk_inr > 0. 0 = off.
+  cost_floor_mult: 0               # raise target to ≥ this × round-trip cost (1.0–1.5)
+  stop_capital_pct: 1.5              # stop = this % of capital_at_risk_inr (e.g. 1.5)
+  stop_rr: 0                       # and/or target ÷ RR (e.g. 0.3 → wide); tighter of the two binds
+  # ── Phase 2: max-hold upgrade + trailing stop ──
+  max_hold_silent_when_losing: true  # when true, the time/max-hold exit only fires
+                              # if net P&L > 0 (a losing trade is left to the stop).
+                              # Only takes effect when dollar_stop_inr > 0 (a loss
+                              # backstop must exist), else max-hold fires regardless.
+  max_hold_z_progress_min: 0.5  # 0–1; suppress max-hold for a WINNING trade that has
+                              # reverted this fraction of the way from entry |z| to
+                              # exit |z| (let it run to target). 0 = off. ~0.5 typical.
+  trailing_stop_pct: 0        # % pullback from the peak net P&L that triggers an
+                              # exit. 0 = off. e.g. 20 = exit when P&L drops 20% off
+                              # its high-water mark.
+  # ── what-if-held shadow: after a non-target exit, keep marking the position's
+  # P&L on the frozen fills to see if it WOULD have reverted (premature-exit
+  # detector). Surfaced on the Analysis page; /api/shadow.
+  whatif_window_min: 60       # how long to track each closed trade (minutes)
+  whatif_update_sec: 5        # how often the shadow marks the live spread
+  trailing_stop_floor_pct: 0  # only arm the trailing stop once the peak reaches this
+                              # % of profit_target_inr. 0 = arm from first profit.
+                              # e.g. 70 = arm at 70% of target.
+
+# Telegram alerts (entry/exit/health). The bot TOKEN is a credential and is read
+# ONLY from the environment (ARROW_TELEGRAM_BOT_TOKEN) — never stored here. The
+# chat id + toggles below are non-secret. Off by default.
+telegram:
+  enabled: false
+  chat_id: ""                 # your Telegram chat id (not secret)
+  notify_trades: true         # entry / exit notifications
+  notify_health: false        # loop-frozen / feed-stalled alerts
+  notify_errors: true         # exit failures, halts
+
+# Only trade inside this window (IST).
+trading_hours:
+  enabled: false              # optional hard window (start..end); see also the close buffer
+  start_hour: 9
+  start_min: 15
+  end_hour: 15
+  end_min: 30
+  # No NEW entries within this many minutes of the exchange close (exits still
+  # allowed). Applies on NSE/BSE even when 'enabled' is false. 0 = disabled.
+  close_hour: 15              # NSE/BSE equity & F&O close
+  close_min: 30
+  no_entry_buffer_min: 20
+
+# LIVE order execution (SpreadExecutor).
+execution:
+  product: NRML
+  # ── liveness (reference §8): the app writes data/heartbeat.txt every
+  # heartbeat_sec from a timer thread (proves the loop is alive, not that data
+  # flows). /api/health reports heartbeat age AND last-tick age separately; run
+  # scripts/watchdog.py beside the app to auto-restart on a freeze.
+  heartbeat_sec: 10
+  health_max_heartbeat_sec: 60   # heartbeat older than this ⇒ loop may be frozen
+  health_max_tick_sec: 120       # no price tick for this long ⇒ feed stalled
+  default_lots: 1             # startup lot size only; the live count is driven by
+                              # risk.lots_per_trade (Settings → Lots per Trade)
+  cooldown_sec: 300
+  stop_cooldown_sec: 300      # Tier A: extra cooldown after a STOP exit (vs
+                              # cooldown_sec after any close). 0 = same as cooldown.
+  z_reset_after_stop: true   # Tier A: after a stop, block same-direction re-entry
+                              # until z re-enters the exit band (stops chasing a trend)
+  use_limit_orders: true      # place legs as LIMIT (priced off LTP), not MARKET
+  # ── fill-chasing aggressiveness (this is where slippage comes from) ──────────
+  # The limit is placed THROUGH the market by limit_offset_pct so it fills fast;
+  # that give-up IS the slippage. On a ~24000 future, 0.05% ≈ 12 pts crossed on
+  # entry alone — larger than a typical mean-reversion edge. Lower = better
+  # prices but more unfilled/half-filled (orphan) legs. Watch the journal's Slip
+  # column and tune: if slippage routinely exceeds edge, go gentler still.
+  limit_offset_pct: 0.02      # % through LTP for the limit (0.01% ≈ 2-3 pts; rest near the touch)
+  # Limit prices are snapped to the instrument tick (Arrow REJECTS off-tick
+  # prices, e.g. 23950.97). The broker master's tick is used when available;
+  # this is the fallback when it isn't. NIFTY & most NSE F&O tick = 0.10.
+  price_tick_size: 0.05
+  amend_step_pct: 0.02        # extra % added each amendment to chase the fill (smaller steps)
+  amend_interval_sec: 3.0     # re-price the resting limit this often (give it time to fill at your price)
+  fill_timeout_sec: 10         # wait this long for a limit before escalating (more patience)
+  poll_interval_sec: 0.4      # order-status (fill) poll cadence
+  limit_to_market: true       # on timeout, cancel the limit and re-send as MARKET
+                              # (kept on so EXITS always complete; an open position must get flat)
+  # Order-status safety: a status read that comes back UNKNOWN is treated as a
+  # TRANSIENT glitch — we poll through a grace window and never fabricate a fill.
+  unknown_status_grace_polls: 3   # consecutive UNKNOWN reads tolerated before deciding
+  assume_fill_on_unknown: false   # true ONLY for a broker with no status API (then a
+                                  # persistent UNKNOWN is assumed filled, unconfirmed)
+  max_exit_failures: 3        # after N consecutive failed auto-exits, HALT further
+                              # retries and alert (position kept) instead of
+                              # cancel-spamming the broker. 0 = retry indefinitely.
+  exit_retry_backoff_sec: 5   # exponential backoff between failed exit retries:
+                              # base × 2^(n-1). 0 = retry every tick (no backoff).
+  exit_retry_backoff_max_sec: 60  # cap on the backoff delay.
+  verify_flat_before_entry: true   # skip entry if a leg already has a position
+  verify_flat_fail_open: false     # if positions can't be read, False BLOCKS the
+                                   # entry (fail-safe); True lets it through
+  # ── live_sim: simulated broker the real executor runs against (no real orders) ─
+  # live-sim fills at the bid/ask touch (real depth from Arrow when available,
+  # else a synthetic book this many ticks wide). Set spread_ticks to your legs'
+  # real spread — the far month is usually wider than the near.
+  sim_tick_size: 0.05         # instrument tick size (NIFTY fut = 0.10)
+  sim_spread_ticks: 3.0       # synthetic bid-ask width (ticks) when no live depth
+  sim_extra_slip_ticks: 0.0   # extra adverse slip beyond the touch (latency/queue)
+  sim_slow_prob: 0.25         # chance a limit needs a couple polls/amendment to fill
+  sim_reject_prob: 0.0        # chance a leg is rejected at placement
+  sim_orphan_prob: 0.0        # chance a leg never fills → exercise orphan recovery
+  sim_default_lot_size: 75    # lot size when no live broker is connected ‹SET TO YOUR NUMBER›
+
+# Order routing. dry_run never reaches a broker; live_sim runs the REAL executor
+# against a simulated broker (no real orders); live transmits to Arrow.
+# Fail-safe: anything not exactly "live"/"live_sim" is treated as dry_run.
+mode: live_sim          # dry_run | live_sim | live
