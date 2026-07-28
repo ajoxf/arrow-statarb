@@ -13,9 +13,11 @@
 #     risk.min_live_margin       (your broker's calendar-spread margin + buffer)
 #     execution.sim_default_lot_size (verify the CURRENT NIFTY lot size)
 #
-# Calendar essentials already set: hedge_ratio 1.0 · per-segment costs on ·
-# no-entry 3 days before expiry · stats interval 300 · cost floor 0 ·
-# max_entry_spread_divergence 4 (stale far-leg guard).
+# Calendar essentials already set: hedge_ratio 1.0 · legacy cost model (single
+# stt_pct 0.02 + other_cost_pct 0.005, consistent across algo/journal/backtest;
+# per-segment costs OFF — redundant for a same-instrument spread) · no-entry 3
+# days before expiry · stats interval 300 · cost floor 0 · max_entry_spread_
+# divergence 4 (stale far-leg guard).
 #
 # MODE = live_sim (real executor, SIMULATED broker — no real orders) so you can
 # measure amplitude first (Analysis → Backtest → Below-cost %, and the Take/Hold
@@ -154,9 +156,17 @@ filters:
 # core/costs.py — override individual rates here and CALIBRATE to a real Arrow
 # contract note (an inflated cost estimate breaks the edge filter / cost floor).
 costs:
-  use_segment_costs: true
+  # OFF for a same-instrument calendar: both legs are NSE F&O with identical
+  # STT, so the per-segment model adds no value and — because only the ALGO
+  # honours it while the JOURNAL/BACKTEST use the legacy filters.stt_pct +
+  # other_cost_pct — it would make the booked P&L disagree with the exit logic.
+  # The legacy model (stt_pct 0.02 + other_cost_pct 0.005 in `filters`) is used
+  # consistently everywhere. Turn this ON only for an ASYMMETRIC pair where you
+  # also set filters.stt_a_pct / stt_b_pct so the journal stays consistent.
+  use_segment_costs: false
   gst_pct: 18.0               # GST on (brokerage + exchange txn + SEBI), not notional
-  no_entry_days_before_expiry: 3   # block NEW entries within N days of expiry
+  no_entry_days_before_expiry: 3   # (works regardless of use_segment_costs)
+                                   # block NEW entries within N days of expiry
                                    # (roll/flatten — never hold a basis to settle);
                                    # needs days_to_expiry from the broker master. 0 = off.
   # Optional per-segment rate overrides (% of notional). A leg picks its rates by
