@@ -1047,6 +1047,12 @@
                 notify_health: document.getElementById('tg-health').checked,
                 notify_errors: document.getElementById('tg-errors').checked,
             },
+            execution: {
+                limit_offset_pct: +document.getElementById('e-offset').value,
+                amend_step_pct: +document.getElementById('e-step').value,
+                amend_interval_sec: +document.getElementById('e-interval').value,
+                fill_timeout_sec: +document.getElementById('e-timeout').value,
+            },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,
             },
