@@ -427,9 +427,11 @@
 {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
-    // Floor the price-poll interval: sub-second HTTP polling floods the dev
-    // server (each request allocates a large read buffer) and can exhaust memory.
-    const REFRESH_MS = Math.max(500, {{ display_refresh_ms }});
+    // Floor the price-poll interval. Waitress (the production server in
+    // run_arrow.py) handles sub-second polling fine; the 100 ms floor just
+    // guards against a mis-set value pinning the CPU. Set signal.display_refresh_ms
+    // to 300 (and signal.sample_interval_sec to 0.3) for 0.3 s price updates.
+    const REFRESH_MS = Math.max(100, {{ display_refresh_ms }});
     const ENTRY_Z = {{ entry_zscore }};
     const STOP_Z  = {{ stop_zscore }};
 
