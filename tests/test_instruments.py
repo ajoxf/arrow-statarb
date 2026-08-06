@@ -89,6 +89,20 @@ def test_mcx_loads_through_index(arrow_broker):
     assert arrow_broker.resolve_lot_size("mcx_fo", "CRUDEOIL25JULFUT") == 100
 
 
+def test_resolve_expiry_ymd_info_only(arrow_broker):
+    # Info-only expiry readout (dashboard 'days to expiry'). From the master's
+    # Expiry field, and falling back to the expiry encoded in the symbol.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()
+    assert arrow_broker.resolve_expiry_ymd("CRUDEOIL25JULFUT") == (2025, 7, 21)
+    assert arrow_broker.resolve_expiry_ymd("NIFTY30JUN26F") == (2026, 6, 30)
+    # Unknown symbol → None (caller shows nothing), never raises.
+    assert arrow_broker.resolve_expiry_ymd("NOSUCHSYMBOL") is None
+    # Fallback to the expiry encoded in a DDMonYY symbol when no master row.
+    arrow_broker._sym_expiry = {}
+    assert arrow_broker.resolve_expiry_ymd("NIFTY30JUN26F") == (2026, 6, 30)
+
+
 def test_mcx_whole_rupee_tick_is_trusted(arrow_broker):
     # MCX ticks are legitimately whole-rupee (CRUDEOIL/GOLD ₹1, COTTON ₹10) —
     # trusted for mcx_fo but still discarded (→ default) for nse_fo.

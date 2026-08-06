@@ -39,12 +39,14 @@
                     <span class="badge bg-secondary">INR</span>
                     <span class="badge bg-info text-dark"><span id="lot-a">—</span> units/lot</span></div>
                 <div class="fs-4">Price: <span id="m-leg-a" class="text-success font-monospace">0.00</span></div>
+                <div class="small text-secondary" id="dte-a" title="Days to expiry — informational only; does not affect trading"></div>
             </div>
             <div class="col-md-6">
                 <div class="fs-5">Leg B (<span class="font-monospace">{{ leg_b }}</span>)
                     <span class="badge bg-secondary">INR</span>
                     <span class="badge bg-info text-dark"><span id="lot-b">—</span> units/lot</span></div>
                 <div class="fs-4">Price: <span id="m-leg-b" class="text-success font-monospace">0.00</span></div>
+                <div class="small text-secondary" id="dte-b" title="Days to expiry — informational only; does not affect trading"></div>
             </div>
         </div>
     </div>
@@ -646,6 +648,17 @@
             const lb = i.legs && i.legs.leg_b ? i.legs.leg_b.lot_size : null;
             document.getElementById('lot-a').textContent = la || '—';
             document.getElementById('lot-b').textContent = lb || '—';
+            // Days-to-expiry — display only, never gates trading.
+            const _dte = (leg) => {
+                const n = i.legs && i.legs[leg] ? i.legs[leg].days_to_expiry : null;
+                if (n === null || n === undefined) return '';
+                if (n < 0)  return '<i class="bi bi-hourglass-bottom"></i> expired';
+                if (n === 0) return '<i class="bi bi-hourglass-bottom"></i> expires today';
+                const cls = n <= 3 ? 'text-warning' : 'text-secondary';
+                return `<span class="${cls}"><i class="bi bi-hourglass-split"></i> ${n} day${n===1?'':'s'} to expiry</span>`;
+            };
+            document.getElementById('dte-a').innerHTML = _dte('leg_a');
+            document.getElementById('dte-b').innerHTML = _dte('leg_b');
             const w = document.getElementById('lot-mismatch');
             if (i.lot_mismatch) { w.textContent = i.message; w.classList.remove('d-none'); }
             else w.classList.add('d-none');

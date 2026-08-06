@@ -1,0 +1,241 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PRESET — MCX CRUDEOIL near-vs-far calendar spread (same underlying, both MCX
+# commodity futures). Sibling of nifty_calendar.yaml, retuned for MCX crude.
+#
+# APPLY IT (copy over your live config, which is gitignored so this preset can
+# ship via git):
+#     Linux/Mac:  cp config/presets/mcx_crudeoil_calendar.yaml config/settings.yaml
+#     Windows:    copy config\presets\mcx_crudeoil_calendar.yaml config\settings.yaml
+# Then restart the app WHEN FLAT (no open position). Pick the actual near/far
+# CRUDEOIL contracts on the Setup page (Segment → MCX Commodities).
+#
+# BEFORE LIVE — review the 5 account-specific values (search "SET TO YOUR NUMBER"):
+#     risk.capital_at_risk_inr   (calendar-spread SPAN margin; sizing dial)
+#     risk.max_daily_loss        (≈ 5 stops)
+#     risk.min_live_margin       (your broker's MCX calendar-spread margin + buffer)
+#     execution.sim_default_lot_size (CRUDEOIL lot = 100 barrels; CRUDEOILM = 10)
+#     the two leg symbols under `instruments` (or set them via the picker)
+#
+# MCX-SPECIFIC differences vs the NIFTY calendar:
+#   • Segment mcx_fo (Exchange.MCX). Lot = 100 barrels; TICK = ₹1 (not 0.05).
+#   • Cost = CTT 0.01% on the SELL (crude is NON-agri; agri = 0), vs NSE STT 0.02%.
+#     Legacy model: stt_pct 0.01 + other_cost_pct 0.006 (consistent across
+#     algo/journal/backtest; per-segment costs OFF — same reasoning as NIFTY).
+#   • SESSION runs 09:00–23:30 IST (evening session) — NOT 09:15–15:30. The close
+#     buffer + trading_hours below are set to the MCX clock.
+#   • EXPIRY: MCX crude has a tender/delivery window before expiry — never hold a
+#     contract into it. The dashboard shows "days to expiry" under each leg as
+#     INFO ONLY (it does NOT gate entries); roll the legs manually before expiry.
+#     no_entry_days_before_expiry is left 0 so nothing auto-blocks execution.
+#
+# MODE = live_sim (real executor, SIMULATED broker — no real orders) so you can
+# measure amplitude first (Analysis → Backtest → Below-cost %, and the Take/Hold
+# Calibration card). Flip to `live` once the backtest shows the edge pays the cost.
+#
+# Credentials are NEVER stored here — they come from environment variables
+# (ARROW_APP_ID, ARROW_USER_ID, ARROW_PASSWORD, ARROW_API_SECRET,
+# ARROW_TOTP_SECRET); see .env.example.
+# ═══════════════════════════════════════════════════════════════════════════
+
+broker:
+  name: arrow
+  persist_session: true
+  # Segment key → Arrow ExchSeg (the master's exchange+segment field).
+  segments:
+    nse_cm: NSECM
+    nse_fo: NSEFO
+    bse_cm: BSECM
+    bse_fo: BSEFO
+    mcx_fo: MCXFO
+  # Segment key → Arrow Exchange enum used on orders/quotes.
+  exchange_enum:
+    nse_cm: NSE
+    nse_fo: NFO
+    bse_cm: BSE
+    bse_fo: BFO
+    mcx_fo: MCX
+  lot_overrides: {}
+  cache_ttl_sec: 2
+
+# Default 2-leg spread. The Setup picker overrides these into leg_assignments.yaml.
+# Near vs far CRUDEOIL. Replace with the current live contract symbols.
+instruments:
+  leg_a: { segment: mcx_fo, symbol: CRUDEOIL26AUGFUT, ratio: 1 }   # near
+  leg_b: { segment: mcx_fo, symbol: CRUDEOIL26SEPFUT, ratio: 1 }   # far
+
+# Signal — the single server-side source of truth (algo AND dashboard read it).
+signal:
+  window_minutes: 150         # rolling window for mean/std/z
+  sample_interval_sec: 0.3    # how often the server samples prices (0.3 s ticks)
+  stats_update_interval_sec: 300  # recompute rolling mean/std only every N s (steady bands)
+  display_refresh_ms: 300     # dashboard live-price poll cadence (300 = 0.3 s)
+  min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
+  persist_window: true
+  resume_max_gap_min: 10      # max minutes off and still resume the warm-up
+  persist_interval_sec: 30
+  min_hold_sec: 30            # suppress reversion/target exit this long after entry
+  entry_zscore: 2.0
+  exit_zscore: 0.0
+  stop_zscore: 4.0
+  hedge_ratio: 1.0            # calendar (same instrument, both ~same price) → 1.0.
+                             # For a cross-commodity pair (e.g. CRUDEOIL vs
+                             # NATURALGAS) set ≈ price_b ÷ price_a instead.
+  confirmation_ticks: 3
+  max_entry_z_divergence: 1.0
+  max_entry_spread_divergence: 6.0  # stale-FAR-LEG guard in spread points. Crude
+                              # spread points are ₹; a bit wider than NIFTY's 4
+                              # because ₹1 ticks make the raw spread coarser.
+  max_entry_zscore: 3.5
+
+# Probability / EV / cost gate (OU gambler's-ruin model).
+filters:
+  enable_probability_filter: true
+  commission_basis: per_lot
+  min_win_probability: 0.6
+  min_expected_value: 0
+  brokerage_per_lot: 20       # Arrow flat ₹20 per lot per order (per leg, one
+                              # way) → 1-lot spread round trip ≈ ₹80.
+  slippage_per_lot: 100       # INR per lot per leg, one way. Crude tick = ₹1 ×
+                              # 100 barrels = ₹100/tick, so this ≈ one tick.
+  # stt_a_pct / stt_b_pct: leave unset for a same-instrument calendar (both use
+  # stt_pct). Set them only for an asymmetric cross-commodity pair.
+  stt_pct: 0.01               # CTT, % of notional on the SELL side. MCX non-agri
+                              # commodities (crude, bullion, base metals) = 0.01%.
+                              # AGRI commodities = 0 — set 0 if you trade those.
+  other_cost_pct: 0.006       # catch-all % for MCX exchange txn (~0.0021) + GST +
+                              # SEBI + stamp, on all 4 leg turnovers. CALIBRATE to
+                              # your real MCX contract note. 0 = off.
+  capital_gains_pct: 0        # F&O/commodity = business income (slab); off by default.
+  min_edge_multiple: 2.0      # dead-day gate: only take a trade whose expected
+                              # after-cost capture ≥ this × round-trip cost.
+  time_stop_half_lives: 3.0
+  half_life_min_sec: 30
+  half_life_max_sec: 0
+
+# Per-segment Indian cost model. OFF here for the same reason as the NIFTY
+# calendar: both legs are MCX crude with identical CTT, so the legacy
+# stt_pct/other_cost_pct model (consistent across algo/journal/backtest) is used
+# everywhere. Turn ON only for an asymmetric pair where you also set
+# filters.stt_a_pct / stt_b_pct.
+costs:
+  use_segment_costs: false
+  gst_pct: 18.0
+  no_entry_days_before_expiry: 0   # 0 = OFF. Kept off intentionally: the "days to
+                                   # expiry" shown under each leg on the dashboard
+                                   # is INFO ONLY and must not gate execution. Roll
+                                   # the legs manually before the tender window.
+  segments: {}
+  #   mcx_fo: { stt_sell_pct: 0.01, txn_pct: 0.0021, stamp_buy_pct: 0.002, sebi_pct: 0.0001 }
+
+# Risk management.
+risk:
+  lots_per_trade: 1
+  max_contracts_per_leg: 5
+  max_slippage_pct: 0.3       # ENTRY slippage budget (% of notional) → unwind if exceeded
+  max_daily_loss: 6000            # INR; halts new entries at −this today. ≈ 5 stops. ‹SET TO YOUR NUMBER›
+  min_live_margin: 30000      # INR; Pre-Live "Account funded" warns until usable ‹SET TO YOUR NUMBER›
+                              # margin ≥ this (your MCX calendar-spread SPAN + buffer).
+  capital_at_risk_inr: 80000       # your MCX SPAN+exposure margin per spread (₹), the ‹SET TO YOUR NUMBER›
+                              # basis for %-of-capital stop/target. A calendar
+                              # spread margins far below the outright — use the
+                              # real spread margin, not 1-lot outright.
+  loss_streak_reduce_at: 3
+  loss_streak_reduce_pct: 20
+  loss_streak_pause_at: 5
+
+# Self-healing reconciliation (Tier B).
+reconcile:
+  enabled: true
+  interval_sec: 20
+  mismatch_threshold: 3
+  auto_close: false
+
+# Regime / trend-day guard (Tier A). Crude trends hard on inventory/geopolitical
+# news — the one macro failure a calendar spread has no other defense against.
+regime:
+  enabled: true
+  halt_on_trending: true
+  trend_direction_filter: false
+  window_samples: 120
+  efficiency_ratio_max: 0.6
+  min_zero_crossings: 4
+  vr_lag: 5
+
+# Fast-exit overrides (dollar-P&L exits, strict priority above the z-exit).
+exits:
+  dollar_stop_inr: 0
+  profit_target_inr: 0
+  reversion_require_profit: true
+  reversion_gate_inr: 0
+  z_stop_exit_enabled: false
+  hard_time_stop_mult: 3
+  profit_target_sigma_frac: 0
+  tp_capital_pct: 0.5         # TAKE PROFIT = BE + 0.5% × capital_at_risk_inr.
+  cost_floor_mult: 0
+  stop_capital_pct: 1.5       # stop = 1.5% × capital_at_risk_inr.
+  stop_rr: 0
+  max_hold_silent_when_losing: true
+  max_hold_z_progress_min: 0.5
+  trailing_stop_pct: 0
+  whatif_window_min: 60
+  whatif_update_sec: 5
+  trailing_stop_floor_pct: 0
+
+# Telegram alerts (token from ARROW_TELEGRAM_BOT_TOKEN env only).
+telegram:
+  enabled: false
+  chat_id: ""
+  notify_trades: true
+  notify_health: false
+  notify_errors: true
+
+# Only trade inside this window (IST). MCX evening session runs to 23:30.
+trading_hours:
+  enabled: false              # optional hard window; see also the close buffer
+  start_hour: 9
+  start_min: 0
+  end_hour: 23
+  end_min: 30
+  # No NEW entries within this many minutes of the MCX close (exits still allowed).
+  close_hour: 23              # MCX commodity session close (evening)
+  close_min: 30
+  no_entry_buffer_min: 20
+
+# LIVE order execution (SpreadExecutor).
+execution:
+  product: NRML
+  heartbeat_sec: 10
+  health_max_heartbeat_sec: 60
+  health_max_tick_sec: 120
+  default_lots: 1
+  cooldown_sec: 300
+  stop_cooldown_sec: 300
+  z_reset_after_stop: true
+  use_limit_orders: true
+  limit_offset_pct: 0.02      # % through LTP for the limit (crude moves — keep it
+                              # modest; watch the journal Slip column and tune).
+  price_tick_size: 1          # MCX CRUDEOIL tick = ₹1 (Arrow rejects off-tick prices).
+  amend_step_pct: 0.02
+  amend_interval_sec: 3.0
+  fill_timeout_sec: 10
+  poll_interval_sec: 0.4
+  limit_to_market: true       # kept on so EXITS always complete
+  unknown_status_grace_polls: 3
+  assume_fill_on_unknown: false
+  max_exit_failures: 3
+  exit_retry_backoff_sec: 5
+  exit_retry_backoff_max_sec: 60
+  verify_flat_before_entry: true
+  verify_flat_fail_open: false
+  # ── live_sim: simulated broker the real executor runs against (no real orders) ─
+  sim_tick_size: 1            # CRUDEOIL tick = ₹1
+  sim_spread_ticks: 2.0       # synthetic bid-ask width (ticks); the far month is wider
+  sim_extra_slip_ticks: 0.0
+  sim_slow_prob: 0.25
+  sim_reject_prob: 0.0
+  sim_orphan_prob: 0.0
+  sim_default_lot_size: 100   # CRUDEOIL lot = 100 barrels (CRUDEOILM = 10) ‹SET TO YOUR NUMBER›
+
+# Order routing. dry_run never reaches a broker; live_sim runs the REAL executor
+# against a simulated broker (no real orders); live transmits to Arrow.
+mode: live_sim          # dry_run | live_sim | live

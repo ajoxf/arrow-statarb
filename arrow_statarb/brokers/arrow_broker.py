@@ -169,6 +169,7 @@ class ArrowBroker(BaseBroker):
         self._idx_underlyings: Dict = {}
         self._idx_contracts: Dict = {}
         self._sym_token: Dict[str, int] = {}      # TradingSymbol(upper) → integer token
+        self._sym_expiry: Dict[str, str] = {}     # TradingSymbol(upper) → raw expiry (info only)
 
         # Live price stream (Arrow WebSocket DataStream) → latest-LTP cache,
         # keyed by integer token, fed by on_ticks at tick rate (~50ms or faster).
@@ -460,6 +461,7 @@ class ArrowBroker(BaseBroker):
         underlyings: Dict = {}
         contracts: Dict = {}
         sym_token: Dict[str, int] = {}
+        sym_expiry: Dict[str, str] = {}
         for inst in self._instruments:
             if not isinstance(inst, dict):
                 continue
@@ -474,6 +476,9 @@ class ArrowBroker(BaseBroker):
                     sym_token[tsym.upper()] = int(_tok)
                 except (ValueError, TypeError):
                     pass
+            _exp = g.get("expiry") or g.get("expiry_date")
+            if _exp:
+                sym_expiry[tsym.upper()] = str(_exp)
             ot  = str(g.get("optiontype") or g.get("option_type") or "").upper()
             und = str(g.get("symbol") or g.get("underlying") or "").strip().upper() \
                   or self._derive_underlying(tsym)
@@ -512,6 +517,7 @@ class ArrowBroker(BaseBroker):
         self._idx_underlyings = {k: sorted(v) for k, v in underlyings.items()}
         self._idx_contracts = contracts
         self._sym_token = sym_token
+        self._sym_expiry = sym_expiry
         logger.info(
             "ArrowBroker: index built — {} (exchange,kind) groups, {} underlyings total",
             len(self._idx_underlyings), sum(len(v) for v in self._idx_underlyings.values()),
@@ -627,6 +633,21 @@ class ArrowBroker(BaseBroker):
         if seg in ("mcx_fo", "mcx"):
             return float(t) if 0 < t <= 50 else 0.0
         return float(t) if 0 < t < 1 else 0.0
+
+    def resolve_expiry_ymd(self, symbol: str):
+        """(year, month, day) of a contract's expiry, or None if unknown.
+
+        INFO ONLY — powers the dashboard 'days to expiry' readout. It never
+        gates orders or entries; the execution path does not call this.
+        Falls back to parsing the expiry encoded in the trading symbol
+        (e.g. CRUDEOIL25JULFUT) when the master's Expiry field is absent.
+        """
+        sym = symbol.upper()
+        raw = self._sym_expiry.get(sym)
+        dt = self._parse_date_tuple(raw) if raw else None
+        if not dt:
+            dt = self._parse_date_tuple(sym)
+        return dt
 
     # ── Quotes ────────────────────────────────────────────────────────────────
 

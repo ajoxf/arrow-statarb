@@ -319,6 +319,28 @@ def test_leg_info_lot_mismatch(tmp_path):
     assert "NOT share-neutral" in info["message"]
 
 
+def test_leg_info_days_to_expiry_is_info_only(tmp_path):
+    # Days-to-expiry surfaces on /api/leg-info for the dashboard. It is a pure
+    # readout: a broker WITHOUT resolve_expiry_ymd yields None (no crash), and a
+    # broker WITH it yields the day count — never gating anything.
+    app, broker = _app(tmp_path, mode="dry_run")
+    client = app.test_client()
+
+    # No resolve_expiry_ymd on the fake broker → field present but None.
+    info = client.get("/api/leg-info").get_json()
+    assert info["legs"]["leg_a"]["days_to_expiry"] is None
+
+    # Add the info-only resolver → a positive day count appears. Compute the
+    # target against the SAME IST 'today' the endpoint uses (avoid TZ off-by-one).
+    from datetime import datetime, timedelta
+    from arrow_statarb.web.app import _IST
+    future = datetime.now(_IST).date() + timedelta(days=12)
+    broker.resolve_expiry_ymd = lambda sym: (future.year, future.month, future.day)
+    info = client.get("/api/leg-info").get_json()
+    assert info["legs"]["leg_a"]["days_to_expiry"] == 12
+    assert info["legs"]["leg_b"]["days_to_expiry"] == 12
+
+
 def test_session_token_persist_reuse_and_clear(tmp_path):
     import time
     import arrow_statarb.web.app as appmod

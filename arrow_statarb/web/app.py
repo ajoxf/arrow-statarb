@@ -21,7 +21,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -1120,6 +1120,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         out["connected"] = True
         legs = _read_legs()
         lots = {}
+        today_ist = datetime.now(_IST).date()
         for lk in ("leg_a", "leg_b"):
             if lk not in legs:
                 continue
@@ -1127,7 +1128,19 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 ls = int(broker.resolve_lot_size(legs[lk]["segment"], legs[lk]["symbol"]))
             except Exception:
                 ls = 0
-            out["legs"][lk] = {"symbol": legs[lk]["symbol"], "lot_size": ls}
+            # Days-to-expiry — INFO ONLY. Purely a dashboard readout; it does not
+            # gate entries or execution (the algo never reads this).
+            dte = None
+            if hasattr(broker, "resolve_expiry_ymd"):
+                try:
+                    ymd = broker.resolve_expiry_ymd(legs[lk]["symbol"])
+                    if ymd and ymd != (9999, 99, 99):
+                        y, m, d = ymd
+                        dte = (date(y, m, d) - today_ist).days
+                except Exception:
+                    dte = None
+            out["legs"][lk] = {"symbol": legs[lk]["symbol"], "lot_size": ls,
+                               "days_to_expiry": dte}
             lots[lk] = ls
         la, lb = lots.get("leg_a"), lots.get("leg_b")
         if la and lb and la != lb:
