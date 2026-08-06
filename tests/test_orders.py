@@ -35,12 +35,16 @@ def test_limit_order_no_mpp(arrow_broker):
     assert kw["transaction_type"].value == "SELL"
 
 
-def test_mcx_is_rejected(arrow_broker):
+def test_mcx_is_accepted(arrow_broker):
+    # Arrow supports MCX from SDK 1.5.x — mcx_fo must route to the MCX exchange
+    # enum, not be rejected (the old hard-block is gone).
     res = arrow_broker.submit_order(
         symbol="CRUDEOIL25JULFUT", side="buy", quantity=100,
         order_type="market", exchange_segment="mcx_fo")
-    assert res["status"] == "error"
-    assert "MCX" in res["message"]
+    assert res["status"] == "submitted"
+    kw = arrow_broker._client.placed_orders[-1]
+    assert kw["exchange"].value == "MCX"        # mcx_fo → MCX enum
+    assert kw["mpp"] is True and kw["price"] == 0.0
 
 
 def test_unknown_segment_rejected(arrow_broker):

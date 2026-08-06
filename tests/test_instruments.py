@@ -72,6 +72,32 @@ def test_build_index_groups_and_sorts(arrow_broker):
     assert syms == ["NIFTY30JUN26F", "NIFTY28JUL26F", "NIFTY25AUG26F"]
 
 
+def test_mcx_loads_through_index(arrow_broker):
+    # MCX commodity futures (ExchSeg MCXFO) index as futures and list/sort like
+    # any other future — this is how MCX instruments become pickable.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()
+    assert "CRUDEOIL" in arrow_broker.list_underlyings("MCXFO", "future")
+    cons = arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")
+    syms = [c["trading_symbol"] for c in cons]
+    assert syms == ["CRUDEOIL25JULFUT", "CRUDEOIL25AUGFUT"]   # chronological
+    # lot size from the MCX master row
+    for inst in SAMPLE_MASTER:
+        s, ls, _t = ArrowBroker._extract_symbol_lot(inst)
+        if s and ls:
+            arrow_broker._lot_sizes.setdefault(s, ls)
+    assert arrow_broker.resolve_lot_size("mcx_fo", "CRUDEOIL25JULFUT") == 100
+
+
+def test_mcx_whole_rupee_tick_is_trusted(arrow_broker):
+    # MCX ticks are legitimately whole-rupee (CRUDEOIL/GOLD ₹1, COTTON ₹10) —
+    # trusted for mcx_fo but still discarded (→ default) for nse_fo.
+    arrow_broker._tick_sizes = {"CRUDEOIL25JULFUT": 1.0, "COTTON25JULFUT": 10.0}
+    assert arrow_broker.resolve_tick_size("mcx_fo", "CRUDEOIL25JULFUT") == 1.0
+    assert arrow_broker.resolve_tick_size("mcx_fo", "COTTON25JULFUT") == 10.0
+    assert arrow_broker.resolve_tick_size("nse_fo", "CRUDEOIL25JULFUT") == 0.0
+
+
 def test_token_index(arrow_broker):
     arrow_broker._instruments = SAMPLE_MASTER
     arrow_broker._build_instrument_index()

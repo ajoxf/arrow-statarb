@@ -2017,10 +2017,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         pair = ""
         if _have_both_legs(legs):
             pair = f"{legs['leg_a']['symbol']} ↔ {legs['leg_b']['symbol']}"
-        # Equity/F&O regular session 09:15–15:30 IST.
-        open_now = (now.hour, now.minute) >= (9, 15) and (now.hour, now.minute) <= (15, 30)
-        segs = [{"name": n, "time": ist, "open": open_now}
-                for n in ("MCX", "NSE F&O", "NSE Cash", "BSE")]
+        # Session windows differ by venue: NSE/BSE equity & F&O run 09:15–15:30;
+        # MCX commodities run ~09:00–23:30 IST (evening session). Flag each
+        # segment against its own hours so the bar isn't wrong after 15:30.
+        hm = (now.hour, now.minute)
+        nse_open = (9, 15) <= hm <= (15, 30)
+        mcx_open = (9, 0) <= hm <= (23, 30)
+        segs = ([{"name": "MCX", "time": ist, "open": mcx_open}]
+                + [{"name": n, "time": ist, "open": nse_open}
+                   for n in ("NSE F&O", "NSE Cash", "BSE")])
         return jsonify({"segments": segs, "pair": pair})
 
     # ── system tests ─────────────────────────────────────────────────────────

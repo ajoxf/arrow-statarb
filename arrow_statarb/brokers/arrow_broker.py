@@ -18,9 +18,11 @@ registered static IP (SEBI), and has NO paper/sandbox — "dry-run" is enforced
 above this layer by simply not calling ``submit_order``.
 
 Exchange segment mapping (segment key → Arrow Exchange enum)
-  nse_cm → NSE ; nse_fo → NFO ; bse_cm → BSE ; bse_fo → BFO
+  nse_cm → NSE ; nse_fo → NFO ; bse_cm → BSE ; bse_fo → BFO ; mcx_fo → MCX
 
-NOTE: Arrow does NOT support MCX commodity futures — MCX orders are rejected.
+MCX commodity futures are supported from SDK 1.5.x (the ``Exchange`` enum gained
+an ``MCX`` member). MCX contracts arrive in the same ``get_instruments`` master
+(ExchSeg ``MCXFO``) and are indexed as futures automatically.
 """
 
 from __future__ import annotations
@@ -53,16 +55,17 @@ except ImportError:
 from arrow_statarb.brokers.base_broker import BaseBroker
 
 # ── Segment → Arrow Exchange ──────────────────────────────────────────────────
-# MCX is intentionally excluded — Arrow does not support MCX commodity futures.
 _SEGMENT_MAP: Dict[str, str] = {
     "nse_cm": "NSE",
     "nse_fo": "NFO",
     "bse_cm": "BSE",
     "bse_fo": "BFO",
+    "mcx_fo": "MCX",
     "nse":    "NSE",
     "nfo":    "NFO",
     "bse":    "BSE",
     "bfo":    "BFO",
+    "mcx":    "MCX",
 }
 
 # Segments this broker can actually trade.
@@ -113,7 +116,7 @@ def _dig(d: Dict, *keys, default=None):
 
 class ArrowBroker(BaseBroker):
     """
-    Arrow broker — NSE, BSE, NFO, BFO instruments (MCX not supported).
+    Arrow broker — NSE, BSE, NFO, BFO and MCX instruments.
 
     Parameters
     ----------
@@ -437,7 +440,7 @@ class ArrowBroker(BaseBroker):
 
     @staticmethod
     def _classify_kind(exch: str, is_opt: bool) -> str:
-        if exch in ("NFO", "BFO"):
+        if exch in ("NFO", "BFO", "MCX", "MCXFO"):
             return "option" if is_opt else "future"
         if exch in ("NSE", "BSE"):
             return "option" if is_opt else "cash"
@@ -616,9 +619,13 @@ class ArrowBroker(BaseBroker):
                     break
         if not t or t <= 0:
             return 0.0
-        # Trust the master only when it's already a plausible sub-rupee tick
-        # (NSE F&O ticks are 0.01–0.95). A value ≥ 1 is an ambiguous unit
-        # (paise? lots?) — return 0 so the caller uses its configured default.
+        # NSE/BSE F&O ticks are sub-rupee (0.01–0.95); a value ≥ 1 there is an
+        # ambiguous unit (paise? lots?) → discard so the caller uses its default.
+        # MCX commodity ticks are legitimately whole-rupee (CRUDEOIL/GOLD = ₹1,
+        # COTTON = ₹10, COPPER = ₹0.05), so trust a wider band for MCX.
+        seg = exchange_segment.lower()
+        if seg in ("mcx_fo", "mcx"):
+            return float(t) if 0 < t <= 50 else 0.0
         return float(t) if 0 < t < 1 else 0.0
 
     # ── Quotes ────────────────────────────────────────────────────────────────
@@ -834,12 +841,6 @@ class ArrowBroker(BaseBroker):
         if not self.connected or not self._client:
             return {"order_id": None, "status": "error", "message": "Not connected"}
 
-        # Exchange — reject MCX immediately (Arrow does not support it)
-        if exchange_segment.lower() in ("mcx_fo", "mcx"):
-            return {
-                "order_id": None, "status": "error",
-                "message": "Arrow does not support MCX.",
-            }
         exchange_str = _SEGMENT_MAP.get(exchange_segment.lower(), exchange_segment.upper())
         try:
             exchange_enum = Exchange(exchange_str)
