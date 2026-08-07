@@ -41,7 +41,7 @@ from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
-from arrow_statarb.core import fairvalue, sizing
+from arrow_statarb.core import fairvalue, sizing, performance
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.core.telegram import TelegramNotifier
@@ -2065,6 +2065,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_expectancy():
         """The book on one sheet, in R: win rate, R:R, PF, break-even WR, EV/R."""
         return jsonify(trade_log.expectancy())
+
+    @app.route("/api/drawdown", methods=["GET"])
+    def api_drawdown():
+        """Equity-curve drawdown tiles + per-trade adverse-excursion (MAE/MFE)
+        for the Analysis page (Phase-8 merge). Computed from closed trades."""
+        rows = [t for t in trade_log.all()
+                if str(t.get("action")) == "CLOSE" and t.get("net_pnl") is not None]
+        return jsonify({
+            "drawdown": performance.drawdown_block(rows, newest_first=False),
+            "excursion": performance.excursion_rows(rows),
+        })
 
     @app.route("/api/calibration", methods=["GET"])
     def api_calibration():

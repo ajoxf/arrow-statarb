@@ -16,6 +16,27 @@
     </div>
 </div>
 <div class="card mt-3">
+    <div class="card-header"><i class="bi bi-graph-down-arrow me-2"></i>Drawdown &amp; Adverse Excursion
+        <span class="text-secondary small ms-1">— worst-case behaviour of closed trades</span></div>
+    <div class="card-body">
+        <div class="row text-center g-3 mb-2">
+            <div class="col"><div class="metric text-danger" id="dd-max">₹0</div><div class="metric-label">Max Drawdown</div></div>
+            <div class="col"><div class="metric" id="dd-max-pct">0.0%</div><div class="metric-label">Max DD %</div></div>
+            <div class="col"><div class="metric" id="dd-cur">₹0</div><div class="metric-label">Current Drawdown</div></div>
+            <div class="col"><div class="metric text-success" id="dd-peak">₹0</div><div class="metric-label">Peak Equity</div></div>
+        </div>
+        <div class="table-responsive" style="max-height:280px;overflow:auto;">
+            <table class="table table-sm table-hover small mb-0">
+                <thead><tr><th>Side</th><th>Exit</th><th class="text-end">MAE (against)</th>
+                    <th class="text-end">MFE (best)</th><th class="text-end">Net P&amp;L</th>
+                    <th class="text-end">Util %</th><th class="text-end">Peak@ (min)</th></tr></thead>
+                <tbody id="dd-tbody"><tr><td colspan="7" class="text-secondary text-center">No closed trades yet.</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-3">
     <div class="card-header"><i class="bi bi-sliders me-2"></i>Take / Hold Calibration
         <span class="text-secondary small ms-1">— set the take &amp; hold from measured peaks, not opinion</span></div>
     <div class="card-body">
@@ -301,5 +322,38 @@
         catch (e) { uiToast('Reset failed: ' + e, 'danger'); }
     }
     loadExc(); setInterval(loadExc, 2000);
+
+    // ── Drawdown & adverse excursion (Phase-8 merge) ─────────────────────────
+    async function loadDrawdown() {
+        try {
+            const d = await fetch('/api/drawdown').then(r => r.json());
+            const dd = d.drawdown || {};
+            const rup = v => '₹' + Number(v || 0).toLocaleString('en-IN', {maximumFractionDigits:0});
+            document.getElementById('dd-max').textContent = rup(dd.max_inr);
+            document.getElementById('dd-max-pct').textContent = (dd.max_pct || 0).toFixed(1) + '%';
+            document.getElementById('dd-cur').textContent = rup(dd.current_inr);
+            document.getElementById('dd-peak').textContent = rup(dd.peak_equity_inr);
+            const rows = d.excursion || [];
+            const body = document.getElementById('dd-tbody');
+            if (!rows.length) {
+                body.innerHTML = '<tr><td colspan="7" class="text-secondary text-center">No closed trades yet.</td></tr>';
+                return;
+            }
+            const n = (v, dg=0) => (v == null) ? '—' : Number(v).toFixed(dg);
+            body.innerHTML = rows.map(r => {
+                const sideCls = r.position_type === 'SHORT' ? 'text-danger' : 'text-success';
+                const pnlCls = (r.pnl_inr || 0) >= 0 ? 'text-success' : 'text-danger';
+                return `<tr>
+                    <td class="${sideCls}">${r.position_type}</td>
+                    <td class="small">${r.exit_reason || '—'}</td>
+                    <td class="text-end font-monospace text-danger">−₹${n(r.mae_inr)}</td>
+                    <td class="text-end font-monospace text-success">₹${n(r.mfe_inr)}</td>
+                    <td class="text-end font-monospace ${pnlCls}">₹${n(r.pnl_inr)}</td>
+                    <td class="text-end font-monospace">${r.utilization_pct == null ? '—' : n(r.utilization_pct,0)+'%'}</td>
+                    <td class="text-end font-monospace">${n(r.peak_min,1)}</td></tr>`;
+            }).join('');
+        } catch (e) {}
+    }
+    loadDrawdown(); setInterval(loadDrawdown, 3000);
 </script>
 {% endblock %}

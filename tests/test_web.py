@@ -341,6 +341,13 @@ def test_leg_info_days_to_expiry_is_info_only(tmp_path):
     assert info["legs"]["leg_b"]["days_to_expiry"] == 12
 
 
+def test_drawdown_endpoint_shape(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    d = app.test_client().get("/api/drawdown").get_json()
+    assert set(d.keys()) == {"drawdown", "excursion"}
+    assert d["drawdown"]["max_inr"] == 0.0 and d["excursion"] == []
+
+
 def test_settings_pairs_section_roundtrip(tmp_path):
     app, _ = _app(tmp_path, mode="dry_run")
     c = app.test_client()
