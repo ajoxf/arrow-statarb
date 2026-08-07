@@ -44,3 +44,6 @@ data/arrow_session.json
 data/whatif_shadow.json
 # Liveness heartbeat (written every few seconds) — runtime only
 data/heartbeat.txt
+# SQLite analysis persistence (trade_review, sd_touches, shadow, market_data) — runtime
+data/analysis.db
+data/analysis.db-journal
