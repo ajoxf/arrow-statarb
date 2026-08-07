@@ -41,7 +41,7 @@ from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
-from arrow_statarb.core import fairvalue, sizing, performance
+from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.core.telegram import TelegramNotifier
@@ -1046,6 +1046,26 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "instruments_ready": ready,
             "instrument_count": len(getattr(broker, "_instruments", [])),
             "lot_size_count": len(getattr(broker, "_lot_sizes", {})),
+        })
+
+    # ── order-test scenario suite (Setup page) ────────────────────────────────
+    @app.route("/api/scenario-catalogue", methods=["GET"])
+    def api_scenario_catalogue():
+        """The 40 round-trip order scenarios (read-only). The runner is unit-
+        tested; live execution (real min-lot orders) activates with the
+        multi-asset execution adapter."""
+        return jsonify(scenarios.CATALOGUE)
+
+    @app.route("/api/scenario-test", methods=["POST"])
+    def api_scenario_test():
+        """Run ONE scenario. Live execution places REAL minimum-lot orders via
+        the Arrow leg adapter — enabled when the execution engine is wired.
+        Until then this is guarded so the Setup grid never fires real orders."""
+        return jsonify({
+            "ok": False, "pending": True,
+            "detail": "Live scenario execution activates with the multi-asset "
+                      "execution adapter. The 40-scenario catalogue and round-trip "
+                      "runner are ready and unit-tested.",
         })
 
     # ── instrument picker (segment → underlying → contract) ──────────────────

@@ -341,6 +341,16 @@ def test_leg_info_days_to_expiry_is_info_only(tmp_path):
     assert info["legs"]["leg_b"]["days_to_expiry"] == 12
 
 
+def test_scenario_catalogue_endpoint(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    c = app.test_client()
+    cat = c.get("/api/scenario-catalogue").get_json()
+    assert len(cat) == 40 and cat[0]["type"] == "BUY_SPOT"
+    # live run is guarded until the execution adapter is wired
+    st = c.post("/api/scenario-test", json={"id": 0}).get_json()
+    assert st["pending"] is True and st["ok"] is False
+
+
 def test_drawdown_endpoint_shape(tmp_path):
     app, _ = _app(tmp_path, mode="dry_run")
     d = app.test_client().get("/api/drawdown").get_json()
