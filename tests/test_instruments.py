@@ -89,6 +89,21 @@ def test_mcx_loads_through_index(arrow_broker):
     assert arrow_broker.resolve_lot_size("mcx_fo", "CRUDEOIL25JULFUT") == 100
 
 
+def test_get_ltp_uses_token_and_maps_back(arrow_broker):
+    # Arrow's quotes/ltp resolves the identifier as a TOKEN (a symbol string
+    # returns "invalid token not found 0"). get_ltp must send the numeric token
+    # and map the response back to OUR trading symbol.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()          # populates _sym_token
+    res = arrow_broker.get_ltp([
+        {"exchange_segment": "mcx_fo", "instrument_token": "CRUDEOIL25JULFUT"},
+    ])
+    # Token 666 was sent (not the symbol string) …
+    assert ["666"] in arrow_broker._client.quote_calls
+    # … and the price came back keyed by our symbol.
+    assert "CRUDEOIL25JULFUT" in res and res["CRUDEOIL25JULFUT"] > 0
+
+
 def test_resolve_expiry_ymd_info_only(arrow_broker):
     # Info-only expiry readout (dashboard 'days to expiry'). From the master's
     # Expiry field, and falling back to the expiry encoded in the symbol.

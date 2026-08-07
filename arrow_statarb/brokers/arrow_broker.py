@@ -668,24 +668,47 @@ class ArrowBroker(BaseBroker):
         if not self.connected or not self._client or not instruments:
             return {}
 
-        pairs = []
+        # Build (our_symbol, numeric-token, exchange_enum). Arrow's quotes/ltp
+        # endpoint resolves the identifier as an instrument TOKEN — passing the
+        # trading-symbol string returns "invalid token not found 0" (this is why
+        # MCX legs failed while the token-based stream worked). So we prefer the
+        # token, and fall back to the symbol only if the token is unknown.
+        entries = []
         for inst in instruments:
             seg = inst.get("exchange_segment", "")
-            sym = inst.get("instrument_token") or inst.get("symbol", "")
+            sym = str(inst.get("instrument_token") or inst.get("symbol", "") or "").upper()
             exchange_str = _SEGMENT_MAP.get(seg.lower(), seg.upper())
             try:
                 exchange_enum = Exchange(exchange_str)
             except ValueError:
                 logger.warning("ArrowBroker: unknown exchange segment '{}' — skipping {}", seg, sym)
                 continue
-            pairs.append((sym, exchange_enum))
+            tok = self._sym_token.get(sym)
+            entries.append((sym, str(int(tok)) if tok else None, exchange_enum))
 
+        if not entries:
+            return {}
+
+        # Attempt 1: by token (correct for Arrow). Attempt 2: by symbol (keeps
+        # any venue that historically resolved by symbol working). Either way the
+        # response is mapped back to OUR trading symbols.
+        result = self._quote_ltp([(e[1], e[2]) for e in entries if e[1]], entries)
+        missing = [e for e in entries if e[0] not in result]
+        if missing:
+            fb = self._quote_ltp([(e[0], e[2]) for e in missing], entries)
+            result.update(fb)
+        return result
+
+    def _quote_ltp(self, pairs, entries) -> Dict[str, float]:
+        """POST a get_quotes(LTP) for ``pairs`` = [(identifier, exchange), …] and
+        map the response back to OUR uppercase trading symbols. ``entries`` is the
+        full [(symbol, token, exchange), …] list used to resolve ids and, as a
+        last resort, to positionally zip a same-length response."""
+        pairs = [p for p in pairs if p[0]]
         if not pairs:
             return {}
 
         def _ci(d: Dict, *keys):
-            """Case-insensitive get — Arrow responses are TitleCase
-            (TradingSymbol/Symbol/Ltp), so match regardless of casing."""
             low = {str(k).lower(): v for k, v in d.items()}
             for k in keys:
                 v = low.get(k.lower())
@@ -693,37 +716,54 @@ class ArrowBroker(BaseBroker):
                     return v
             return None
 
+        # id → our symbol (token string and symbol both map to the trading symbol)
+        id2sym = {}
+        for sym, tok, _ex in entries:
+            id2sym[sym] = sym
+            if tok:
+                id2sym[str(tok)] = sym
+
         try:
             response = self._client.get_quotes(QuoteMode.LTP, pairs)
-            result: Dict[str, float] = {}
-            if isinstance(response, list):
-                for item in response:
-                    if not isinstance(item, dict):
-                        continue
-                    sym = _ci(item, "tradingSymbol", "symbol", "tsym")
-                    ltp = _ci(item, "ltp", "lastPrice", "price", "last_traded_price")
-                    if sym and ltp is not None:
-                        try:
-                            result[str(sym).upper()] = float(ltp)
-                        except (ValueError, TypeError):
-                            pass
-            elif isinstance(response, dict):
-                for sym_key, val in response.items():
-                    if isinstance(val, (int, float, str)):
-                        ltp = val
-                    elif isinstance(val, dict):
-                        ltp = _ci(val, "ltp", "lastPrice", "price")
-                    else:
-                        ltp = None
-                    if ltp is not None:
-                        try:
-                            result[str(sym_key).upper()] = float(ltp)
-                        except (ValueError, TypeError):
-                            pass
-            return result
         except Exception as exc:
-            logger.error("ArrowBroker: LTP fetch failed — {}", exc)
+            logger.warning("ArrowBroker: LTP fetch failed ({} ids) — {}", len(pairs), exc)
             return {}
+
+        result: Dict[str, float] = {}
+        items = response if isinstance(response, list) else (
+            [dict(_k=k, **(v if isinstance(v, dict) else {"ltp": v}))
+             for k, v in response.items()] if isinstance(response, dict) else [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ident = _ci(item, "_k", "token", "instrument_token", "tradingSymbol",
+                        "symbol", "tsym")
+            ltp = _ci(item, "ltp", "lastPrice", "price", "last_traded_price")
+            if ltp is None:
+                continue
+            our = id2sym.get(str(ident).upper()) if ident is not None else None
+            if our is None and len(pairs) == 1:
+                our = id2sym.get(str(pairs[0][0]))           # single-id request
+            if our is None:
+                continue
+            try:
+                result[our] = float(ltp)
+            except (ValueError, TypeError):
+                pass
+
+        # Positional fallback: response aligned with the request but unkeyable.
+        if not result and isinstance(response, list) and len(response) == len(pairs):
+            for (ident, _ex), item in zip(pairs, response):
+                if not isinstance(item, dict):
+                    continue
+                ltp = _ci(item, "ltp", "lastPrice", "price", "last_traded_price")
+                our = id2sym.get(str(ident).upper())
+                if our and ltp is not None:
+                    try:
+                        result[our] = float(ltp)
+                    except (ValueError, TypeError):
+                        pass
+        return result
 
     def get_quote(self, exchange_segment: str, symbol: str) -> Dict:
         """Best-effort ``{ltp, bid, ask}`` for one instrument. Tries a richer

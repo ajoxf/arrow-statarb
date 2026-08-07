@@ -92,7 +92,14 @@ class ArrowClient:
         return []
 
     def get_quotes(self, mode, pairs):
-        return []
+        # Echo an LTP per requested identifier so tests can assert the
+        # id→symbol mapping. Price is deterministic from the identifier.
+        self.quote_calls = getattr(self, "quote_calls", [])
+        self.quote_calls.append([ident for ident, _ex in pairs])
+        out = []
+        for ident, _ex in pairs:
+            out.append({"token": ident, "ltp": 100.0 + (hash(str(ident)) % 50)})
+        return out
 
     def place_order(self, **kwargs):
         self.placed_orders.append(kwargs)
