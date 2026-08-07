@@ -341,6 +341,29 @@ def test_leg_info_days_to_expiry_is_info_only(tmp_path):
     assert info["legs"]["leg_b"]["days_to_expiry"] == 12
 
 
+def test_pair_analytics_fair_value_and_sizing(tmp_path):
+    # Read-only Phase-6 endpoint: with prices + lot sizes it returns the
+    # cost-of-carry fair value, contract-aware sizing (k), and hedge drift.
+    app, broker = _app(tmp_path, mode="dry_run")
+    broker.resolve_lot_size = lambda seg, sym: 50            # contract size
+    broker.get_ltp = lambda instruments: {
+        "NIFTY30JUN26F": 100.0, "NIFTY28JUL26F": 101.0}
+    from datetime import datetime, timedelta
+    from arrow_statarb.web.app import _IST
+    far = datetime.now(_IST).date() + timedelta(days=60)
+    broker.resolve_expiry_ymd = lambda sym: (far.year, far.month, far.day)
+
+    a = app.test_client().get("/api/pair-analytics").get_json()
+    assert a["ok"] is True
+    assert a["contract_a"] == 50 and a["contract_b"] == 50
+    # sizing resolved: k = leg_b_lots * contract_b
+    assert a["sizing"]["spread_units"] == a["sizing"]["leg_b_lots"] * 50
+    # fair value present (SPOT_FUTURE carry, expiry in the future)
+    assert a["fair_value"]["fair_value"] is not None
+    # dollar-neutral beta = Pb/Pa = 101/100
+    assert abs(a["sizing"]["dollar_neutral_beta"] - 1.01) < 1e-9
+
+
 def test_session_token_persist_reuse_and_clear(tmp_path):
     import time
     import arrow_statarb.web.app as appmod

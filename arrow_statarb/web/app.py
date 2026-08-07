@@ -41,6 +41,7 @@ from arrow_statarb.core.trade_log import TradeLog
 from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
+from arrow_statarb.core import fairvalue, sizing
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.core.telegram import TelegramNotifier
@@ -1148,6 +1149,67 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             out["message"] = (f"⚠ Lot sizes differ — Leg A {la} vs Leg B {lb}. "
                               f"1 lot each is NOT share-neutral ({la} vs {lb} units). "
                               f"Use same-expiry-tier legs or adjust ratios.")
+        return jsonify(out)
+
+    @app.route("/api/pair-analytics", methods=["GET"])
+    def api_pair_analytics():
+        """Read-only pair analytics for the new dashboard cards (Phase 6 merge):
+        cost-of-carry fair value (display only), contract-aware sizing (the k =
+        spread_units multiplier, notionals, hedge, imbalance, min-notional), and
+        the live-vs-configured hedge-ratio drift. Never touches the algo."""
+        out: Dict[str, Any] = {"ok": False}
+        legs = _read_legs()
+        if not _have_both_legs(legs):
+            return jsonify(out)
+        broker = active.get() or (sim_broker if _mode() == "live_sim" else None)
+        la, lb = _leg_prices()
+        sig = signal_engine.get_signal()
+        spread = sig.get("spread")
+        hedge_ratio = float(cfg.get("signal.hedge_ratio", 1) or 1)
+
+        def _cs(lk):
+            try:
+                return float(broker.resolve_lot_size(legs[lk]["segment"],
+                                                     legs[lk]["symbol"]))
+            except Exception:
+                return 1.0
+
+        def _exp_iso(sym):
+            if broker is not None and hasattr(broker, "resolve_expiry_ymd"):
+                try:
+                    ymd = broker.resolve_expiry_ymd(sym)
+                    if ymd and ymd != (9999, 99, 99):
+                        return f"{ymd[0]:04d}-{ymd[1]:02d}-{(ymd[2] or 1):02d}"
+                except Exception:
+                    pass
+            return None
+
+        contract_a, contract_b = _cs("leg_a"), _cs("leg_b")
+        pairs = cfg.section("pairs")
+        asset_cfg = {
+            "pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
+            "risk_free_rate": pairs.get("risk_free_rate", 0.0425),
+            "futures_expiry": _exp_iso(legs["leg_b"]["symbol"]),
+            "spot_expiry": _exp_iso(legs["leg_a"]["symbol"]),
+        }
+        fv = size = None
+        if la and lb:
+            fv = fairvalue.fair_value_block(
+                asset_cfg, la, lb, spread if spread is not None else (lb - hedge_ratio * la),
+                hedge_ratio)
+            params = {
+                "HEDGE_RATIO": hedge_ratio,
+                "SIZING_MODE": str(pairs.get("sizing_mode", "lots")),
+                "NOTIONAL_PER_LEG_INR": float(pairs.get("notional_per_leg_inr", 0) or 0),
+                "CLIP_LOTS": float(cfg.get("risk.lots_per_trade", 1) or 1),
+                "HEDGE_MODE": str(pairs.get("hedge_mode", "units")),
+            }
+            size = sizing.plan(params, contract_a, contract_b, la, lb)
+        out.update(ok=True, fair_value=fv, sizing=size, contract_a=contract_a,
+                   contract_b=contract_b, hedge_ratio=hedge_ratio,
+                   leg_a_price=la, leg_b_price=lb, spread=spread,
+                   pair_type=asset_cfg["pair_type"],
+                   leg_a=legs["leg_a"]["symbol"], leg_b=legs["leg_b"]["symbol"])
         return jsonify(out)
 
     # ── prices / positions / signal ──────────────────────────────────────────

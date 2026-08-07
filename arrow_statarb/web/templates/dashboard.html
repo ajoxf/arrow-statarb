@@ -52,6 +52,60 @@
     </div>
 </div>
 
+<!-- ── Pair analytics (Fair Value · Sizing · Hedge-Ratio) — display only ────── -->
+<div class="row g-3 mb-1">
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-rulers me-2"></i>Position Sizing
+                <span class="badge bg-secondary ms-1" id="pa-sizing-mode">—</span></div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Leg A</span>
+                    <span class="font-monospace"><span id="pa-la-lots">—</span> × <span id="pa-la-c">—</span> = ₹<span id="pa-la-notional">—</span></span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Leg B (hedge)</span>
+                    <span class="font-monospace"><span id="pa-lb-lots">—</span> × <span id="pa-lb-c">—</span> = ₹<span id="pa-lb-notional">—</span></span></div>
+                <hr class="my-1">
+                <div class="d-flex justify-content-between"><span class="text-secondary">₹ per point (k)</span>
+                    <span class="fw-bold font-monospace" id="pa-k">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Imbalance</span>
+                    <span class="font-monospace" id="pa-imbalance">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Min notional / leg</span>
+                    <span class="font-monospace" id="pa-min-notional">—</span></div>
+                <div class="small text-warning mt-1" id="pa-sizing-reason"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-compass me-2"></i>Fair Value
+                <span class="badge bg-secondary ms-1" id="pa-pair-type">—</span>
+                <span class="badge bg-info text-dark ms-1">reference</span></div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Live spread</span>
+                    <span class="fw-bold font-monospace" id="pa-spread">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Fair (carry)</span>
+                    <span class="font-monospace" id="pa-fair">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Gap</span>
+                    <span class="fw-bold font-monospace" id="pa-fair-gap">—</span></div>
+                <div class="small text-secondary mt-1" id="pa-fair-detail"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-arrow-left-right me-2"></i>Live Hedge Ratio</div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Configured β</span>
+                    <span class="fw-bold font-monospace" id="pa-beta">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Dollar-neutral β (Pb/Pa)</span>
+                    <span class="font-monospace" id="pa-beta-neutral">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Drift</span>
+                    <span class="fw-bold font-monospace" id="pa-beta-gap">—</span></div>
+                <div class="small text-secondary mt-1">A large drift means the position won't track the spread the z-score measures.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="row g-3">
     <!-- ════════════════ LEFT / MAIN COLUMN ════════════════ -->
     <div class="col-lg-8">
@@ -665,6 +719,43 @@
         } catch (e) {}
     }
 
+    // ── Pair analytics: Fair Value · Sizing · Hedge-Ratio (display only) ──────
+    async function pollPairAnalytics() {
+        try {
+            const a = await fetch('/api/pair-analytics').then(r => r.json());
+            if (!a || !a.ok) return;
+            const T = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+            const n2 = (v, d=2) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+            const rup = (v) => (v === null || v === undefined) ? '—' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits:0});
+            // Sizing
+            const s = a.sizing || {};
+            T('pa-sizing-mode', s.mode || '—');
+            T('pa-la-lots', n2(s.leg_a_lots)); T('pa-la-c', n2(a.contract_a, 0));
+            T('pa-la-notional', s.leg_a_notional_inr != null ? Number(s.leg_a_notional_inr).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—');
+            T('pa-lb-lots', n2(s.leg_b_lots)); T('pa-lb-c', n2(a.contract_b, 0));
+            T('pa-lb-notional', s.leg_b_notional_inr != null ? Number(s.leg_b_notional_inr).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—');
+            T('pa-k', n2(s.spread_units));
+            T('pa-imbalance', s.imbalance_pct != null ? n2(s.imbalance_pct,1) + '%' : '—');
+            T('pa-min-notional', rup(s.min_notional_inr));
+            T('pa-sizing-reason', s.reason || '');
+            // Fair value
+            const fv = a.fair_value || {};
+            T('pa-pair-type', a.pair_type || '—');
+            T('pa-spread', n2(a.spread, 3));
+            T('pa-fair', fv.fair_value != null ? n2(fv.fair_value, 3) : '—');
+            const gapEl = document.getElementById('pa-fair-gap');
+            if (gapEl) { gapEl.textContent = fv.fair_gap != null ? n2(fv.fair_gap, 3) : '—';
+                gapEl.className = 'fw-bold font-monospace ' + (fv.fair_gap == null ? '' : (Math.abs(fv.fair_gap) > Math.abs(a.spread || 0) * 0.5 ? 'text-warning' : 'text-success')); }
+            T('pa-fair-detail', fv.fair_detail || '');
+            // Hedge ratio
+            T('pa-beta', n2(a.hedge_ratio, 4));
+            T('pa-beta-neutral', s.dollar_neutral_beta != null ? n2(s.dollar_neutral_beta, 4) : '—');
+            const bg = document.getElementById('pa-beta-gap');
+            if (bg) { bg.textContent = s.beta_gap_pct != null ? n2(s.beta_gap_pct,1) + '%' : '—';
+                bg.className = 'fw-bold font-monospace ' + (s.beta_gap_pct == null ? '' : (Math.abs(s.beta_gap_pct) > 10 ? 'text-warning' : 'text-secondary')); }
+        } catch (e) {}
+    }
+
     // ── Position reconciliation (engine vs exchange) ─────────────────────────
     async function pollReconcile() {
         try {
@@ -1127,6 +1218,7 @@
     pollFunds();    setInterval(pollFunds, 3000);
     pollBroker();   setInterval(pollBroker, 3000);
     pollLegInfo();  setInterval(pollLegInfo, 5000);
+    pollPairAnalytics(); setInterval(pollPairAnalytics, 3000);
     pollReconcile(); setInterval(pollReconcile, 4000);
     pollMarkets();  setInterval(pollMarkets, 5000);
     pollMode();     setInterval(pollMode, 3000);

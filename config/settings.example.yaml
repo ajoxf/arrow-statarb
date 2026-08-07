@@ -40,6 +40,16 @@ instruments:
   leg_a: { segment: nse_fo, symbol: NIFTY30JUN26F, ratio: 1 }
   leg_b: { segment: nse_fo, symbol: NIFTY28JUL26F, ratio: 1 }
 
+# Pair metadata for the dashboard's Fair-Value, Sizing and Hedge-Ratio cards
+# (DISPLAY ONLY — none of this feeds the traded z-score signal).
+pairs:
+  pair_type: SPOT_FUTURE      # SPOT_FUTURE (NSE cash/ETF vs future) |
+                              # FUTURE_FUTURE (calendar, NSE or MCX) | RELATED
+  risk_free_rate: 0.0425      # annual cost-of-carry for the fair-value display
+  sizing_mode: lots           # lots (CLIP_LOTS anchor) | notional (₹ per leg)
+  hedge_mode: units           # units (equal units × β) | notional (equal money)
+  notional_per_leg_inr: 0     # ₹ per leg when sizing_mode = notional (0 = off)
+
 # Signal — the single server-side source of truth (algo AND dashboard read it).
 signal:
   window_minutes: 150         # rolling window for mean/std/z (a little larger than
