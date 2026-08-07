@@ -1058,15 +1058,46 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     @app.route("/api/scenario-test", methods=["POST"])
     def api_scenario_test():
-        """Run ONE scenario. Live execution places REAL minimum-lot orders via
-        the Arrow leg adapter — enabled when the execution engine is wired.
-        Until then this is guarded so the Setup grid never fires real orders."""
-        return jsonify({
-            "ok": False, "pending": True,
-            "detail": "Live scenario execution activates with the multi-asset "
-                      "execution adapter. The 40-scenario catalogue and round-trip "
-                      "runner are ready and unit-tested.",
-        })
+        """Run ONE scenario at minimum lot via the Arrow leg adapter. SAFE in
+        live_sim (simulated broker, no real orders); in live it places REAL
+        min-lot round trips. Gated: broker connected, both legs set, and the
+        algo NOT running (never interfere with a live position)."""
+        data = request.get_json(silent=True) or {}
+        try:
+            sid = int(data.get("id"))
+            scen = scenarios.CATALOGUE[sid]
+        except (TypeError, ValueError, IndexError):
+            return jsonify({"ok": False, "error": "unknown scenario id"}), 400
+
+        if _mode() == "dry_run":
+            return jsonify({"ok": False, "error": "dry_run places no orders — "
+                            "switch to live_sim to exercise the plumbing safely"})
+        broker = sim_broker if _mode() == "live_sim" else active.get()
+        if not broker:
+            return jsonify({"ok": False, "error": "connect a broker first"})
+        if arrow_algo.get_state().get("running"):
+            return jsonify({"ok": False, "error": "stop the algo (and flatten) "
+                            "before running order tests"})
+        legs = _read_legs()
+        if not _have_both_legs(legs):
+            return jsonify({"ok": False, "error": "set both legs on this page first"})
+
+        from arrow_statarb.core.arrow_leg import ArrowLeg
+        from arrow_statarb.core.scenarios import ScenarioRunner
+        seg_map = {legs["leg_a"]["symbol"]: legs["leg_a"]["segment"],
+                   legs["leg_b"]["symbol"]: legs["leg_b"]["segment"]}
+        leg = ArrowLeg(broker, seg_map,
+                       product=str(cfg.get("execution.product", "NRML")))
+        runner = ScenarioRunner(leg, leg, legs["leg_a"]["symbol"],
+                                legs["leg_b"]["symbol"])
+        try:
+            result = runner.run(scen["type"], scen["mode"], scen["variant"])
+        except Exception as exc:                       # never let a test crash the app
+            logger.warning("scenario {} failed — {}", sid, exc)
+            return jsonify({"ok": False, "error": str(exc), "id": sid})
+        result["id"] = sid
+        result["name"] = scen["name"]
+        return jsonify(result)
 
     # ── instrument picker (segment → underlying → contract) ──────────────────
     def _kind(ctype: str, exch_seg: str) -> Optional[str]:

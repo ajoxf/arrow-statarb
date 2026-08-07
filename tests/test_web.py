@@ -346,9 +346,20 @@ def test_scenario_catalogue_endpoint(tmp_path):
     c = app.test_client()
     cat = c.get("/api/scenario-catalogue").get_json()
     assert len(cat) == 40 and cat[0]["type"] == "BUY_SPOT"
-    # live run is guarded until the execution adapter is wired
+    # dry_run places no orders → guarded with a switch-to-live_sim hint
     st = c.post("/api/scenario-test", json={"id": 0}).get_json()
-    assert st["pending"] is True and st["ok"] is False
+    assert st["ok"] is False and "live_sim" in st["error"]
+
+
+def test_scenario_runs_live_sim_through_adapter(tmp_path):
+    # live_sim runs the ported ScenarioRunner over the Arrow leg adapter against
+    # the SIM broker (no real orders) — proving the seam end-to-end in the app.
+    app, _ = _app(tmp_path, mode="live_sim")
+    c = app.test_client()
+    r = c.post("/api/scenario-test", json={"id": 18}).get_json()   # MKT BUY_SPOT #1
+    assert r["ok"] is True and "flat" in r["detail"]
+    r2 = c.post("/api/scenario-test", json={"id": 36}).get_json()  # partial rollback
+    assert r2["ok"] is True and any(s[0].startswith("rollback") for s in r2["steps"])
 
 
 def test_drawdown_endpoint_shape(tmp_path):

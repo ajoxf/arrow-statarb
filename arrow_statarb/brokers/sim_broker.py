@@ -103,6 +103,12 @@ class SimBroker:
             bid, ask = round(ltp - half, 2), round(ltp + half, 2)
         return bid, ask, ltp
 
+    def get_quote(self, exchange_segment: str, symbol: str) -> Dict:
+        """Public {ltp, bid, ask} for the leg adapter (scenario/clip execution
+        in live_sim). Wraps the synthetic book from ``_quote``."""
+        bid, ask, ltp = self._quote(exchange_segment, symbol)
+        return {"ltp": ltp, "bid": bid, "ask": ask}
+
     def _marketable(self, side: str, price, bid: float, ask: float, order_type: str) -> bool:
         if order_type == "market" or price is None:
             return True

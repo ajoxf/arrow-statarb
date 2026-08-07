@@ -154,8 +154,25 @@
                     <td>${s.name}</td>
                     <td><span class="badge ${modeBadge(s.mode)}">${s.mode}</span></td>
                     <td class="small text-secondary">${s.variant}</td>
-                    <td><span class="badge bg-secondary">ready</span></td></tr>`).join('');
+                    <td><button class="btn btn-sm btn-outline-primary py-0" onclick="runScenario(${s.id})"
+                        id="scn-btn-${s.id}">Run</button>
+                        <span class="small ms-1" id="scn-res-${s.id}"></span></td></tr>`).join('');
         } catch (e) {}
+    }
+    async function runScenario(id) {
+        const btn = document.getElementById('scn-btn-' + id);
+        const res = document.getElementById('scn-res-' + id);
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        try {
+            const r = await fetch('/api/scenario-test', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})}).then(x => x.json());
+            if (res) {
+                const cls = r.ok ? 'text-success' : (r.error ? 'text-danger' : 'text-warning');
+                res.className = 'small ms-1 ' + cls;
+                res.textContent = (r.ok ? '✓ ' : '✗ ') + (r.detail || r.error || 'no result');
+            }
+        } catch (e) { if (res) { res.className = 'small ms-1 text-danger'; res.textContent = '✗ ' + e; } }
+        if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
     }
     loadScenarios();
 
