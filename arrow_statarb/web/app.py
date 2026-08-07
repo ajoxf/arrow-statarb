@@ -1573,6 +1573,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             rc = cfg.section("reconcile")
             bk = cfg.section("broker")
             co = cfg.section("costs")
+            pa = cfg.section("pairs")
             _cseg = co.get("segments") or {}
             def _segrate(seg, rate):
                 v = (_cseg.get(seg) or {}).get(rate)
@@ -1678,6 +1679,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
                     "max_entry_spread_divergence": s.get("max_entry_spread_divergence", 0),
                     "max_entry_zscore": s.get("max_entry_zscore", 0),
+                },
+                "pairs": {
+                    "pair_type": pa.get("pair_type", "SPOT_FUTURE"),
+                    "risk_free_rate": pa.get("risk_free_rate", 0.0425),
+                    "sizing_mode": pa.get("sizing_mode", "lots"),
+                    "hedge_mode": pa.get("hedge_mode", "units"),
+                    "notional_per_leg_inr": pa.get("notional_per_leg_inr", 0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -1867,6 +1875,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                         _seg.pop(seg, None)
                 else:
                     _seg.setdefault(seg, {})["stt_sell_pct"] = _num(v, 0.0)
+
+        pa = raw.setdefault("pairs", {})
+        pad = data.get("pairs") or {}
+        if "pair_type" in pad:
+            pt = str(pad["pair_type"] or "SPOT_FUTURE").upper()
+            pa["pair_type"] = pt if pt in ("SPOT_FUTURE", "FUTURE_FUTURE", "RELATED") else "SPOT_FUTURE"
+        for k in ("sizing_mode", "hedge_mode"):
+            if k in pad:
+                pa[k] = str(pad[k] or "")
+        for k, d in (("risk_free_rate", 0.0425), ("notional_per_leg_inr", 0.0)):
+            if k in pad:
+                pa[k] = _num(pad[k], d)
 
         tg = raw.setdefault("telegram", {})
         tgd = data.get("telegram") or {}

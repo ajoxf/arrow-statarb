@@ -299,6 +299,54 @@
         </div>
     </div>
 
+    <!-- ── Pair Selection & Sizing ───────────────────────────────────────── -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-rulers me-2"></i>Pair Selection &amp; Sizing</div>
+            <div class="card-body">
+                <div class="alert alert-info py-2 small mb-3">
+                    Pair kind + carry drive the <strong>Fair-Value</strong> card (display only — never the
+                    signal). Sizing mode + hedge mode drive the <strong>Position Sizing</strong> card and,
+                    once the multi-asset engine is live, the actual leg sizes.
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Pair Type</label>
+                        <select class="form-select" id="p-pairtype">
+                            <option value="SPOT_FUTURE">SPOT_FUTURE (NSE cash/ETF vs future)</option>
+                            <option value="FUTURE_FUTURE">FUTURE_FUTURE (calendar — NSE or MCX)</option>
+                            <option value="RELATED">RELATED (no arbitrage — e.g. GOLD/SILVER)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Carry Rate (annual)</label>
+                        <input type="number" step="0.0025" class="form-control" id="p-carry">
+                        <div class="form-text">Cost-of-carry for fair value (e.g. 0.0425 = 4.25%).</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Sizing Mode</label>
+                        <select class="form-select" id="p-sizingmode">
+                            <option value="lots">lots (Lots-per-Trade anchor)</option>
+                            <option value="notional">notional (₹ per leg)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Hedge Balance</label>
+                        <select class="form-select" id="p-hedgemode">
+                            <option value="units">units (equal units × β — basis trade)</option>
+                            <option value="notional">notional (equal money — related pair)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Notional per Leg (₹)</label>
+                        <input type="number" step="1000" class="form-control" id="p-notional">
+                        <div class="form-text">Used when Sizing Mode = notional. 0 = off.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── Indian Costs (per segment) ────────────────────────────────────── -->
     <div class="col-lg-6">
         <div class="card h-100">
@@ -894,6 +942,13 @@
             if (tb) { tb.textContent = s.telegram.token_set ? 'set ✓' : 'missing';
                       tb.className = 'badge ' + (s.telegram.token_set ? 'bg-success' : 'bg-danger'); }
         }
+        if (s.pairs) {
+            _set('p-pairtype', s.pairs.pair_type);
+            _set('p-carry', s.pairs.risk_free_rate);
+            _set('p-sizingmode', s.pairs.sizing_mode);
+            _set('p-hedgemode', s.pairs.hedge_mode);
+            _set('p-notional', s.pairs.notional_per_leg_inr);
+        }
         if (s.costs) {
             _setChk('c-useseg', s.costs.use_segment_costs);
             _set('c-gst', s.costs.gst_pct);
@@ -1039,6 +1094,13 @@
                 stt_nse_fo: _blankNull('c-stt-nsefo'),
                 ctt_mcx_fo: _blankNull('c-ctt-mcx'),
                 stt_nse_cm: _blankNull('c-stt-nsecm'),
+            },
+            pairs: {
+                pair_type: document.getElementById('p-pairtype').value,
+                risk_free_rate: +document.getElementById('p-carry').value,
+                sizing_mode: document.getElementById('p-sizingmode').value,
+                hedge_mode: document.getElementById('p-hedgemode').value,
+                notional_per_leg_inr: +document.getElementById('p-notional').value,
             },
             telegram: {
                 enabled: document.getElementById('tg-enabled').checked,

@@ -341,6 +341,24 @@ def test_leg_info_days_to_expiry_is_info_only(tmp_path):
     assert info["legs"]["leg_b"]["days_to_expiry"] == 12
 
 
+def test_settings_pairs_section_roundtrip(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    c = app.test_client()
+    g = c.get("/api/settings").get_json()
+    assert g["pairs"]["pair_type"] == "SPOT_FUTURE"          # default
+    r = c.post("/api/settings", json={"pairs": {
+        "pair_type": "FUTURE_FUTURE", "risk_free_rate": 0.06,
+        "sizing_mode": "notional", "hedge_mode": "notional",
+        "notional_per_leg_inr": 250000}})
+    assert r.get_json()["success"] is True
+    g2 = c.get("/api/settings").get_json()["pairs"]
+    assert g2["pair_type"] == "FUTURE_FUTURE" and g2["sizing_mode"] == "notional"
+    assert g2["risk_free_rate"] == 0.06 and g2["notional_per_leg_inr"] == 250000
+    # an invalid pair_type falls back safely
+    c.post("/api/settings", json={"pairs": {"pair_type": "BOGUS"}})
+    assert c.get("/api/settings").get_json()["pairs"]["pair_type"] == "SPOT_FUTURE"
+
+
 def test_pair_analytics_fair_value_and_sizing(tmp_path):
     # Read-only Phase-6 endpoint: with prices + lot sizes it returns the
     # cost-of-carry fair value, contract-aware sizing (k), and hedge drift.
