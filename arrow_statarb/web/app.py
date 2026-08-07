@@ -44,6 +44,8 @@ from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
+from arrow_statarb.core.clip_executor import ClipExecutor
+from arrow_statarb.core.arrow_leg import ArrowLeg
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.core.telegram import TelegramNotifier
@@ -383,6 +385,66 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 adverse += max(0.0, sign * (avg - ref)) * filled
         return round(brk + stt + other + adverse, 2)
 
+    def _engine_mode() -> str:
+        return str(cfg.get("execution.engine_mode", "legacy") or "legacy").lower()
+
+    def _clip_spread_order(legs, label: str) -> Dict:
+        """Place the SAME Arrow-sized legs through the ported clip engine —
+        slicing + limit-first repeg + cross-on-timeout — instead of the legacy
+        SpreadExecutor. Arrow's sizing/sides/hedge are unchanged (no convention
+        risk); only HOW the orders are placed differs. Atomic: if a leg
+        under-fills, the already-filled legs are unwound at market. Returns the
+        same {success, results:[{symbol, side, avg_price}], error} shape."""
+        mode = _mode()
+        broker = sim_broker if mode == "live_sim" else active.get()
+        if not broker:
+            return {"success": False, "error": "No broker connected"}
+        ex = cfg.section("execution")
+        ex_cfg = {
+            "SLIPPAGE_TOLERANCE": 1.0, "PEG_OFFSET_POINTS": 0.0,
+            "ORDER_POLL_SEC": float(ex.get("poll_interval_sec", 0.4) or 0.4),
+            "REPEG_INTERVAL_SEC": float(ex.get("amend_interval_sec", 2.0) or 2.0),
+            "LIMIT_TIMEOUT_SEC": float(ex.get("fill_timeout_sec", 8) or 8),
+            "ON_TIMEOUT": "cross" if bool(ex.get("limit_to_market", True)) else "abort",
+        }
+        seg_by_sym = {sym: seg for seg, sym, _s, _q in legs}
+        leg = ArrowLeg(broker, seg_by_sym, product=str(ex.get("product", "NRML")))
+        ce = ClipExecutor(ex_cfg, leg, leg,
+                          slice_lots=float(ex.get("slice_lots", 0) or 0))
+        style = "limit" if bool(ex.get("use_limit_orders", True)) else "market"
+        _opp = {"buy": "sell", "sell": "buy"}
+        results, filled_legs = [], []
+        try:
+            ce.sweep_stale_orders([(leg, sym) for _s, sym, _sd, _q in legs])
+            for seg, sym, side, lots_leg in legs:
+                f, vwap = ce._send_sliced(leg, sym, side.upper(), lots_leg,
+                                          f"{label}", style=style,
+                                          timeout=ex_cfg["LIMIT_TIMEOUT_SEC"])
+                results.append({"symbol": sym, "side": side, "avg_price": vwap,
+                                "filled": f, "lots": lots_leg})
+                if f >= lots_leg - 1e-9:
+                    filled_legs.append((seg, sym, side, f))
+                else:                                    # atomic unwind of filled legs
+                    for fseg, fsym, fside, ff in filled_legs:
+                        ce._send_sliced(leg, fsym, _opp[fside], ff, "unwind", style="market")
+                    return {"success": False, "results": results,
+                            "error": f"clip: {sym} filled {f}/{lots_leg} — legs unwound"}
+            return {"success": True, "results": results}
+        except Exception as exc:                         # never crash the money path
+            logger.error("clip execution failed — {}", exc)
+            for fseg, fsym, fside, ff in filled_legs:
+                try:
+                    ce._send_sliced(leg, fsym, _opp[fside], ff, "unwind", style="market")
+                except Exception:
+                    logger.critical("clip: could not unwind %s after error", fsym)
+            return {"success": False, "results": results, "error": str(exc)}
+
+    def _place(legs, label: str, verify_flat: bool = False) -> Dict:
+        """Route to the clip engine or the legacy SpreadExecutor per settings."""
+        if _engine_mode() == "clip":
+            return _clip_spread_order(legs, label)
+        return _spread_order(legs, label, verify_flat=verify_flat)
+
     def _spread_execute(direction: str, lots: int, source: str = "manual",
                         z: Optional[float] = None, spread: Optional[float] = None) -> Dict:
         mode = _mode()
@@ -392,7 +454,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(direction, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _spread_order(legs, "Order", verify_flat=True)
+        res = _place(legs, "Order", verify_flat=True)
         if res.get("success"):
             m = _trade_meta(res)
             # Hand the actual executed fill spread back to the caller (the algo
@@ -455,7 +517,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(close_dir, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _spread_order(legs, "Close")
+        res = _place(legs, "Close")
         if res.get("success"):
             m = _trade_meta(res)
             rec = trade_log.record(action="CLOSE", direction=direction, lots=lots,
@@ -1754,6 +1816,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 },
                 "execution": {
                     "product": ex.get("product", "NRML"),
+                    "engine_mode": ex.get("engine_mode", "legacy"),
+                    "slice_lots": ex.get("slice_lots", 0),
                     "cooldown_sec": ex.get("cooldown_sec", 300),
                     "use_limit_orders": bool(ex.get("use_limit_orders", True)),
                     "limit_offset_pct": ex.get("limit_offset_pct", 0.05),
@@ -1962,6 +2026,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 ex[k] = bool(ed[k])
         if "product" in ed:
             ex["product"] = str(ed["product"] or "NRML")
+        if "engine_mode" in ed:
+            em = str(ed["engine_mode"] or "legacy").lower()
+            ex["engine_mode"] = em if em in ("legacy", "clip") else "legacy"
+        if "slice_lots" in ed:
+            ex["slice_lots"] = _num(ed["slice_lots"], 0)
         for k, d in (("limit_offset_pct", 0.05), ("amend_step_pct", 0.05),
                      ("amend_interval_sec", 1.5), ("fill_timeout_sec", 5.0),
                      ("poll_interval_sec", 0.4), ("price_tick_size", 0.10),

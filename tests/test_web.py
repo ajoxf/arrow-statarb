@@ -362,6 +362,32 @@ def test_scenario_runs_live_sim_through_adapter(tmp_path):
     assert r2["ok"] is True and any(s[0].startswith("rollback") for s in r2["steps"])
 
 
+def test_engine_mode_setting_roundtrip(tmp_path):
+    app, _ = _app(tmp_path, mode="dry_run")
+    c = app.test_client()
+    assert c.get("/api/settings").get_json()["execution"]["engine_mode"] == "legacy"
+    c.post("/api/settings", json={"execution": {"engine_mode": "clip", "slice_lots": 5}})
+    ex = c.get("/api/settings").get_json()["execution"]
+    assert ex["engine_mode"] == "clip" and ex["slice_lots"] == 5
+    # invalid engine_mode falls back to legacy
+    c.post("/api/settings", json={"execution": {"engine_mode": "bogus"}})
+    assert c.get("/api/settings").get_json()["execution"]["engine_mode"] == "legacy"
+
+
+def test_clip_execution_places_and_closes_live_sim(tmp_path):
+    # engine_mode=clip routes real order placement through the clip engine over
+    # the SIM broker — correct Arrow sides (LONG_SPREAD = buy A / sell B), flat.
+    app, _ = _app(tmp_path, mode="live_sim")
+    c = app.test_client()
+    c.post("/api/settings", json={"execution": {"engine_mode": "clip"}})
+    r = c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is True
+    sides = {x["symbol"]: x["side"] for x in r["results"]}
+    assert sides["NIFTY30JUN26F"] == "buy" and sides["NIFTY28JUL26F"] == "sell"
+    rc = c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert rc["success"] is True
+
+
 def test_engine_shadow_endpoint(tmp_path):
     # Shadow preview is read-only and degrades gracefully before the signal is
     # warm — and must never place an order (no broker order calls).

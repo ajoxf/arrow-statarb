@@ -448,6 +448,19 @@
                         </select>
                     </div>
                     <div class="col-md-4">
+                        <label class="form-label">Execution Engine</label>
+                        <select class="form-select" id="e-enginemode">
+                            <option value="legacy">legacy (SpreadExecutor)</option>
+                            <option value="clip">clip (sliced, limit-first)</option>
+                        </select>
+                        <div class="form-text">clip routes the same Arrow-sized legs through the sliced clip engine. Validate in live_sim first.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Slice Size (lots/child)</label>
+                        <input type="number" step="1" class="form-control" id="e-slicelots">
+                        <div class="form-text">clip mode: child-order size. 0 = whole clip.</div>
+                    </div>
+                    <div class="col-md-4">
                         <label class="form-label">Cooldown (sec)</label>
                         <input type="number" step="1" class="form-control" id="e-cooldown">
                         <div class="form-text">Wait after any close before a new entry.</div>
@@ -877,6 +890,8 @@
             _set('e-stopcd', s.execution.stop_cooldown_sec);
             _setChk('e-zreset', s.execution.z_reset_after_stop);
             _set('e-product', s.execution.product);
+            _set('e-enginemode', s.execution.engine_mode);
+            _set('e-slicelots', s.execution.slice_lots);
             _set('e-cooldown', s.execution.cooldown_sec);
             _set('e-ticksize', s.execution.price_tick_size);
             _set('e-poll', s.execution.poll_interval_sec);
@@ -1114,6 +1129,8 @@
                 amend_step_pct: +document.getElementById('e-step').value,
                 amend_interval_sec: +document.getElementById('e-interval').value,
                 fill_timeout_sec: +document.getElementById('e-timeout').value,
+                engine_mode: document.getElementById('e-enginemode').value,
+                slice_lots: +document.getElementById('e-slicelots').value,
             },
             mode: {
                 paper_trading: document.getElementById('m-paper').checked,

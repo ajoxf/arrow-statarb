@@ -293,6 +293,15 @@ trading_hours:
 # LIVE order execution (SpreadExecutor).
 execution:
   product: NRML
+  # ── execution engine (merge) ─────────────────────────────────────────────
+  # legacy = the proven SpreadExecutor (limit-first + amend repeg + orphan
+  # recovery). clip = route the SAME Arrow-sized legs through the ported clip
+  # engine: each leg sliced into slice_lots children, limit-first with
+  # order-MODIFY repeg then cross on timeout. Arrow's leg sizing/sides/hedge are
+  # unchanged (no convention risk); clip only changes HOW the orders are placed.
+  # Validate in live_sim before live. legacy = nothing changes.
+  engine_mode: legacy         # legacy | clip
+  slice_lots: 0               # clip mode: child-order size in lots (0 = whole clip)
   # ── liveness (reference §8): the app writes data/heartbeat.txt every
   # heartbeat_sec from a timer thread (proves the loop is alive, not that data
   # flows). /api/health reports heartbeat age AND last-tick age separately; run
