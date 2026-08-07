@@ -106,6 +106,34 @@
     </div>
 </div>
 
+<!-- ── New Engine — SHADOW (read-only preview, places NO orders) ───────────── -->
+<div class="card mb-1 border-info">
+    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-cpu me-2"></i>New Engine — Shadow
+            <span class="badge bg-info text-dark ms-1">preview · no orders</span></span>
+        <span class="badge bg-secondary" id="sh-state">warming up</span>
+    </div>
+    <div class="card-body py-2 small">
+        <div class="row g-2 align-items-center">
+            <div class="col-md-3">
+                <span class="text-secondary">Would enter:</span>
+                <span class="fw-bold" id="sh-enter">—</span>
+                <div class="small text-warning" id="sh-gate"></div>
+            </div>
+            <div class="col-md-3">
+                <span class="text-secondary">TP / Stop (₹):</span>
+                <span class="font-monospace" id="sh-tpstop">—</span>
+                <div class="small text-secondary">round-trip cost ₹<span id="sh-cost">—</span></div>
+            </div>
+            <div class="col-md-6">
+                <span class="text-secondary">Exit-ladder spread levels:</span>
+                <span class="font-monospace" id="sh-levels">—</span>
+            </div>
+        </div>
+        <div class="small text-secondary mt-1">Read-only: this is what the ported multi-asset engine would do on the live signal + your settings — it never places an order.</div>
+    </div>
+</div>
+
 <div class="row g-3">
     <!-- ════════════════ LEFT / MAIN COLUMN ════════════════ -->
     <div class="col-lg-8">
@@ -755,6 +783,41 @@
                 bg.className = 'fw-bold font-monospace ' + (s.beta_gap_pct == null ? '' : (Math.abs(s.beta_gap_pct) > 10 ? 'text-warning' : 'text-secondary')); }
         } catch (e) {}
     }
+
+    // ── New Engine shadow preview (read-only, no orders) ─────────────────────
+    async function pollEngineShadow() {
+        try {
+            const s = await fetch('/api/engine/shadow').then(r => r.json());
+            const state = document.getElementById('sh-state');
+            const n = (v, d=2) => (v == null) ? '—' : Number(v).toFixed(d);
+            if (!s.ready) {
+                state.textContent = s.reason || 'warming up'; state.className = 'badge bg-secondary';
+                document.getElementById('sh-enter').textContent = '—';
+                document.getElementById('sh-gate').textContent = '';
+                document.getElementById('sh-tpstop').textContent = '—';
+                document.getElementById('sh-levels').textContent = '—';
+                return;
+            }
+            state.textContent = `z ${n(s.z)}`; state.className = 'badge bg-info text-dark';
+            const enter = document.getElementById('sh-enter');
+            if (s.would_enter) {
+                const viable = s.viable;
+                enter.innerHTML = `<span class="badge ${s.would_enter === 'SELL_BASIS' ? 'bg-danger' : 'bg-success'}">${s.would_enter}</span>`
+                    + (viable ? '' : ' <span class="badge bg-warning text-dark">not viable (cost floor)</span>');
+                document.getElementById('sh-gate').textContent = '';
+            } else {
+                enter.innerHTML = '<span class="text-secondary">no — resting</span>';
+                document.getElementById('sh-gate').textContent = s.blocking_gate ? ('blocked: ' + s.blocking_gate) : '';
+            }
+            document.getElementById('sh-cost').textContent = n(s.rt_cost_inr, 0);
+            document.getElementById('sh-tpstop').textContent =
+                (s.tp_inr == null ? '—' : '₹' + n(s.tp_inr, 0)) + ' / ' + (s.stop_inr == null ? '—' : '₹' + n(s.stop_inr, 0));
+            const L = s.levels;
+            document.getElementById('sh-levels').textContent = L
+                ? `BE ${n(L.be, 3)} · EX ${n(L.ex, 3)} · TP ${n(L.tp, 3)} · SL ${n(L.sl, 3)}` : '—';
+        } catch (e) {}
+    }
+    pollEngineShadow(); setInterval(pollEngineShadow, 3000);
 
     // ── Position reconciliation (engine vs exchange) ─────────────────────────
     async function pollReconcile() {

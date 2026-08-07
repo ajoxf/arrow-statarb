@@ -362,6 +362,15 @@ def test_scenario_runs_live_sim_through_adapter(tmp_path):
     assert r2["ok"] is True and any(s[0].startswith("rollback") for s in r2["steps"])
 
 
+def test_engine_shadow_endpoint(tmp_path):
+    # Shadow preview is read-only and degrades gracefully before the signal is
+    # warm — and must never place an order (no broker order calls).
+    app, broker = _app(tmp_path, mode="dry_run")
+    r = app.test_client().get("/api/engine/shadow").get_json()
+    assert r["shadow"] is True and r["ready"] is False
+    assert broker.orders == []                       # nothing was traded
+
+
 def test_drawdown_endpoint_shape(tmp_path):
     app, _ = _app(tmp_path, mode="dry_run")
     d = app.test_client().get("/api/drawdown").get_json()

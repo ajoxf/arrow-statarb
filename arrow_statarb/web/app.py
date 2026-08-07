@@ -42,6 +42,8 @@ from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
+from arrow_statarb.core.signals import ZSignalGenerator
+from arrow_statarb.core.exits import ExitLadder
 from arrow_statarb.core.whatif_shadow import ShadowTracker
 from arrow_statarb.core.health import Heartbeat, health_verdict
 from arrow_statarb.core.telegram import TelegramNotifier
@@ -1261,6 +1263,116 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                    leg_a_price=la, leg_b_price=lb, spread=spread,
                    pair_type=asset_cfg["pair_type"],
                    leg_a=legs["leg_a"]["symbol"], leg_b=legs["leg_b"]["symbol"])
+        return jsonify(out)
+
+    def _engine_cfgs():
+        """Map Arrow settings → the ported engine's SIGNALS/EXITS cfg dicts, for
+        the shadow preview. Cooldowns/trend are stateless here (a one-shot
+        preview), so they're neutralised."""
+        s, xo, f = cfg.section("signal"), cfg.section("exits"), cfg.section("filters")
+        signals_cfg = {
+            "ENTRY_Z": float(s.get("entry_zscore", 2) or 2),
+            "EXIT_Z": float(s.get("exit_zscore", 0) or 0),
+            "STOP_Z": float(s.get("stop_zscore", 4) or 4),
+            "MAX_ENTRY_Z": float(s.get("max_entry_zscore", 0) or s.get("stop_zscore", 4)),
+            "TREND_FILTER": False, "ENTRY_COOLDOWN_SEC": 0, "STOP_COOLDOWN_SEC": 0,
+        }
+        frac = float(xo.get("profit_target_sigma_frac", 0) or 0)
+        exits_cfg = {
+            "USE_SIGMA_TARGET": frac > 0,
+            "TP_CAPITAL_PCT": float(xo.get("tp_capital_pct", 0) or 0),
+            "TP_INR_PER_LOT": float(xo.get("profit_target_inr", 0) or 0),
+            "COST_FLOOR_MULT": float(xo.get("cost_floor_mult", 0) or 0),
+            "STOP_INR_PER_LOT": float(xo.get("dollar_stop_inr", 0) or 0),
+            "STOP_CAPITAL_PCT": float(xo.get("stop_capital_pct", 0) or 0),
+            "RR": float(xo.get("stop_rr", 0) or 0),
+            "GATE_FLOOR_INR": float(xo.get("reversion_gate_inr", 0) or 0),
+            "MAX_HOLD_HALF_LIVES": float(f.get("time_stop_half_lives", 3) or 3),
+            "MAX_HOLD_FALLBACK_MIN": 240,
+            "HARD_TIME_STOP_MULT": float(xo.get("hard_time_stop_mult", 0) or 0),
+            "HARD_MAX_HOLD_MIN": 0,
+            "Z_STOP_EXIT_ENABLED": bool(xo.get("z_stop_exit_enabled", True)),
+            "MAX_HOLD_PROGRESS_SUPPRESS": float(xo.get("max_hold_z_progress_min", 0.5) or 0.5),
+        }
+        return signals_cfg, exits_cfg, frac
+
+    @app.route("/api/engine/shadow", methods=["GET"])
+    def api_engine_shadow():
+        """SHADOW: what the ported multi-asset engine WOULD do on the current
+        pair right now — entry gate, exit-ladder levels, clip sizing — computed
+        from the live signal + your settings. Places NO orders."""
+        out: Dict[str, Any] = {"ready": False, "shadow": True}
+        legs = _read_legs()
+        sig = signal_engine.get_signal()
+        z, spread, std = sig.get("zscore"), sig.get("spread"), sig.get("std")
+        if not _have_both_legs(legs) or not sig.get("ready") or z is None or not std:
+            out["reason"] = "warming up, or legs not set"
+            return jsonify(out)
+
+        signals_cfg, exits_cfg, frac = _engine_cfgs()
+        slope = float((sig.get("regime_detail") or {}).get("slope", 0.0) or 0.0)
+
+        class _Shim:                                   # SpreadStats-shaped preview
+            warm = True
+            def __init__(s):
+                s.z, s.sigma = z, std
+                s.half_life_sec = sig.get("half_life_sec")
+            def trend_slope(s):
+                return slope
+
+        gen = ZSignalGenerator(signals_cfg, clock=time.time)
+        direction = gen.entry_signal("shadow", _Shim(), sig, {}, 1, 1)
+        gate = gen._blocking.get("shadow")
+
+        # contract-aware sizing (same path as /api/pair-analytics)
+        broker = active.get() or (sim_broker if _mode() == "live_sim" else None)
+        la, lb = _leg_prices()
+        hedge_ratio = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        def _cs(lk):
+            try:
+                return float(broker.resolve_lot_size(legs[lk]["segment"], legs[lk]["symbol"]))
+            except Exception:
+                return 1.0
+        contract_a, contract_b = _cs("leg_a"), _cs("leg_b")
+        pairs = cfg.section("pairs")
+        size = None
+        if la and lb:
+            params = {"HEDGE_RATIO": hedge_ratio,
+                      "SIZING_MODE": str(pairs.get("sizing_mode", "lots")),
+                      "NOTIONAL_PER_LEG_INR": float(pairs.get("notional_per_leg_inr", 0) or 0),
+                      "CLIP_LOTS": float(cfg.get("risk.lots_per_trade", 1) or 1),
+                      "HEDGE_MODE": str(pairs.get("hedge_mode", "units"))}
+            size = sizing.plan(params, contract_a, contract_b, la, lb)
+        lots_b = float((size or {}).get("leg_b_lots") or 0)
+        k = float((size or {}).get("spread_units") or 0)
+
+        # legacy round-trip cost (₹) on leg-B notional — matches the algo's model
+        f = cfg.section("filters")
+        notional_b = (lb or 0) * lots_b * contract_b
+        rt_cost = (float(f.get("brokerage_per_lot", 20) or 0) * max(1, lots_b) * 4.0
+                   + 2.0 * (float(f.get("stt_pct", 0) or 0) / 100.0) * notional_b
+                   + 4.0 * (float(f.get("other_cost_pct", 0) or 0) / 100.0) * notional_b)
+        capital = float(cfg.get("risk.capital_at_risk_inr", 0) or 0) or None
+
+        ladder = ExitLadder(exits_cfg, signals_cfg, target_fraction=frac or 0.5)
+        levels = plan = None
+        viable = True
+        if direction and lots_b > 0 and k > 0:
+            plan = ladder.build_plan(lots=lots_b, contract_size=contract_b,
+                                     entry_z=z, sigma=std,
+                                     half_life_sec=sig.get("half_life_sec"),
+                                     rt_cost=rt_cost, capital=capital,
+                                     entry_mu=sig.get("mean"))
+            if plan is None:
+                viable = False
+            else:
+                levels = ExitLadder.spread_levels(plan, spread, k, direction)
+
+        out.update(ready=True, z=z, spread=spread, would_enter=direction,
+                   blocking_gate=gate, viable=viable, levels=levels,
+                   tp_inr=(plan or {}).get("tp_inr"),
+                   stop_inr=(plan or {}).get("stop_inr"),
+                   rt_cost_inr=round(rt_cost, 2), k=k, lots_b=lots_b)
         return jsonify(out)
 
     # ── prices / positions / signal ──────────────────────────────────────────
