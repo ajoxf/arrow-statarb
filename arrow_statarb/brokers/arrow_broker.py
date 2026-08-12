@@ -822,11 +822,22 @@ class ArrowBroker(BaseBroker):
         """
         if not _SDK_AVAILABLE or not self.connected:
             return False
-        tokens = []
+        tokens, unresolved = [], []
         for s in symbols:
             tok = self._sym_token.get(str(s).upper())
             if tok:
                 tokens.append(int(tok))
+            else:
+                unresolved.append(str(s))
+        if unresolved:
+            # The single most common reason for "prices won't update": the
+            # symbol has no numeric token in the master, so it can't be streamed
+            # (and the REST /quotes/ltp fallback is rejected too). Name it loudly
+            # — a silent return here reads as a dead feed with no cause.
+            logger.warning("ArrowBroker: NO stream token for {} — prices will "
+                           "NOT update for these. Re-pick the contract on Setup, "
+                           "or check it exists in the master ({} symbols indexed).",
+                           unresolved, len(self._sym_token))
         if not tokens:
             return False
         try:
