@@ -14,6 +14,10 @@ broker:
   # Cache the Arrow session token (valid ~24h) to a gitignored local file so a
   # restart reuses it and skips the 2FA login. Cleared on explicit Disconnect.
   persist_session: true
+  # Auto-connect at startup when all ARROW_* credentials are in .env — no typing,
+  # no Connect click on every restart. Reuses the cached token. false = connect
+  # manually from the dashboard.
+  auto_connect: true
   # Segment key → Arrow ExchSeg (the master's exchange+segment field).
   segments:
     nse_cm: NSECM

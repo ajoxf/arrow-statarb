@@ -981,6 +981,44 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                            interval_sec=float(cfg.get("execution.heartbeat_sec", 10) or 10))
     _heartbeat.start()
 
+    def _auto_connect() -> None:
+        """Connect to Arrow at startup when ALL ARROW_* credentials are present
+        in the environment (from .env), reusing a cached session token — so a
+        restart is fully unattended: no typing, no Connect click. Runs in a
+        background thread so a slow/failed login never blocks serving. Never
+        resets the (just-restored) signal window. Disable with
+        broker.auto_connect: false."""
+        if not bool(cfg.get("broker.auto_connect", True)) or active.get() is not None:
+            return
+        env = Config.arrow_credentials()
+        creds = {k: env.get(k, "") for k in
+                 ("app_id", "user_id", "password", "api_secret", "totp_secret")}
+        if any(not v for v in creds.values()):
+            logger.info("Auto-connect skipped — set ARROW_* in .env to connect "
+                        "unattended (or connect from the dashboard).")
+            return
+        creds["lot_sizes"] = cfg.get("broker.lot_overrides") or {}
+        persist = bool(cfg.get("broker.persist_session", True))
+        if persist:
+            saved = _load_session_token(creds["app_id"])
+            if saved:
+                creds["token"] = saved
+        try:
+            broker = create_broker(cfg.get("broker.name", "arrow"), creds)
+            if broker.connect():
+                active.set(broker)
+                signal_engine.start()             # keep the restored window
+                if persist and hasattr(broker, "get_session_token"):
+                    _save_session_token(creds["app_id"], broker.get_session_token())
+                logger.info("Auto-connected to Arrow at startup (creds from .env).")
+            else:
+                logger.warning("Auto-connect failed — {} (connect from the "
+                               "dashboard)", getattr(broker, "last_error", "") or "login failed")
+        except Exception as exc:                  # never block startup
+            logger.warning("Auto-connect error — {}", exc)
+
+    threading.Thread(target=_auto_connect, daemon=True, name="ArrowAutoConnect").start()
+
     @app.route("/api/health", methods=["GET"])
     def api_health():
         """Loop liveness (heartbeat age) + feed liveness (last-tick age), reported
@@ -1089,7 +1127,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             ok = broker.connect()
             if ok:
                 active.set(broker)
-                signal_engine.reset()
+                # Do NOT reset here — the window was restored at startup and is
+                # series-keyed, so a same-legs (re)connect must KEEP it rather
+                # than throw it away and re-collect. Leg changes reset separately
+                # (api_leg_assignments). Just ensure the engine is running.
                 signal_engine.start()
                 if persist and hasattr(broker, "get_session_token"):
                     _save_session_token(creds["app_id"], broker.get_session_token())
