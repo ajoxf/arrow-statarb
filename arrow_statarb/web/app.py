@@ -1101,6 +1101,409 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             window_minutes=int(cfg.get("signal.window_minutes", 120)),
         )
 
+    def _w3_config():
+        """The dot-accessible `config` object the ported W3 templates read,
+        mapped from Arrow settings (INR/NSE/MCX). Missing keys render empty."""
+        legs = _read_legs()
+        s = cfg.section("signal")
+        pa = cfg.section("pairs")
+        xo = cfg.section("exits")
+        sample_int = float(s.get("sample_interval_sec", 0.5) or 0.5)
+        min_samples = int(float(s.get("min_signal_minutes", 120) or 120) * 60 / max(sample_int, 0.01))
+        data = {
+            "spot_symbol": legs.get("leg_a", {}).get("symbol", "Leg A"),
+            "futures_symbol": legs.get("leg_b", {}).get("symbol", "Leg B"),
+            "asset": (legs.get("leg_a", {}).get("symbol", "PAIR") or "PAIR"),
+            "entry_threshold": float(s.get("entry_zscore", 2.0) or 2.0),
+            "exit_threshold": float(s.get("exit_zscore", 0.0) or 0.0),
+            "stop_loss_threshold": float(s.get("stop_zscore", 4.0) or 4.0),
+            "hedge_ratio": float(s.get("hedge_ratio", 1.0) or 1.0),
+            "min_samples": min_samples,
+            "paper_trading": _mode() != "live",
+            "position_size_usd": float(pa.get("notional_per_leg_inr", 0) or 0),
+            "spot_leverage": xo.get("spot_leverage", 0) or 0,
+            "futures_leverage": xo.get("fut_leverage", 0) or 0,
+        }
+        return type("Cfg", (), {**data, "get": data.get,
+                                "to_dict": lambda self=None: data})()
+
+    @app.route("/dashboard-w3")
+    def dashboard_w3():
+        """Preview of the ported W3 dashboard (Arrow-wired). Leaves the working
+        /dashboard untouched while we iterate on fidelity."""
+        return render_template("dashboard_w3.html", config=_w3_config(),
+                               is_demo=(_mode() != "live"))
+
+    @app.route("/api/engine/status", methods=["GET"])
+    def api_engine_status():
+        """Master feed for the ported W3 dashboard — Arrow data shaped into the
+        reference `status_to_ui` keys. Values are ₹ (the template's $ labels are
+        relabelled separately). Read-only."""
+        sig = signal_engine.get_signal() or {}
+        st = arrow_algo.get_state() or {}
+        legs = _read_legs()
+        la, lb = _leg_prices()
+        hedge_ratio = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        contract_a = _price_multiplier("leg_a") if _have_both_legs(legs) else 1.0
+        contract_b = _price_multiplier("leg_b") if _have_both_legs(legs) else 1.0
+        pairs = cfg.section("pairs")
+
+        # fair value (Arrow leg_a−leg_b convention) + sizing
+        fv = {}
+        size = {}
+        if la and lb and _have_both_legs(legs):
+            def _exp_iso(sym):
+                b = active.get() or (sim_broker if _mode() == "live_sim" else None)
+                if b and hasattr(b, "resolve_expiry_ymd"):
+                    try:
+                        ymd = b.resolve_expiry_ymd(sym)
+                        if ymd and ymd != (9999, 99, 99):
+                            return f"{ymd[0]:04d}-{ymd[1]:02d}-{(ymd[2] or 1):02d}"
+                    except Exception:
+                        pass
+                return None
+            acfg = {"pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
+                    "risk_free_rate": pairs.get("risk_free_rate", 0.0425),
+                    "futures_expiry": _exp_iso(legs["leg_b"]["symbol"]),
+                    "spot_expiry": _exp_iso(legs["leg_a"]["symbol"])}
+            eff = sig.get("spread")
+            eff = eff if eff is not None else (hedge_ratio * la - lb)
+            fv = fairvalue.fair_value_block(acfg, la, lb, eff, hedge_ratio)
+            if fv.get("fair_value") is not None:
+                fv["fair_value"] = -fv["fair_value"]
+                fv["fair_gap"] = eff - fv["fair_value"]
+            size = sizing.plan(
+                {"HEDGE_RATIO": hedge_ratio,
+                 "SIZING_MODE": str(pairs.get("sizing_mode", "lots")),
+                 "NOTIONAL_PER_LEG_INR": float(pairs.get("notional_per_leg_inr", 0) or 0),
+                 "CLIP_LOTS": float(cfg.get("risk.lots_per_trade", 1) or 1),
+                 "HEDGE_MODE": str(pairs.get("hedge_mode", "units"))},
+                contract_a, contract_b, la, lb) or {}
+
+        signal = {
+            "zscore": sig.get("zscore"), "spread": sig.get("spread"),
+            "raw_basis": (lb - la) if (la and lb) else None,
+            "spread_hedge_ratio": hedge_ratio,
+            "spread_formula": f"{hedge_ratio:g}×A − B",
+            "pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
+            "fair_value": fv.get("fair_value"), "fair_gap": fv.get("fair_gap"),
+            "fair_detail": fv.get("fair_detail"),
+            "round_trip_cost_usd": st.get("break_even"),
+            "expected_capture_usd": None,
+            "leg_a_notional": size.get("leg_a_notional_inr"),
+            "leg_b_notional": size.get("leg_b_notional_inr"),
+            "clip_lots": float(cfg.get("risk.lots_per_trade", 1) or 1),
+            "contract_size": contract_b,
+            "sizing": size,
+            "leg_a_leverage": size.get("leg_a_leverage"),
+            "leg_b_leverage": size.get("leg_b_leverage"),
+            "min_notional_usd": size.get("min_notional_inr"),
+            "notional_gap_pct": size.get("notional_gap_pct"),
+            "hedge_mode": size.get("hedge_mode"),
+            "dollar_neutral_beta": size.get("dollar_neutral_beta"),
+            "beta_gap_pct": size.get("beta_gap_pct"),
+            "leg_a_margin": size.get("leg_a_margin_inr"),
+            "leg_b_margin": size.get("leg_b_margin_inr"),
+            "mean": sig.get("mean"), "std": sig.get("std"),
+            "spread_mean": sig.get("mean"), "spread_std": sig.get("std"),
+            "trend_slope": (sig.get("regime_detail") or {}).get("slope"),
+            "half_life": (sig.get("half_life_sec") / 60.0
+                          if sig.get("half_life_sec") else None),
+            "hurst": None, "regime": sig.get("regime"),
+            "data_points": sig.get("samples"),
+            "quote_rate_per_min": sig.get("quote_rate_per_min"),
+            "lookback": _w3_config().min_samples,
+            "history_sec": sig.get("history_sec"),
+            "min_history_sec": float(cfg.get("signal.min_signal_minutes", 120) or 120) * 60,
+            "data_ready": sig.get("zscore") is not None,
+            "degenerate": bool(sig.get("degenerate")),
+            "hedge_ratio": hedge_ratio,
+            "entry_threshold": float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
+            "current_position": st.get("position") or "NONE",
+        }
+
+        open_trade = None
+        if st.get("in_position"):
+            open_trade = {
+                "position_type": ("SHORT" if st.get("position") == "SHORT_SPREAD" else "LONG"),
+                "quantity": st.get("lots"), "entry_spread": st.get("entry_spread"),
+                "entry_zscore": st.get("entry_z"), "pnl_usd": st.get("net_pnl"),
+                "unrealized_pnl": st.get("net_pnl"),
+                "peak_net_usd": st.get("peak_pnl"), "trough_net_usd": st.get("trough_pnl"),
+                "notional_usd": st.get("notional"), "age_seconds": st.get("held_sec"),
+                "max_hold_minutes": (st.get("max_hold_sec") or 0) / 60.0,
+                "exit_target_usd": st.get("profit_target"), "exit_stop_usd": st.get("dollar_stop"),
+                "is_open": True, "is_paper": _mode() != "live",
+            }
+
+        spot_tick = {"bid": la, "ask": la, "last": la} if la else None
+        futures_tick = {"bid": lb, "ask": lb, "last": lb} if lb else None
+        return jsonify({
+            "position": st.get("position") or "NONE",
+            "open_trade": open_trade,
+            "spot_tick": spot_tick, "futures_tick": futures_tick,
+            "execution_backend": "stream" if la else "REST",
+            "sl_cooldown_remaining": st.get("sl_cooldown_remaining", 0),
+            "signal": signal,
+        })
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # W3 dashboard support endpoints. The ported /dashboard-w3 template polls
+    # these in the reference "spot-vs-futures" shape. Arrow has no spot wallet,
+    # VIP tiers, dust, or orphaned spot — those concepts return SAFE-EMPTY so
+    # the page renders without JS errors while showing real Arrow data (margin,
+    # spread history, trades, active orders) where an Arrow equivalent exists.
+    # Amounts are ₹ (the template's $ glyphs are relabelled in the template).
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _w3_trade_row(rec, is_open, tid):
+        """One trade_log record → the reference trades-table row shape. 'spot'
+        maps to leg A, 'futures' to leg B (Arrow has no real spot)."""
+        cap = float(cfg.get("risk.capital_at_risk_inr", 0) or 0)
+        net = float(rec.get("net_pnl", 0) or 0)
+        return {
+            "id": tid,
+            "is_open": bool(is_open),
+            "position_type": ("LONG" if rec.get("direction") == "LONG_SPREAD" else "SHORT"),
+            "entry_zscore": rec.get("entry_zscore") if not is_open else rec.get("zscore"),
+            "entry_spot_price": (rec.get("entry_leg_a") if not is_open else rec.get("leg_a_price")),
+            "entry_futures_price": (rec.get("entry_leg_b") if not is_open else rec.get("leg_b_price")),
+            "exit_spot_price": rec.get("exit_leg_a"),
+            "exit_futures_price": rec.get("exit_leg_b"),
+            "pnl_usd": (None if is_open else net),
+            "pnl_percent": None,
+            "pnl_pct_on_capital": (round(net / cap * 100, 2) if (cap and not is_open) else 0.0),
+            "capital_locked_usd": cap,
+            "notional_usd": None,
+            "entry_time": (rec.get("ts") * 1000 if rec.get("ts") else None),
+        }
+
+    @app.route("/api/trades", methods=["GET"])
+    def api_trades_w3_or_stats():
+        """Backward-compatible: the working /dashboard calls this with NO query
+        and gets {trades, stats}. The W3 dashboard calls ?limit=N and gets a
+        bare array in the reference row shape (oldest→newest)."""
+        if request.args.get("limit") is None:
+            return jsonify({"trades": trade_log.all(), "stats": trade_log.stats()})
+        try:
+            limit = max(1, min(200, int(request.args.get("limit", 10))))
+        except (TypeError, ValueError):
+            limit = 10
+        rt = trade_log.round_trips()
+        rows = []
+        for i, r in enumerate(reversed(rt.get("trips", []))):  # oldest → newest
+            rows.append(_w3_trade_row(r, False, i + 1))
+        if rt.get("open"):
+            rows.append(_w3_trade_row(rt["open"], True, "open"))
+        return jsonify(rows[-limit:])
+
+    @app.route("/api/spread-history", methods=["GET"])
+    def api_spread_history_w3():
+        """z-score + spread series for the W3 charts, from the live window."""
+        try:
+            n = max(2, min(1000, int(request.args.get("n", 100))))
+        except (TypeError, ValueError):
+            n = 100
+        series = signal_engine.get_series(max_points=n) or {}
+        pts = series.get("points", [])
+        return jsonify({
+            "zscores": [p.get("z") for p in pts],
+            "spreads": [p.get("spread") for p in pts],
+        })
+
+    @app.route("/api/spread-history/clear", methods=["POST"])
+    def api_spread_history_clear_w3():
+        """The chart history is a view of the live signal window — we do NOT
+        wipe the collected window here (that would trigger re-collection).
+        Returns success so the button is well-behaved; the chart repopulates
+        from the window on the next poll."""
+        return jsonify({"success": True})
+
+    @app.route("/api/beta-zscore", methods=["GET"])
+    def api_beta_zscore_w3():
+        """Hedge-ratio drift monitor. Arrow has no separate beta-history tracker
+        yet, so this reports WARMUP until the signal window is ready, then a
+        neutral STABLE with the dollar-neutral beta as the current reading
+        (manual-monitoring only — it never gates execution)."""
+        sig = signal_engine.get_signal() or {}
+        if sig.get("zscore") is None:
+            return jsonify({"z": None, "status": "WARMUP"})
+        la, lb = _leg_prices()
+        legs = _read_legs()
+        beta = None
+        if la and lb and _have_both_legs(legs):
+            ca = _price_multiplier("leg_a")
+            cb = _price_multiplier("leg_b")
+            if la * ca:
+                beta = round((lb * cb) / (la * ca), 4)
+        return jsonify({"z": 0.0, "status": "STABLE",
+                        "anchor": beta, "current_beta": beta,
+                        "max_abs_z": 0.0, "minutes_beyond": 0})
+
+    @app.route("/api/account-info", methods=["GET"])
+    def api_account_info_w3():
+        """Arrow margin/funds in the reference account-strip shape. VIP volume
+        tiers (crypto-only) are omitted so that panel stays hidden."""
+        broker = active.get()
+        connected = broker is not None
+        funds = {}
+        if connected and hasattr(broker, "get_funds"):
+            try:
+                funds = broker.get_funds() or {}
+            except Exception:
+                funds = {}
+        env = Config.arrow_credentials()
+        has_keys = all(env.get(k) for k in ("app_id", "user_id", "password"))
+        return jsonify({
+            "exchange": "Arrow",
+            "is_demo": _mode() != "live",
+            "has_api_keys": bool(has_keys),
+            "has_adapters": connected,
+            "connected": connected,
+            "uid": env.get("user_id", "") or "-",
+            "account_level": "",
+            "total_equity": funds.get("equity"),
+            "balance": funds.get("cash"),
+            "available": funds.get("available"),
+            "used_margin": funds.get("used"),
+            "month_volume_usd": None,          # hides the VIP-volume bar
+            "vip_maintain_floor_usd": None,
+            "accounts": [],
+        })
+
+    @app.route("/api/spot-holdings", methods=["GET"])
+    def api_spot_holdings_w3():
+        """Arrow trades futures only — no spot wallet, so never an orphan."""
+        return jsonify({"has_orphan": False, "holdings": []})
+
+    @app.route("/api/exchange-positions", methods=["GET"])
+    def api_exchange_positions_w3():
+        """Broker-side position reconciliation. Arrow's own reconciler owns this;
+        the W3 warning panel stays quiet (no mismatch, no crypto 'dust')."""
+        return jsonify({"success": True, "mismatch": False,
+                        "exchange_has_position": False,
+                        "positions": [], "dust_positions": []})
+
+    @app.route("/api/active-orders", methods=["GET"])
+    def api_active_orders_w3():
+        """In-flight spread order legs, in the reference shape. Entry/exit
+        execution mode reflect Arrow's limit-vs-market config."""
+        use_limit = bool(cfg.get("execution.use_limit_orders", True))
+        entry_mode = "LIMIT" if use_limit else "MARKET"
+        exit_mode = "LIMIT" if (use_limit and not cfg.get("execution.limit_to_market", True)) else "MARKET"
+        st = arrow_algo.get_state() or {}
+        orders = []
+        pend = st.get("pending_legs")
+        if pend:
+            orders.append({
+                "spot_leg": {"side": pend.get("leg_a_side", ""),
+                             "target_price": pend.get("leg_a_price"),
+                             "status": pend.get("leg_a_status", "PENDING")},
+                "futures_leg": {"side": pend.get("leg_b_side", ""),
+                                "target_price": pend.get("leg_b_price"),
+                                "status": pend.get("leg_b_status", "PENDING")},
+            })
+        return jsonify({"orders": orders,
+                        "entry_execution_mode": entry_mode,
+                        "exit_execution_mode": exit_mode})
+
+    @app.route("/api/manual-trade", methods=["GET"])
+    def api_manual_trade_state_w3():
+        """Manual-arm panel state. Arrow arms manual trades via the
+        /api/manual-trade/* actions; this GET reports the current spread + the
+        last manual result so the panel reflects live state."""
+        sig = signal_engine.get_signal() or {}
+        legs = _read_legs()
+        st = arrow_algo.get_state() or {}
+        return jsonify({
+            "asset": legs.get("leg_a", {}).get("symbol", "PAIR"),
+            "current_spread": sig.get("spread"),
+            "armed": False,
+            "order": None,
+            "note": st.get("last_manual_note"),
+            "algo_enabled": bool(st.get("running")),
+        })
+
+    @app.route("/api/ai-insights", methods=["GET"])
+    def api_ai_insights_w3():
+        """AI Auto-Tune insights. Reference ships this as a stub; Arrow has no
+        auto-tuner wired, so the panel shows an empty (well-behaved) list."""
+        return jsonify([])
+
+    @app.route("/api/learning-log", methods=["GET"])
+    def api_learning_log_w3():
+        return jsonify([])
+
+    @app.route("/api/balance-debug", methods=["GET"])
+    def api_balance_debug_w3():
+        broker = active.get()
+        raw = {}
+        if broker and hasattr(broker, "get_funds"):
+            try:
+                raw = (broker.get_funds() or {}).get("raw", {}) or {}
+            except Exception:
+                raw = {}
+        return jsonify({"raw": raw})
+
+    # ── W3 action buttons (Arrow-appropriate or safe no-ops) ─────────────────
+    @app.route("/api/engine/close-position", methods=["POST"])
+    def api_engine_close_position_w3():
+        st = arrow_algo.get_state() or {}
+        pos = st.get("position")
+        if not st.get("in_position") or not pos:
+            return jsonify({"success": False, "error": "No open position"})
+        direction = "LONG_SPREAD" if pos == "LONG_SPREAD" else "SHORT_SPREAD"
+        res = _spread_close(direction, int(st.get("lots", 1) or 1), source="manual")
+        return jsonify({"success": bool(res.get("success", res.get("ok", False))), **res})
+
+    @app.route("/api/engine/sync-position", methods=["POST"])
+    def api_engine_sync_position_w3():
+        data = request.get_json(silent=True) or {}
+        action = data.get("action", "recover")
+        st = arrow_algo.get_state() or {}
+        if action == "clear":
+            prev = st.get("position") or "NONE"
+            if hasattr(arrow_algo, "clear_position"):
+                try:
+                    arrow_algo.clear_position()
+                except Exception:
+                    pass
+            return jsonify({"success": True, "previous_position": prev,
+                            "trades_closed": 0})
+        # recover: report the restored open position (if any)
+        op = trade_log.open_position() if hasattr(trade_log, "open_position") else None
+        return jsonify({"success": True,
+                        "recovered_position": (op.get("direction") if op else None),
+                        "trade_id": None,
+                        "entry_zscore": (op.get("entry_spread") if op else 0) or 0,
+                        "message": ("Recovered" if op else "No open trades to recover")})
+
+    @app.route("/api/close-exchange-position", methods=["POST"])
+    def api_close_exchange_position_w3():
+        return jsonify({"success": True, "message": "No broker-side position to close"})
+
+    @app.route("/api/close-orphaned-spot", methods=["POST"])
+    def api_close_orphaned_spot_w3():
+        return jsonify({"success": True, "message": "Arrow has no spot wallet"})
+
+    @app.route("/api/sweep-dust", methods=["POST"])
+    def api_sweep_dust_w3():
+        return jsonify({"success": True, "swept": 0, "message": "No dust on Arrow"})
+
+    @app.route("/api/sd-touches/clear", methods=["POST"])
+    def api_sd_touches_clear_w3():
+        return jsonify({"success": True})
+
+    @app.route("/api/reset-trades", methods=["POST"])
+    def api_reset_trades_w3():
+        trade_log.clear()
+        return jsonify({"success": True})
+
+    @app.route("/api/reset-all", methods=["POST"])
+    def api_reset_all_w3():
+        trade_log.clear()
+        return jsonify({"success": True})
+
     # ── Arrow connection ─────────────────────────────────────────────────────
     @app.route("/api/arrow/connect", methods=["POST"])
     def api_arrow_connect():
@@ -2350,9 +2753,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             out["notional_prospective"] = not any_open
         return jsonify(out)
 
-    @app.route("/api/trades", methods=["GET"])
-    def api_trades():
-        return jsonify({"trades": trade_log.all(), "stats": trade_log.stats()})
+    # /api/trades GET is served by api_trades_w3_or_stats (backward-compatible:
+    # no query → {trades, stats}; ?limit=N → reference array). See above.
 
     @app.route("/api/trades/journal", methods=["GET"])
     def api_trades_journal():
