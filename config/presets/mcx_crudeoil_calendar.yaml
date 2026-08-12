@@ -71,7 +71,8 @@ signal:
   display_refresh_ms: 300     # dashboard live-price poll cadence (300 = 0.3 s)
   min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
   persist_window: true
-  resume_max_gap_min: 10      # max minutes off and still resume the warm-up
+  resume_max_gap_min: 120     # max minutes off and still resume (not re-collect).
+                              # 0 = never re-collect on a gap. Leg changes reset.
   persist_interval_sec: 30
   min_hold_sec: 30            # suppress reversion/target exit this long after entry
   entry_zscore: 2.0

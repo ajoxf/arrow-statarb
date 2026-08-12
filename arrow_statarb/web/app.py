@@ -680,7 +680,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "stats_update_interval_sec": float(s.get("stats_update_interval_sec", 0) or 0),
             # window persistence (resume warm-up across a quick restart)
             "persist_window": bool(s.get("persist_window", True)),
-            "resume_max_gap_min": float(s.get("resume_max_gap_min", 10) or 0),
+            "resume_max_gap_min": float(s.get("resume_max_gap_min", 120) or 0),
             "persist_interval_sec": float(s.get("persist_interval_sec", 30) or 30),
             # regime detection thresholds (read by SignalEngine.regime())
             "regime_window_samples": int(rg.get("window_samples", 120) or 120),
@@ -1918,7 +1918,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "hedge_ratio": s.get("hedge_ratio", 1.0),
                     "display_refresh_ms": s.get("display_refresh_ms", 500),
                     "persist_window": bool(s.get("persist_window", True)),
-                    "resume_max_gap_min": s.get("resume_max_gap_min", 10),
+                    "resume_max_gap_min": s.get("resume_max_gap_min", 120),
                     "persist_interval_sec": s.get("persist_interval_sec", 30),
                     "min_hold_sec": s.get("min_hold_sec", 0),
                     "entry_zscore": s.get("entry_zscore", 2.0),
@@ -1991,7 +1991,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             sig["persist_window"] = bool(sd["persist_window"])
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
-                     ("resume_max_gap_min", 10), ("persist_interval_sec", 30),
+                     ("resume_max_gap_min", 120), ("persist_interval_sec", 30),
                      ("min_hold_sec", 0.0), ("hedge_ratio", 1.0),
                      ("stats_update_interval_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),

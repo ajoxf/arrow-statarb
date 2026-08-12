@@ -77,7 +77,8 @@ signal:
   # resume_max_gap_min (stale regime → collect fresh). Safe for short restarts;
   # overnight gaps fall outside the window and re-collect automatically.
   persist_window: true
-  resume_max_gap_min: 10      # max minutes the program can be off and still resume
+  resume_max_gap_min: 120     # max minutes off and still resume (not re-collect).
+                              # 0 = never re-collect on a gap. Leg changes reset.
   persist_interval_sec: 30    # how often the window is flushed to disk
   min_hold_sec: 30             # suppress the reversion/target exit for this long
                               # after entry, so a single noisy tick can't trigger a
