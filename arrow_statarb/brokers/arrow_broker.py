@@ -600,7 +600,9 @@ class ArrowBroker(BaseBroker):
             if ls:
                 return ls
 
-        logger.warning(
+        # While the master is still loading, a miss is transient (the index
+        # fills in ~10s) — log at DEBUG, not a scary WARNING that "order may fail".
+        (logger.warning if self._instruments_ready.is_set() else logger.debug)(
             "ArrowBroker: lot size unknown for {}/{} — using 1 (order may fail)",
             exchange_segment, symbol,
         )
@@ -830,14 +832,28 @@ class ArrowBroker(BaseBroker):
             else:
                 unresolved.append(str(s))
         if unresolved:
-            # The single most common reason for "prices won't update": the
-            # symbol has no numeric token in the master, so it can't be streamed
-            # (and the REST /quotes/ltp fallback is rejected too). Name it loudly
-            # — a silent return here reads as a dead feed with no cause.
-            logger.warning("ArrowBroker: NO stream token for {} — prices will "
-                           "NOT update for these. Re-pick the contract on Setup, "
-                           "or check it exists in the master ({} symbols indexed).",
-                           unresolved, len(self._sym_token))
+            # Distinguish the two cases, because they mean opposite things:
+            #  • master still loading (index empty) → TRANSIENT: tokens resolve
+            #    once _fetch_instruments finishes (~10s after connect). Not a
+            #    problem — say so quietly, and don't spam every poll.
+            #  • master loaded but the symbol STILL has no token → a real issue
+            #    (wrong/untradeable contract). Warn once per symbol set.
+            if not self._instruments_ready.is_set():
+                logger.debug("ArrowBroker: stream tokens for {} pending — "
+                             "instrument master still loading", unresolved)
+            else:
+                key = tuple(sorted(unresolved))
+                if not hasattr(self, "_stream_warned"):
+                    self._stream_warned = set()
+                if key not in self._stream_warned:
+                    self._stream_warned.add(key)
+                    logger.warning("ArrowBroker: NO stream token for {} — prices "
+                                   "will NOT update for these. Re-pick the contract "
+                                   "on Setup, or check it exists in the master "
+                                   "({} symbols indexed).", unresolved,
+                                   len(self._sym_token))
+        elif getattr(self, "_stream_warned", None):
+            self._stream_warned.clear()          # resolved → allow future warnings
         if not tokens:
             return False
         try:
