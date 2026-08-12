@@ -440,7 +440,15 @@ def test_pair_analytics_fair_value_and_sizing(tmp_path):
     # sizing resolved: k = leg_b_lots * contract_b
     assert a["sizing"]["spread_units"] == a["sizing"]["leg_b_lots"] * 50
     # fair value present (SPOT_FUTURE carry, expiry in the future)
-    assert a["fair_value"]["fair_value"] is not None
+    fv = a["fair_value"]
+    assert fv["fair_value"] is not None
+    # Sign convention: fair value is in Arrow's leg_a−leg_b frame, so the gap =
+    # (hedge_ratio*leg_a − leg_b) − fair_value. Fair value must be negative here
+    # (leg_a compounds ABOVE itself → fair spread leg_a−leg_b < 0), matching a
+    # contango calendar rather than the old sign-flipped +value.
+    eff_spread = a["hedge_ratio"] * a["leg_a_price"] - a["leg_b_price"]
+    assert abs(fv["fair_gap"] - (eff_spread - fv["fair_value"])) < 1e-6
+    assert fv["fair_value"] < 0
     # dollar-neutral beta = Pb/Pa = 101/100
     assert abs(a["sizing"]["dollar_neutral_beta"] - 1.01) < 1e-9
 

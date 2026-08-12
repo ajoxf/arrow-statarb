@@ -1309,9 +1309,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         }
         fv = size = None
         if la and lb:
-            fv = fairvalue.fair_value_block(
-                asset_cfg, la, lb, spread if spread is not None else (lb - hedge_ratio * la),
-                hedge_ratio)
+            # Arrow spread = hedge_ratio*leg_a − leg_b; use it when the signal
+            # window isn't warm yet so the card still reads.
+            eff_spread = spread if spread is not None else (hedge_ratio * la - lb)
+            fv = fairvalue.fair_value_block(asset_cfg, la, lb, eff_spread, hedge_ratio)
+            # fairvalue uses the reference's futures−spot convention (leg_b−leg_a);
+            # Arrow's spread is leg_a−leg_b (the exact negative). Flip the sign so
+            # the card's fair value and gap are in the SAME convention as the
+            # live spread shown beside them.
+            if fv and fv.get("fair_value") is not None:
+                fv["fair_value"] = -fv["fair_value"]
+                fv["fair_gap"] = eff_spread - fv["fair_value"]
             params = {
                 "HEDGE_RATIO": hedge_ratio,
                 "SIZING_MODE": str(pairs.get("sizing_mode", "lots")),

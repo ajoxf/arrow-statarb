@@ -726,7 +726,12 @@ class ArrowBroker(BaseBroker):
         try:
             response = self._client.get_quotes(QuoteMode.LTP, pairs)
         except Exception as exc:
-            logger.warning("ArrowBroker: LTP fetch failed ({} ids) — {}", len(pairs), exc)
+            # DEBUG, not WARNING: the WebSocket price stream is the primary feed
+            # (start_price_stream / get_streamed_ltp). This REST /quotes/ltp call
+            # is only a fallback and Arrow rejects it for some segments; a genuine
+            # feed stall is caught by the heartbeat / feed-stale banner, not here.
+            logger.debug("ArrowBroker: LTP REST fallback failed ({} ids) — {}",
+                         len(pairs), exc)
             return {}
 
         result: Dict[str, float] = {}
