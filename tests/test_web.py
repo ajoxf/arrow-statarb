@@ -422,6 +422,24 @@ def test_settings_pairs_section_roundtrip(tmp_path):
     assert c.get("/api/settings").get_json()["pairs"]["pair_type"] == "SPOT_FUTURE"
 
 
+def test_mcx_price_multiplier_overrides_k_not_order_lot(tmp_path):
+    # MCX price multiplier scales the P&L math (k, notionals) but NOT the broker
+    # order-lot. Broker lot size = 75; multiplier override = 10 → k follows 10.
+    app, broker = _app(tmp_path, mode="dry_run")
+    broker.resolve_lot_size = lambda seg, sym: 75            # order-lot (unchanged)
+    broker.get_ltp = lambda ins: {"NIFTY30JUN26F": 100.0, "NIFTY28JUL26F": 100.0}
+    c = app.test_client()
+    # auto (0) → k uses the broker lot size (75)
+    a0 = c.get("/api/pair-analytics").get_json()
+    assert a0["contract_b"] == 75 and a0["sizing"]["spread_units"] == 75
+    # override to 10 → k follows the multiplier, not the lot size
+    c.post("/api/settings", json={"pairs": {"multiplier_a": 10, "multiplier_b": 10}})
+    a1 = c.get("/api/pair-analytics").get_json()
+    assert a1["contract_a"] == 10 and a1["contract_b"] == 10
+    assert a1["sizing"]["spread_units"] == 10                # k = 1 lot × 10
+    assert a1["sizing"]["leg_b_notional_inr"] == 1000.0      # 1 × 10 × 100
+
+
 def test_pair_analytics_fair_value_and_sizing(tmp_path):
     # Read-only Phase-6 endpoint: with prices + lot sizes it returns the
     # cost-of-carry fair value, contract-aware sizing (k), and hedge drift.

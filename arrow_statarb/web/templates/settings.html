@@ -342,6 +342,17 @@
                         <input type="number" step="1000" class="form-control" id="p-notional">
                         <div class="form-text">Used when Sizing Mode = notional. 0 = off.</div>
                     </div>
+                    <div class="col-12"><hr class="my-1"><small class="text-secondary">MCX price multiplier — ₹ P&amp;L per ₹1 price move (0 = auto/lot size). Leave 0 for NSE.</small></div>
+                    <div class="col-md-6">
+                        <label class="form-label">Leg A multiplier</label>
+                        <input type="number" step="1" class="form-control" id="p-mult-a" placeholder="0 = auto">
+                        <div class="form-text">MCX: CRUDEOILM 10 · CRUDEOIL 100 · GOLDM 10 · GOLD 100 · SILVERM 5.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Leg B multiplier</label>
+                        <input type="number" step="1" class="form-control" id="p-mult-b" placeholder="0 = auto">
+                        <div class="form-text">Same instrument as Leg A → same value. Scales k / P&amp;L / break-even, NOT order size.</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -963,6 +974,8 @@
             _set('p-sizingmode', s.pairs.sizing_mode);
             _set('p-hedgemode', s.pairs.hedge_mode);
             _set('p-notional', s.pairs.notional_per_leg_inr);
+            _set('p-mult-a', s.pairs.multiplier_a);
+            _set('p-mult-b', s.pairs.multiplier_b);
         }
         if (s.costs) {
             _setChk('c-useseg', s.costs.use_segment_costs);
@@ -1116,6 +1129,8 @@
                 sizing_mode: document.getElementById('p-sizingmode').value,
                 hedge_mode: document.getElementById('p-hedgemode').value,
                 notional_per_leg_inr: +document.getElementById('p-notional').value,
+                multiplier_a: +document.getElementById('p-mult-a').value,
+                multiplier_b: +document.getElementById('p-mult-b').value,
             },
             telegram: {
                 enabled: document.getElementById('tg-enabled').checked,

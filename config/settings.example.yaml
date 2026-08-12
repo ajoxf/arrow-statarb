@@ -49,6 +49,16 @@ pairs:
   sizing_mode: lots           # lots (CLIP_LOTS anchor) | notional (₹ per leg)
   hedge_mode: units           # units (equal units × β) | notional (equal money)
   notional_per_leg_inr: 0     # ₹ per leg when sizing_mode = notional (0 = off)
+  # ── MCX price multiplier ────────────────────────────────────────────────
+  # ₹ of P&L per ₹1 move in the QUOTED price = the contract's size in the
+  # quote's unit. NSE lot size already equals this (NIFTY 75 = 75), so leave
+  # these 0 (= auto, use the broker lot size). MCX reports an order-lot of 1
+  # that is NOT the P&L multiplier, so SET it per leg:
+  #   CRUDEOILM 10 · CRUDEOIL 100 · GOLDM 10 · GOLD 100 · SILVERM 5 · NATURALGAS 1250
+  # This scales k, notionals, break-even, EV and live P&L — NOT the order
+  # quantity (that stays on the broker lot size). 0 = auto.
+  multiplier_a: 0
+  multiplier_b: 0
 
 # Signal — the single server-side source of truth (algo AND dashboard read it).
 signal:

@@ -717,15 +717,29 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception:
             return 1.0
 
-    def _lot_multiplier() -> float:
-        """Spread σ→₹ multiplier = the CONTRACT leg's (leg_b) lot size. The
-        non-1:1 spread is denominated in leg_b price units, and a position holds
-        lots × lot_size_b of it, so P&L = lots × lot_size_b × Δspread. For a
-        same-lot calendar (leg_a lot == leg_b lot) this is unchanged."""
+    def _price_multiplier(lk: str) -> float:
+        """₹ of P&L per ₹1 move in the QUOTED price for a leg — the number that
+        turns a spread move into money (k, notionals, break-even, EV, live P&L).
+
+        For NSE the broker lot size already equals this. For MCX the broker
+        reports an order-lot of 1 that is NOT the P&L multiplier, so an explicit
+        pairs.multiplier_a/_b overrides it here. This NEVER changes the order
+        quantity (that uses _resolve_lot_size). 0/unset = auto = broker lot size."""
+        key = "multiplier_a" if lk == "leg_a" else "multiplier_b"
+        override = float(cfg.get(f"pairs.{key}", 0) or 0)
+        if override > 0:
+            return override
         legs = _read_legs()
-        if "leg_b" not in legs:
+        if lk not in legs:
             return 1.0
-        return _resolve_lot_size(legs["leg_b"]["segment"], legs["leg_b"]["symbol"])
+        return _resolve_lot_size(legs[lk]["segment"], legs[lk]["symbol"])
+
+    def _lot_multiplier() -> float:
+        """Spread σ→₹ multiplier = the CONTRACT leg's (leg_b) PRICE multiplier.
+        The spread is denominated in leg_b price units, and a position holds
+        lots × multiplier_b of it, so P&L = lots × multiplier_b × Δspread. Uses
+        the MCX-aware price multiplier (config override, else the lot size)."""
+        return _price_multiplier("leg_b")
 
     def _algo_params() -> Dict:
         s = cfg.section("signal")
@@ -1299,7 +1313,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     pass
             return None
 
-        contract_a, contract_b = _cs("leg_a"), _cs("leg_b")
+        contract_a, contract_b = _price_multiplier("leg_a"), _price_multiplier("leg_b")
         pairs = cfg.section("pairs")
         asset_cfg = {
             "pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
@@ -1403,7 +1417,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 return float(broker.resolve_lot_size(legs[lk]["segment"], legs[lk]["symbol"]))
             except Exception:
                 return 1.0
-        contract_a, contract_b = _cs("leg_a"), _cs("leg_b")
+        contract_a, contract_b = _price_multiplier("leg_a"), _price_multiplier("leg_b")
         pairs = cfg.section("pairs")
         size = None
         if la and lb:
@@ -1921,6 +1935,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "sizing_mode": pa.get("sizing_mode", "lots"),
                     "hedge_mode": pa.get("hedge_mode", "units"),
                     "notional_per_leg_inr": pa.get("notional_per_leg_inr", 0),
+                    "multiplier_a": pa.get("multiplier_a", 0),
+                    "multiplier_b": pa.get("multiplier_b", 0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -2124,7 +2140,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k in ("sizing_mode", "hedge_mode"):
             if k in pad:
                 pa[k] = str(pad[k] or "")
-        for k, d in (("risk_free_rate", 0.0425), ("notional_per_leg_inr", 0.0)):
+        for k, d in (("risk_free_rate", 0.0425), ("notional_per_leg_inr", 0.0),
+                     ("multiplier_a", 0.0), ("multiplier_b", 0.0)):
             if k in pad:
                 pa[k] = _num(pad[k], d)
 
