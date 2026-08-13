@@ -1087,8 +1087,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def setup():
         return render_template("setup.html", broker_name=cfg.get("broker.name", "arrow"))
 
-    @app.route("/dashboard")
-    def dashboard():
+    @app.route("/dashboard-legacy")
+    def dashboard_legacy():
+        """The previous first-generation dashboard, kept as a fallback. The
+        primary /dashboard now serves the richer W3 dashboard (below)."""
         legs = _read_legs()
         return render_template(
             "dashboard.html",
@@ -1127,10 +1129,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return type("Cfg", (), {**data, "get": data.get,
                                 "to_dict": lambda self=None: data})()
 
+    @app.route("/dashboard")
     @app.route("/dashboard-w3")
-    def dashboard_w3():
-        """Preview of the ported W3 dashboard (Arrow-wired). Leaves the working
-        /dashboard untouched while we iterate on fidelity."""
+    def dashboard():
+        """The primary Arrow dashboard (ported W3 design, wired to NSE/MCX/INR).
+        Served at /dashboard; /dashboard-w3 stays as an alias. The first-gen
+        dashboard remains at /dashboard-legacy."""
         return render_template("dashboard_w3.html", config=_w3_config(),
                                is_demo=(_mode() != "live"))
 

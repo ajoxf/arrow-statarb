@@ -508,3 +508,36 @@ def test_preflight_checks(tmp_path):
     # FakeBroker has get_funds (returns None funds) → not connected-funds-ok → not ready
     conn = next(c for c in p["checks"] if c["key"] == "connected")
     assert conn["status"] == "ok"     # FakeBroker is "connected"
+
+
+def test_dashboard_serves_w3_and_is_arrow_inr(tmp_path):
+    """The primary /dashboard is the W3 design, wired to Arrow/INR: it renders,
+    carries the ₹ glyph, and shows no US$/crypto/MT5 idioms in its VISIBLE text
+    (tooltips included). /dashboard-w3 is an alias; the first-gen dashboard is
+    preserved at /dashboard-legacy."""
+    import re
+    app, _ = _app(tmp_path, mode="live_sim")
+    client = app.test_client()
+
+    primary = client.get("/dashboard")
+    alias = client.get("/dashboard-w3")
+    legacy = client.get("/dashboard-legacy")
+    assert primary.status_code == alias.status_code == legacy.status_code == 200
+
+    html = primary.get_data(as_text=True)
+    # Same page served at both /dashboard and its alias.
+    assert html == alias.get_data(as_text=True)
+    # It IS the W3 design (Nexus logo), not the first-gen dashboard.
+    assert "logo-nexus" in html
+    assert "logo-nexus" not in legacy.get_data(as_text=True)
+
+    # Visible text + tooltips only (drop <script>, <style>, comments).
+    ns = re.sub(r"<script\b.*?</script>", "", html, flags=re.S | re.I)
+    ns = re.sub(r"<style\b.*?</style>", "", ns, flags=re.S | re.I)
+    ns = re.sub(r"<!--.*?-->", "", ns, flags=re.S)
+    tips = " ".join(re.findall(r'title="([^"]*)"', ns))
+    visible = re.sub(r"<[^>]+>", " ", ns) + " " + tips
+
+    assert "₹" in visible                       # Indian rupee currency
+    for bad in ("$", "USDT", "OKX", "Binance", "liquidation", "Trading-vs-Funding"):
+        assert bad not in visible, f"US$/crypto idiom leaked into /dashboard: {bad!r}"
