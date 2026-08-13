@@ -590,3 +590,56 @@ def test_beta_drift_endpoint_wiring(tmp_path):
     assert hot["z"] is not None and hot["z"] > 0          # ratio rose → +z
     assert hot["current_beta"] > hot["anchor"]
     assert hot["max_abs_z"] >= 2.0
+
+
+def test_volume_endpoint_day_week_month(tmp_path):
+    """/api/volume reports ₹ turnover + spread-lots for today/week/month (IST),
+    computed from the trade log. Seed the log file so the app loads it on init."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    import arrow_statarb.web.app as appmod
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    def ts(dt):
+        return dt.timestamp()
+
+    # Anchor "now" to a fixed IST instant so the periods are deterministic.
+    now = datetime(2026, 8, 13, 15, 0, tzinfo=IST)               # Thursday
+    def rec(when, action):
+        return {"ts": ts(when), "action": action, "status": "LIVE",
+                "lots": 1, "lot_size": 100, "leg_a_price": 6000.0,
+                "leg_b_price": 6050.0, "direction": "LONG_SPREAD"}
+
+    trades_file = tmp_path / "trades.json"
+    trades_file.write_text(_json.dumps([
+        rec(now.replace(hour=10), "OPEN"),                       # today
+        rec(now.replace(hour=11), "CLOSE"),                      # today
+        rec(datetime(2026, 8, 11, 10, tzinfo=IST), "OPEN"),      # this week (Tue)
+        rec(datetime(2026, 8, 4, 10, tzinfo=IST), "OPEN"),       # this month
+        rec(datetime(2026, 7, 30, 10, tzinfo=IST), "OPEN"),      # last month
+    ]))
+
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("mode: live_sim\nbroker:\n  name: arrow\n"
+                        "  segments: {nse_fo: NSEFO}\n"
+                        "signal:\n  window_minutes: 120\n")
+    legs = tmp_path / "leg_assignments.yaml"
+    legs.write_text("leg_a:\n  mapping_id: nse_fo|A\n  ratio: 1\n"
+                    "leg_b:\n  mapping_id: nse_fo|B\n  ratio: 1\n")
+    appmod.LEG_ASSIGNMENTS_FILE = legs
+    appmod.TRADES_FILE = trades_file
+    appmod.SIGNAL_WINDOW_FILE = tmp_path / "sw.json"
+    app, _sio = appmod.create_app(Config(settings))
+    client = app.test_client()
+
+    v = client.get("/api/volume").get_json()
+    per_fill = 1 * 100 * (6000.0 + 6050.0)
+    # Today = 2 fills, week = 3, month = 4, all-time = 5.
+    assert v["day"]["trades"] == 2
+    assert v["day"]["turnover_inr"] == round(2 * per_fill, 2)
+    assert v["week"]["trades"] == 3
+    assert v["month"]["trades"] == 4
+    assert v["all_time"]["trades"] == 5
+    assert v["day"]["lots"] == 2
+    assert len(v["recent_days"]) == 14

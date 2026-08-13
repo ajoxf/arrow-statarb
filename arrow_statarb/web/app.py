@@ -43,6 +43,7 @@ from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core import beta_monitor
+from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
 from arrow_statarb.core.clip_executor import ClipExecutor
@@ -1348,6 +1349,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             structural_min_sec=float(s.get("beta_structural_min_sec", 600.0) or 600.0),
         )
         return jsonify(block)
+
+    @app.route("/api/volume", methods=["GET"])
+    def api_volume_w3():
+        """Traded turnover (₹) + spread-lots for today / this week / this month
+        in IST, plus a recent-days strip. Computed from the trade log — every
+        OPEN and CLOSE fill counts. See core/volume.py."""
+        return jsonify(volume_tracker.volume_summary(trade_log.all()))
 
     @app.route("/api/account-info", methods=["GET"])
     def api_account_info_w3():

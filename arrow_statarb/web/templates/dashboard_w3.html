@@ -972,24 +972,37 @@
             </div>
         </div>
 
-        <!-- VIP Level card hidden: Arrow/Indian brokers have no VIP volume tiers -->
-        <div class="card mb-3" style="display:none;">
-            <div class="card-body py-2 text-center">
-                <small class="text-secondary">VIP Level</small>
-                <div id="account-level" class="badge bg-info mt-1">-</div>
-                <!-- This month's traded volume vs the tier's 30-day volume floor.
-                     MT5 gives no per-account volume via API, so this is our own
-                     fills for the month + a hand-entered seed for the current
-                     month (see core/vip.py). USD. -->
-                <div id="vip-volume-wrap" class="mt-2" style="display:none;">
-                    <div class="progress" style="height: 6px;"
-                         title="Trading volume this calendar month vs the 30-day volume needed to hold your VIP tier. Estimated from this bot's fills plus a manual seed for the current month (MT5 exposes no per-account volume). USD.">
-                        <div id="vip-volume-bar" class="progress-bar bg-info" role="progressbar" style="width: 0%;"></div>
+        <!-- Traded Volume — ₹ turnover + spread-lots per IST day / week / month.
+             Replaces the reference system's crypto VIP-volume tile. Fed by
+             /api/volume off the trade log (every OPEN and CLOSE fill counts). -->
+        <div class="card mb-3" id="volume-card">
+            <div class="card-body py-2">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-secondary"><i class="bi bi-bar-chart-line me-1"></i>Traded Volume</small>
+                    <span class="badge bg-secondary" id="volume-lots-today"
+                          title="Spread-lots executed today (entries + exits)">— lots</span>
+                </div>
+                <div class="row text-center g-1">
+                    <div class="col-4">
+                        <div class="fw-bold" id="vol-day" title="₹ turnover since IST midnight">₹0</div>
+                        <div class="text-secondary" style="font-size:0.62rem;">Today</div>
                     </div>
-                    <div class="d-flex justify-content-between mt-1" style="font-size: 0.62rem; line-height: 1.2;">
-                        <span class="text-secondary" id="vip-volume-label">—</span>
-                        <span class="text-secondary" id="vip-volume-next">—</span>
+                    <div class="col-4">
+                        <div class="fw-bold" id="vol-week" title="₹ turnover since Monday (IST)">₹0</div>
+                        <div class="text-secondary" style="font-size:0.62rem;">This week</div>
                     </div>
+                    <div class="col-4">
+                        <div class="fw-bold" id="vol-month" title="₹ turnover since the 1st (IST)">₹0</div>
+                        <div class="text-secondary" style="font-size:0.62rem;">This month</div>
+                    </div>
+                </div>
+                <!-- Last-14-day mini history (each bar a day's turnover). -->
+                <div id="vol-spark" class="d-flex align-items-end justify-content-between mt-2"
+                     style="height:26px; gap:2px;"
+                     title="Turnover per day, last 14 days (IST)"></div>
+                <div class="text-secondary text-end mt-1" style="font-size:0.58rem;">
+                    <span id="vol-month-lots">—</span> lots this month ·
+                    <span id="vol-asof">—</span>
                 </div>
             </div>
         </div>
@@ -4124,6 +4137,56 @@ function updateFilterStatus(elementId, passed, value) {
 
     updateAccountInfo();
     setInterval(updateAccountInfo, 5000);
+
+    // ── Traded-volume panel: ₹ turnover per IST day / week / month ──────────
+    function updateVolume() {
+        fetch('/api/volume')
+            .then(r => r.json())
+            .then(d => {
+                if (!d || !d.day) return;
+                const set = (id, v) => {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = fmtUsdShort(v || 0);   // fmtUsdShort renders ₹
+                };
+                set('vol-day', d.day.turnover_inr);
+                set('vol-week', d.week.turnover_inr);
+                set('vol-month', d.month.turnover_inr);
+
+                const lotsBadge = document.getElementById('volume-lots-today');
+                if (lotsBadge) {
+                    const lots = d.day.lots || 0;
+                    lotsBadge.textContent = (Number.isInteger(lots) ? lots : lots.toFixed(2)) + ' lots';
+                    lotsBadge.className = 'badge ' + (lots > 0 ? 'bg-info' : 'bg-secondary');
+                }
+                const mLots = document.getElementById('vol-month-lots');
+                if (mLots) {
+                    const ml = d.month.lots || 0;
+                    mLots.textContent = (Number.isInteger(ml) ? ml : ml.toFixed(2));
+                }
+                const asOf = document.getElementById('vol-asof');
+                if (asOf && d.as_of) asOf.textContent = d.as_of;
+
+                // Mini history: one bar per day, height scaled to the busiest day.
+                const spark = document.getElementById('vol-spark');
+                if (spark && Array.isArray(d.recent_days)) {
+                    const days = d.recent_days;
+                    const max = Math.max(1, ...days.map(x => x.turnover_inr || 0));
+                    spark.innerHTML = days.map(x => {
+                        const t = x.turnover_inr || 0;
+                        const h = Math.max(t > 0 ? 3 : 1, Math.round((t / max) * 24));
+                        const today = x.date === (d.recent_days[d.recent_days.length - 1] || {}).date;
+                        const colour = t > 0 ? (today ? 'var(--accent-green, #2ecc71)' : 'var(--accent-blue, #4f9dff)')
+                                             : 'rgba(128,128,128,0.25)';
+                        const tip = `${x.date}: ${fmtUsdShort(t)} · ${x.trades} fills`;
+                        return `<div title="${tip}" style="flex:1; height:${h}px; `
+                             + `background:${colour}; border-radius:1px; min-width:3px;"></div>`;
+                    }).join('');
+                }
+            })
+            .catch(() => {});
+    }
+    updateVolume();
+    setInterval(updateVolume, 15000);
 
     // Check for orphaned spots every 5 seconds (live trading needs rapid detection)
     checkOrphanedSpots();
