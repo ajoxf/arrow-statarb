@@ -1186,6 +1186,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                  "HEDGE_MODE": str(pairs.get("hedge_mode", "units"))},
                 contract_a, contract_b, la, lb) or {}
 
+        # Standing pre-trade economics for the Filters panel — real Arrow cost
+        # and edge multiple at the entry threshold (not the reference's crypto
+        # std-ratio/bps model). Empty until σ and leg prices exist.
+        edge = {}
+        try:
+            edge = arrow_algo.edge_preview(sig) or {}
+        except Exception:
+            edge = {}
+        min_mult = edge.get("min_edge_multiple")
+
         signal = {
             "zscore": sig.get("zscore"), "spread": sig.get("spread"),
             "raw_basis": (lb - la) if (la and lb) else None,
@@ -1194,8 +1204,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
             "fair_value": fv.get("fair_value"), "fair_gap": fv.get("fair_gap"),
             "fair_detail": fv.get("fair_detail"),
-            "round_trip_cost_usd": st.get("break_even"),
-            "expected_capture_usd": None,
+            # Filters panel — Arrow edge model: capture ÷ round-trip cost ≥ req.
+            "round_trip_cost_usd": (edge.get("round_trip_cost_inr")
+                                    if edge else st.get("break_even")),
+            "expected_capture_usd": edge.get("expected_capture_inr"),
+            "std_ratio": edge.get("edge_multiple"),
+            "std_ratio_required": (min_mult if (min_mult and min_mult > 0) else None),
+            "std_filter_ok": (edge.get("edge_ok") if edge else None),
+            "round_trip_cost_bps": edge.get("round_trip_cost_bps"),
+            "round_trip_fees_bps": edge.get("round_trip_fees_bps"),
+            "round_trip_slippage_bps": edge.get("round_trip_slippage_bps"),
+            "order_mode": edge.get("order_mode"),
+            "fee_bps_used": edge.get("fee_bps_per_side"),
             "leg_a_notional": size.get("leg_a_notional_inr"),
             "leg_b_notional": size.get("leg_b_notional_inr"),
             "clip_lots": float(cfg.get("risk.lots_per_trade", 1) or 1),
@@ -1242,8 +1262,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "is_open": True, "is_paper": _mode() != "live",
             }
 
-        spot_tick = {"bid": la, "ask": la, "last": la} if la else None
-        futures_tick = {"bid": lb, "ask": lb, "last": lb} if lb else None
+        # Prefer the live per-leg price; fall back to the signal's last sampled
+        # leg price so the tiles keep showing a number if the point-in-time
+        # quote lookup momentarily returns nothing.
+        px_a = la if la else sig.get("leg_a")
+        px_b = lb if lb else sig.get("leg_b")
+        spot_tick = {"bid": px_a, "ask": px_a, "last": px_a} if px_a else None
+        futures_tick = {"bid": px_b, "ask": px_b, "last": px_b} if px_b else None
         return jsonify({
             "position": st.get("position") or "NONE",
             "open_trade": open_trade,

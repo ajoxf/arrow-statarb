@@ -189,6 +189,13 @@
                  against the thresholds that actually gate trading.
                  What IS kept is the arrival rate, because a feed going
                  thin is what collapses sigma. -->
+            <!-- Live spread + z, always visible in the header (no chart needed). -->
+            <div class="text-end me-4" title="Live spread = hedge_ratio×Leg A − Leg B, and its z-score">
+                <div class="fw-bold font-monospace"><span id="header-spread">&mdash;</span>
+                    <span class="ms-2" id="header-zscore" style="font-size:0.8rem;">&mdash;</span>
+                </div>
+                <small class="text-secondary">spread · z</small>
+            </div>
             <div class="text-end">
                 <div id="data-count-rate" class="fw-bold font-monospace">&mdash;</div>
                 <small class="text-secondary" id="data-rate-label">feed rate</small>
@@ -2541,6 +2548,15 @@
         spreadEl.textContent = spread.toFixed(2);
         spreadEl.classList.remove('price-up', 'price-down', 'price-neutral');
         spreadEl.classList.add(spread > 0 ? 'price-up' : spread < 0 ? 'price-down' : 'price-neutral');
+
+        // Mirror spread + z into the always-visible header readout.
+        const hSpread = document.getElementById('header-spread');
+        if (hSpread && data.spread != null) hSpread.textContent = spread.toFixed(2);
+        const hZ = document.getElementById('header-zscore');
+        if (hZ && data.zscore != null) {
+            hZ.textContent = (zscore >= 0 ? '+' : '') + zscore.toFixed(2) + 'σ';
+            hZ.className = 'ms-2 ' + (zscore > 0.5 ? 'price-up' : zscore < -0.5 ? 'price-down' : 'text-secondary');
+        }
 
         // Show how the spread was derived. A carry-detrended spread does
         // NOT equal futures minus spot, and one bare number on a card

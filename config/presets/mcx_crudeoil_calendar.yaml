@@ -237,6 +237,20 @@ execution:
   sim_orphan_prob: 0.0
   sim_default_lot_size: 100   # CRUDEOIL lot = 100 barrels (CRUDEOILM = 10) ‹SET TO YOUR NUMBER›
 
+# Pair economics (sizing + display). MCX order-lot ≠ price multiplier: an order
+# is placed in whole lots (1), but each lot controls a fixed quantity of the
+# commodity — CRUDEOIL = 100 barrels, CRUDEOILM (mini) = 10. The multiplier turns
+# a ₹/point spread into ₹ P&L, so it MUST be set or notional / cost / edge / BE
+# come out 100× too small. Set BOTH legs to the same contract's multiplier.
+pairs:
+  pair_type: FUTURE_FUTURE        # calendar = two dated futures on one underlying
+  risk_free_rate: 0.0425          # only used by the (display-only) fair value
+  sizing_mode: lots               # lots | notional
+  hedge_mode: units
+  notional_per_leg_inr: 0         # used only when sizing_mode = notional
+  multiplier_a: 100               # CRUDEOIL = 100 barrels  (CRUDEOILM = 10)
+  multiplier_b: 100               # keep both the same for a same-contract calendar
+
 # Order routing. dry_run never reaches a broker; live_sim runs the REAL executor
 # against a simulated broker (no real orders); live transmits to Arrow.
 mode: live_sim          # dry_run | live_sim | live

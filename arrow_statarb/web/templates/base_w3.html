@@ -370,6 +370,9 @@
         <div class="container-fluid">
             <a class="navbar-brand d-flex align-items-center" href="/">
                 <img src="/static/logo-nexus.svg" alt="Nexus" height="32">
+                <span class="ms-2 fw-semibold" style="font-size:0.9rem; line-height:1;">Arrow
+                    <span class="text-secondary" style="font-size:0.72rem;">· NSE / MCX</span>
+                </span>
             </a>
             <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
                 <span class="navbar-toggler-icon"></span>
@@ -660,9 +663,15 @@
         // showDialog and every save handler defined below with it. The
         // pages already poll as a fallback, so a missing socket must
         // degrade to polling, never break the page.
-        const socket = (typeof io === 'function') ? io() : {
-            on() {}, emit() {}, connected: false, _stub: true,
-        };
+        // Force the long-polling transport and never attempt a WebSocket
+        // upgrade: the app is served by waitress (a plain WSGI server) which
+        // cannot hand engine.io a raw socket — an upgrade attempt throws
+        // "Cannot obtain socket from WSGI environment" and spams the server
+        // log. Polling works fine under waitress and the pages poll REST for
+        // their data anyway, so this costs nothing.
+        const socket = (typeof io === 'function')
+            ? io({ transports: ['polling'], upgrade: false })
+            : { on() {}, emit() {}, connected: false, _stub: true };
         if (socket._stub) {
             console.warn('Socket.IO unavailable — falling back to polling.');
             window.addEventListener('DOMContentLoaded', function() {

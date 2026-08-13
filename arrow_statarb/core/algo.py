@@ -454,6 +454,51 @@ class ArrowAutoTrader:
                     f"₹{full_move:.0f} — trade can never win")
         return None
 
+    def edge_preview(self, sig: Dict) -> Dict:
+        """Standing pre-trade economics for the dashboard Filters panel — the
+        SAME round-trip cost and edge-multiple the live gate uses, but evaluated
+        at the ENTRY threshold from the current signal so the panel shows real
+        numbers before z ever reaches entry (instead of 'collecting data').
+
+        Returns round-trip cost (₹ and bps of the contract-leg notional, split
+        into fees vs slippage), the after-tax expected capture, and the edge
+        multiple vs the required minimum. ``{}`` when there is nothing to price
+        yet (no σ or leg prices)."""
+        p = self._params() or {}
+        std = float(sig.get("std") or 0)
+        la, lb = sig.get("leg_a"), sig.get("leg_b")
+        if std <= 0 or not la or not lb:
+            return {}
+        lots = int(p.get("lots", 1) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        entry_z = float(p.get("entry_zscore", 2.0) or 2.0)
+        cost = self._round_trip_cost(p, lots=lots, ref_price=la, ref_b=lb)
+        full_move = entry_z * std * lots * lot_m         # ₹ on a full entry_z→0 revert
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
+        capture = tfrac * full_move * (1.0 - cgt)        # net-of-tax expected capture
+        min_mult = float(p.get("min_edge_multiple", 0) or 0)
+        edge_mult = (capture / cost) if cost > 0 else None
+        notional = abs(float(lb)) * lots * lot_m         # contract-leg (leg_b) notional
+        brokerage = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        slippage = float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
+
+        def _bps(x):
+            return round(x / notional * 10000.0, 2) if notional > 0 else None
+
+        return {
+            "round_trip_cost_inr": round(cost, 2),
+            "round_trip_cost_bps": _bps(cost),
+            "round_trip_fees_bps": _bps(brokerage),
+            "round_trip_slippage_bps": _bps(max(0.0, cost - brokerage)),
+            "expected_capture_inr": round(capture, 2),
+            "edge_multiple": (round(edge_mult, 2) if edge_mult is not None else None),
+            "min_edge_multiple": min_mult,
+            "edge_ok": (min_mult <= 0 or (edge_mult is not None and edge_mult >= min_mult)),
+            "order_mode": ("LIMIT" if bool(p.get("use_limit_orders", True)) else "MARKET"),
+            "fee_bps_per_side": _bps(brokerage / 4.0 * 2.0),   # both legs, one side
+        }
+
     def _effective_exit_levels(self, p: Dict) -> Tuple[float, float]:
         """Resolve the ₹ (dollar_stop, profit_target) with scale-invariant
         precedence, so the levels survive resizing/re-vol:
