@@ -113,6 +113,18 @@ signal:
   max_entry_zscore: 3.5       # regime-shift guard: refuse an entry when |z|
                               # exceeds this (a blowout is rarely a reversion).
                               # 0 = disabled. Keep below stop_zscore.
+  # ── Hedge-ratio (beta) DRIFT MONITOR — dashboard light, DISPLAY ONLY ───────
+  # Watches whether leg_b/leg_a keeps its baseline. It NEVER gates execution;
+  # it just colours the "β z-score" badge so you can spot a stale hedge ratio
+  # (a rolled contract, a re-priced carry, a regime break) and re-baseline. All
+  # optional — sensible defaults derive from window_minutes if you omit them.
+  # beta_window_sec: 1800       # trailing window for the rolling ratio (default
+  #                             # = ¼ of window_minutes, clamped 10–30 min)
+  # beta_anchor_window_sec: 1800 # earliest-window baseline (same default)
+  # beta_stable_z: 1.0          # |z| below this = STABLE (green)
+  # beta_drift_z: 2.0           # |z| at/above this = drifting; sustained → red
+  # beta_structural_min_sec: 600 # how long beyond drift_z before it calls the
+  #                             # drift STRUCTURAL (re-baseline) vs transient
 
 # Probability / EV / cost gate (OU gambler's-ruin model).
 filters:

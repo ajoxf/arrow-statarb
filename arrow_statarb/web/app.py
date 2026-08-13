@@ -42,6 +42,7 @@ from arrow_statarb.core.untracked_ledger import UntrackedLedger
 from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
+from arrow_statarb.core import beta_monitor
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
 from arrow_statarb.core.clip_executor import ClipExecutor
@@ -1325,24 +1326,28 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     @app.route("/api/beta-zscore", methods=["GET"])
     def api_beta_zscore_w3():
-        """Hedge-ratio drift monitor. Arrow has no separate beta-history tracker
-        yet, so this reports WARMUP until the signal window is ready, then a
-        neutral STABLE with the dollar-neutral beta as the current reading
-        (manual-monitoring only — it never gates execution)."""
-        sig = signal_engine.get_signal() or {}
-        if sig.get("zscore") is None:
-            return jsonify({"z": None, "status": "WARMUP"})
-        la, lb = _leg_prices()
-        legs = _read_legs()
-        beta = None
-        if la and lb and _have_both_legs(legs):
-            ca = _price_multiplier("leg_a")
-            cb = _price_multiplier("leg_b")
-            if la * ca:
-                beta = round((lb * cb) / (la * ca), 4)
-        return jsonify({"z": 0.0, "status": "STABLE",
-                        "anchor": beta, "current_beta": beta,
-                        "max_abs_z": 0.0, "minutes_beyond": 0})
+        """Hedge-ratio drift monitor (display / manual-monitoring only — it never
+        gates execution). Recomputes the rolling leg_b/leg_a ratio versus this
+        session's baseline from the live price window each poll and reports how
+        far it has drifted, in units of the ratio's own volatility. See
+        core/beta_monitor.py. Windows scale off the signal-window length; all
+        overridable via signal.beta_* config keys."""
+        s = cfg.section("signal")
+        window_min = float(s.get("window_minutes", 120) or 120)
+        # Baseline / trailing windows default to ¼ of the signal window (so the
+        # anchor and 'now' are well separated), clamped to a sane 10–30 min.
+        default_win = min(1800.0, max(600.0, window_min * 60.0 / 4.0))
+        beta_win = float(s.get("beta_window_sec", default_win) or default_win)
+        anchor_win = float(s.get("beta_anchor_window_sec", default_win) or default_win)
+        block = beta_monitor.beta_drift_block(
+            signal_engine.export_bars(),
+            beta_window_sec=beta_win,
+            anchor_window_sec=anchor_win,
+            stable_z=float(s.get("beta_stable_z", 1.0) or 1.0),
+            drift_z=float(s.get("beta_drift_z", 2.0) or 2.0),
+            structural_min_sec=float(s.get("beta_structural_min_sec", 600.0) or 600.0),
+        )
+        return jsonify(block)
 
     @app.route("/api/account-info", methods=["GET"])
     def api_account_info_w3():

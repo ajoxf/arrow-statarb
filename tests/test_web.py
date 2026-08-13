@@ -541,3 +541,52 @@ def test_dashboard_serves_w3_and_is_arrow_inr(tmp_path):
     assert "₹" in visible                       # Indian rupee currency
     for bad in ("$", "USDT", "OKX", "Binance", "liquidation", "Trading-vs-Funding"):
         assert bad not in visible, f"US$/crypto idiom leaked into /dashboard: {bad!r}"
+
+
+def test_beta_drift_endpoint_wiring(tmp_path):
+    """The /api/beta-zscore badge feed is wired to the real beta-drift monitor:
+    WARMUP with no window, then a live reading (correct sign, DRIFTING/structural
+    flag) once a drifting hedge-ratio window is collected."""
+    import arrow_statarb.web.app as appmod
+
+    settings = tmp_path / "settings.yaml"
+    # Short beta windows so the test needs only a small, fast window.
+    settings.write_text(
+        "mode: live_sim\n"
+        "broker:\n  name: arrow\n  segments: {nse_fo: NSEFO}\n"
+        "signal:\n  window_minutes: 120\n  sample_interval_sec: 0.5\n"
+        "  beta_window_sec: 20\n  beta_anchor_window_sec: 20\n"
+        "  beta_structural_min_sec: 10\n"
+    )
+    legs = tmp_path / "leg_assignments.yaml"
+    legs.write_text(
+        "leg_a:\n  mapping_id: nse_fo|NIFTY30JUN26F\n  ratio: 1\n"
+        "leg_b:\n  mapping_id: nse_fo|NIFTY28JUL26F\n  ratio: 1\n"
+    )
+    appmod.LEG_ASSIGNMENTS_FILE = legs
+    appmod.SIGNAL_WINDOW_FILE = tmp_path / "signal_window.json"
+    app, _sio = appmod.create_app(Config(settings))
+    client = app.test_client()
+
+    # Cold: no window yet → WARMUP, with the documented keys present.
+    cold = client.get("/api/beta-zscore").get_json()
+    assert cold["status"] == "WARMUP" and cold["z"] is None
+    for k in ("anchor", "current_beta", "max_abs_z", "minutes_beyond"):
+        assert k in cold
+
+    # Feed a window whose hedge ratio drifts UP (leg_b/leg_a 1.00 → 1.03).
+    import random
+    eng = app.extensions["arrow"]["signal"]
+    rng = random.Random(5)
+    base, ai = 1_000_000.0, 100.0
+    n = 400                              # 400 * 0.5s = 200s ≫ 2×20s windows
+    for k in range(n):
+        ai += rng.uniform(-0.4, 0.4)
+        beta = 1.00 + 0.03 * (k / (n - 1))
+        eng.push(ai, beta * ai + rng.uniform(-0.02, 0.02), ts=base + k * 0.5)
+
+    hot = client.get("/api/beta-zscore").get_json()
+    assert hot["status"] in ("DRIFTING", "STRUCTURAL_DRIFT")
+    assert hot["z"] is not None and hot["z"] > 0          # ratio rose → +z
+    assert hot["current_beta"] > hot["anchor"]
+    assert hot["max_abs_z"] >= 2.0
