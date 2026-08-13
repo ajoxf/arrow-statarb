@@ -155,7 +155,7 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/static/vendor/chart.umd.min.js"></script>
 <script>
     function _rs(v) { return '₹' + Number(v || 0).toFixed(2); }
     function _pnlCls(v) { return v > 0 ? 'text-success' : (v < 0 ? 'text-danger' : ''); }

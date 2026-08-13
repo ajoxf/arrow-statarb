@@ -643,3 +643,32 @@ def test_volume_endpoint_day_week_month(tmp_path):
     assert v["all_time"]["trades"] == 5
     assert v["day"]["lots"] == 2
     assert len(v["recent_days"]) == 14
+
+
+def test_dashboard_is_offline_capable_no_cdn(tmp_path):
+    """The dashboard must render on a locked-down/offline box: no CDN <script>/
+    <link> hosts, and every vendored asset served by the app itself (200)."""
+    app, _ = _app(tmp_path, mode="live_sim")
+    client = app.test_client()
+    html = client.get("/dashboard").get_data(as_text=True)
+
+    # No external CDN hosts referenced anywhere in the page.
+    for host in ("cdn.jsdelivr.net", "cdn.socket.io", "unpkg.com", "cdnjs.cloudflare.com"):
+        assert host not in html, f"dashboard still references CDN host {host}"
+
+    # Every vendored asset the page needs is served locally with 200.
+    for path in ("/static/vendor/chart.umd.min.js",
+                 "/static/vendor/bootstrap.min.css",
+                 "/static/vendor/bootstrap.bundle.min.js",
+                 "/static/vendor/socket.io.min.js",
+                 "/static/vendor/bootstrap-icons.css",
+                 "/static/vendor/fonts/bootstrap-icons.woff2"):
+        r = client.get(path)
+        assert r.status_code == 200, f"{path} -> {r.status_code}"
+        assert len(r.get_data()) > 0
+    # The icons CSS must load its font locally — no remote url()/@import
+    # (a docs/license URL in a comment is fine; a remote resource fetch is not).
+    css = client.get("/static/vendor/bootstrap-icons.css").get_data(as_text=True)
+    assert "fonts/bootstrap-icons.woff2" in css
+    assert "url(https://" not in css.replace(" ", "")
+    assert "@import" not in css
