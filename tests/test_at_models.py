@@ -145,3 +145,17 @@ def test_a_recovered_position_keeps_its_OWN_id_and_fills():
     assert back.recovered is True
     assert back.confirmed is False
     assert back.is_open
+
+
+def test_a_partial_close_leaves_no_binary_dust_on_the_panel():
+    """`0.15 - 0.1` is `0.04999999999999999` in float. A 60% close of
+    93 left `39.99999999999999` as the position's size — seventeen
+    digits, next to a clean 40 on the Working Orders panel, which reads
+    like the size was changed on the way to the exchange. It was not,
+    but a trader cannot be asked to add up seventeen-digit floats to
+    satisfy themselves that their own click went in whole."""
+    held = position(quantity=93.0)
+    held.reduce_by(53.0 / 93.0)
+    assert held.quantity == 40.0
+    assert held.leg_a.volume == held.leg_a.volume   # and no dust on the legs
+    assert repr(held.leg_b.volume).count('9999') == 0

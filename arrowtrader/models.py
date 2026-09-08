@@ -25,6 +25,8 @@ import time
 import uuid
 from enum import Enum
 
+from . import sizing
+
 
 class OrderSide(Enum):
     """A side on ONE leg — what a single-contract order does."""
@@ -327,10 +329,16 @@ class SpreadPosition:
         if fraction <= 0.0:
             return self.quantity
         left = 1.0 - fraction
-        self.quantity *= left
+        # TIDIED, because this is the subtraction that walks a click
+        # down a stack of positions, and its result is what the NEXT
+        # take is measured against and what the Working Orders panel
+        # prints. A 60% fill against 93 leaves 39.99999999999999 in
+        # float — seventeen digits, next to a clean 40, which reads
+        # like the size was changed on the way to the exchange.
+        self.quantity = sizing.tidy(self.quantity * left)
         for fill in (self.leg_a, self.leg_b):
             if fill is not None:
-                fill.volume *= left
+                fill.volume = sizing.tidy(fill.volume * left)
         if realized is not None:
             # ACCUMULATED, not replaced: a position closed in three
             # pieces earned its P&L in three pieces.
