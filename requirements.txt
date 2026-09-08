@@ -29,3 +29,9 @@ pandas
 # Optional: exact erfi for the probability filter (a pure-Python fallback is
 # used if scipy is absent).
 scipy
+
+# --- Arrow Trader (arrowtrader/) ---------------------------------------
+# The terminal shares the SDK, TOTP and Flask above. It adds nothing at
+# runtime; playwright is test-only and the suite skips cleanly without
+# it — a box with no browser runs everything else.
+# pip install playwright && python -m playwright install chromium
