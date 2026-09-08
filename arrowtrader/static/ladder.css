@@ -1870,3 +1870,327 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   opacity: .38;
   cursor: not-allowed;
 }
+
+/* == the Exchanges page ==============================================
+ *
+ * This page is a FORM the operator fills in once and then reads under
+ * pressure, and every rule below exists so a field can be found without
+ * reading the page. The shape is always the same:
+ *
+ *   a section heading, a bordered BOX, and inside the box rows of
+ *   fields where the LABEL SITS ABOVE ITS CONTROL.
+ *
+ * Label above, not beside. A label on the same line as its input drifts
+ * away from it as the column widens, and on the one page where typing
+ * the wrong number into the right-looking box costs money, the label
+ * and the thing it names must not be able to come apart.
+ */
+
+.settings-body section { margin-bottom: 12px; }
+.settings-body section:last-child { margin-bottom: 0; }
+
+/* -- is it connected: the first line, and the only one some days ----- */
+
+.ready-line {
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  border: 1px solid var(--chrome-dark);
+  border-left-width: 4px;
+  background: var(--panel);
+  font: 12px var(--font);
+  line-height: 1.45;
+}
+.ready-line b { margin-right: 6px; letter-spacing: .5px; }
+.ready-line.ready { background: #ebfbee; border-color: #2f9e44; }
+.ready-line.unknown { background: var(--panel); border-color: var(--chrome-dark); }
+/* NOT READY carries the broker's own words, and they can be a
+ * paragraph — `Status : 400 … | Message : … | Request : POST …`. It
+ * wraps, it keeps its line breaks, and it is never truncated: a refusal
+ * cut off mid-sentence is a refusal the operator has to go and find in
+ * a log. */
+.ready-line.not-ready {
+  background: #fff4e6;
+  border-color: #e8590c;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px var(--mono);
+}
+.ready-line.no-creds { background: #fff4e6; border-color: #e8590c; }
+
+/* -- a box of fields ------------------------------------------------ */
+
+.session-box,
+.charge-block,
+.pair-form {
+  padding: 8px 10px;
+  border: 1px solid var(--frame-line);
+  background: #e6e6e6;
+}
+
+/* Three columns where there is room, fewer where there is not. The
+ * minimum is what a contract symbol needs; below it the row collapses
+ * to one column rather than clipping. */
+/* THREE, counted, not `auto-fit`. auto-fit collapses the tracks a
+ * full-width field spans, so a row holding one field and one wide one
+ * left the single field at its 210px minimum while the row beside it
+ * split into equal thirds — two rows of the same form, two different
+ * column widths. The columns line up down the page or they are not
+ * columns. */
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+@media (max-width: 720px) {
+  .field-row { grid-template-columns: minmax(0, 1fr); }
+}
+.field-row:last-child { margin-bottom: 0; }
+
+/* THE field. Label, control, and — only where it earns its place — one
+ * line of hint underneath. */
+.sfield { display: block; min-width: 0; font: 11px var(--font); }
+.sfield > span {
+  display: block;
+  margin-bottom: 2px;
+  font: 600 10px var(--font);
+  color: var(--frame-muted);
+  letter-spacing: .2px;
+}
+.sfield > span i { font-style: normal; font-weight: 400; opacity: .8; }
+.sfield > input,
+.sfield > select {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font: 11px var(--font);
+  padding: 2px 4px;
+  border: 1px solid var(--chrome-dark);
+  background: #fff;
+  color: var(--text);
+}
+.sfield > input.mono, .sfield > select.mono { font-family: var(--mono); }
+.sfield > input:focus, .sfield > select:focus {
+  outline: none;
+  border-color: var(--bid-strong);
+  box-shadow: 0 0 0 1px var(--bid-strong);
+}
+.sfield > input[type="checkbox"] { width: auto; display: inline-block; }
+.sfield.wide { grid-column: 1 / -1; }
+.sfield .hint { margin-top: 2px; }
+
+/* A hint is an aside. It never competes with the value above it, and it
+ * never pushes the next field down a line it did not need. */
+.settings-body .hint {
+  font: 10px var(--font);
+  color: var(--frame-muted);
+  line-height: 1.35;
+}
+.settings-body .hint code {
+  font: 10px var(--mono);
+  background: #f4f4f4;
+  border: 1px solid #dcdcdc;
+  padding: 0 2px;
+}
+/* The one hint that is a WARNING — the TOTP seed. Tinted, and it keeps
+ * its own left rule so it reads as a caution and not as prose. */
+.hint.warn-hint {
+  margin-top: 3px;
+  padding: 3px 5px;
+  background: #fff4e6;
+  border-left: 3px solid #e8590c;
+  color: #6b3a06;
+}
+.warn { color: #8a4b04; }
+.ok-ink { color: #1b6b32; font-weight: 600; }
+.bad-ink { color: var(--ask); font-weight: 600; }
+.dim { color: var(--muted); font-weight: 400; }
+.mono { font-family: var(--mono); }
+
+/* The declaration the reconciler leans on. It is a claim about the
+ * ACCOUNT, not a preference, so it sits alone in its own bordered strip
+ * and turns green only when it is switched on. */
+.dedicated {
+  display: block;
+  margin-top: 8px;
+  padding: 5px 7px;
+  border: 1px solid var(--chrome-dark);
+  background: #f6f6f6;
+  font: 11px var(--font);
+}
+.dedicated.on { background: #ebfbee; border-color: #2f9e44; }
+.dedicated input[type="checkbox"] { margin: 0 5px 0 0; vertical-align: -1px; }
+.dedicated .hint { margin-top: 3px; margin-left: 18px; }
+
+/* Buttons, and the sentence that says what pressing one will do. */
+.session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 8px;
+}
+.session-actions .hint { margin-top: 0; flex: 1 1 240px; }
+
+/* -- segments -------------------------------------------------------- */
+
+/* Two failure modes, told apart: no rows in the master is one thing,
+ * and no value in the SDK's enum is another. The row colour says which
+ * without reading the note column. */
+.segments-table tr.ok td { background: #f4fbf5; }
+.segments-table tr.warn td { background: #fffaf2; }
+.segments-table td:nth-child(2),
+.segments-table td:nth-child(3) { width: 70px; }
+.segments-table td:nth-child(4) { width: 80px; text-align: right; }
+
+/* -- charges --------------------------------------------------------- */
+
+/* One block per segment, side by side rather than stacked: five
+ * segments down the page is five screens of scrolling to compare two
+ * numbers that belong together. */
+.charges-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 8px;
+}
+.charges-grid > .charge-block { margin-bottom: 0; }
+.charge-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--frame-line);
+  font: 12px var(--font);
+}
+/* EVERY RATE DEFAULTS TO ZERO, and a zero charge is a P&L that is
+ * wrong in the trader's favour. The block says so on its own head,
+ * where the fields are, and not in a note at the bottom of the page. */
+.warn-pill {
+  padding: 1px 5px;
+  background: #fff4e6;
+  border: 1px solid #e8590c;
+  color: #8a4b04;
+  font: 600 10px var(--font);
+}
+/* Seven short numbers. They are read across, so they are laid out
+ * across, and the label wraps under itself rather than pushing the
+ * next field on to a new row. */
+.charge-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 5px 8px;
+}
+.sfield.tight > span {
+  font-size: 9px;
+  line-height: 1.25;
+  min-height: 22px;
+  letter-spacing: 0;
+}
+.sfield.tight > span small {
+  display: block;
+  font-weight: 400;
+  color: var(--muted);
+}
+.sfield.tight > input { text-align: right; padding: 1px 3px; }
+
+/* -- trading --------------------------------------------------------- */
+
+.settings-body .trading-fields {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--frame-line);
+  background: #e6e6e6;
+  margin-bottom: 0;
+}
+
+/* -- pairs ----------------------------------------------------------- */
+
+.pairs-table td.actions .btn { margin-right: 3px; }
+.pairs-table td .dim { font: 10px var(--mono); }
+
+.pair-form { margin-top: 10px; background: #e6e6e6; }
+.pair-form-head {
+  margin-bottom: 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--frame-line);
+  font: 12px var(--font);
+}
+/* The two legs, side by side. A spread is a relationship between them,
+ * and a form that puts one above the other hides the comparison the
+ * operator is actually making. */
+.pair-legs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.pair-leg {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--chrome-dark);
+  background: #f6f6f6;
+}
+.pair-leg .sfield { margin-bottom: 6px; }
+.pair-leg .sfield:last-child { margin-bottom: 0; }
+.leg-head {
+  margin: -7px -8px 6px;
+  padding: 3px 8px;
+  font: 600 11px var(--font);
+  color: var(--band-text);
+  letter-spacing: .3px;
+}
+/* Leg A is the one the ratio multiplies; leg B is the one the spread is
+ * quoted in. Blue and red, the same convention as the ladder. */
+.leg-head.leg-a { background: var(--bid-strong); }
+.leg-head.leg-b { background: var(--ask-strong); }
+
+/* What the instrument master says about the contract chosen above —
+ * lot size, tick size, expiry, freeze quantity. Read, never typed. */
+table.spec {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 4px;
+  background: #fff;
+  border: 1px solid #dcdcdc;
+}
+table.spec td {
+  padding: 1px 4px;
+  border-top: 1px solid #ececec;
+  font: 10px var(--font);
+  vertical-align: top;
+}
+table.spec td:first-child { color: var(--frame-muted); width: 45%; }
+table.spec td.mono { font-family: var(--mono); text-align: right; }
+/* A missing lot size REFUSES — it is never assumed to be 1 — and the
+ * refusal is shown where the contract was chosen. */
+.spec-problem {
+  margin-top: 4px;
+  padding: 3px 5px;
+  background: #ffe3e3;
+  border-left: 3px solid var(--ask);
+  color: #7a1010;
+  font: 10px var(--font);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+/* L_B, k, and the money a tick is worth: the numbers nothing is saved
+ * without, each beside the derivation it came from. */
+.derived-table { margin-top: 6px; }
+.derived-table td:nth-child(2) { text-align: right; width: 120px; }
+.derived-table td:nth-child(3) { font-size: 10px; }
+
+/* A section that cannot render yet says why, in the place its content
+ * would have been — not as a bare sentence floating between two
+ * headings. */
+.settings-body section > p.hint {
+  margin: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--chrome-dark);
+  border-left-width: 3px;
+  background: #f6f6f6;
+  white-space: pre-wrap;
+}

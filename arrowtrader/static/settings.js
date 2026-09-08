@@ -154,7 +154,10 @@
     var state, message;
 
     if (missing.length) {
-      state = 'not-ready';
+      // A form not yet filled in, which is prose. The BROKER'S REFUSAL is
+      // a different state ('not-ready'): it is quoted verbatim, and it is
+      // shown in the monospace the broker's own words are formatted in.
+      state = 'no-creds';
       message = 'these credentials are not set: <b>' +
         missing.map(esc).join('</b>, <b>') + '</b> &mdash; enter them below. ' +
         'They go to <code>.env</code>, never to config.json.';
@@ -175,7 +178,8 @@
     }
     return '<div class="ready-line ' + state + '">' +
       '<b>' + (state === 'ready' ? 'CONNECTED'
-        : state === 'unknown' ? 'NOT CONNECTED' : 'NOT READY') + '</b> ' +
+        : state === 'unknown' ? 'NOT CONNECTED'
+        : state === 'no-creds' ? 'NOT SET UP' : 'NOT READY') + '</b> ' +
       message + '</div>';
   }
 
@@ -257,7 +261,7 @@
         esc((found && found.error) || 'connect to read the segments') +
         '</p>';
     }
-    html += '<table class="grid segments-table"><thead><tr>' +
+    html += '<table class="grid-form segments-table"><thead><tr>' +
       '<th>Segment</th><th>Master</th><th>SDK</th><th>Contracts</th>' +
       '<th>If it is not ready, the fix</th></tr></thead><tbody>';
     Object.keys(found.segments || {}).forEach(function (key) {
@@ -298,6 +302,7 @@
     var html = '<h3>Charges <small>from your Arrow contract note, per ' +
       'segment</small></h3>';
     if (!charges) { return html + '<p class="hint">loading&hellip;</p>'; }
+    html += '<div class="charges-grid">';
     Object.keys(charges).forEach(function (key) {
       var row = charges[key];
       html += '<div class="charge-block" data-segment="' + esc(key) + '">';
@@ -310,12 +315,13 @@
       html += '</div><div class="charge-fields">';
       CHARGE_FIELDS.forEach(function (entry) {
         html += '<label class="sfield tight"><span>' + esc(entry[1]) +
-          (entry[2] ? ' <i>' + esc(entry[2]) + '</i>' : '') + '</span>' +
+          (entry[2] ? '<small>' + esc(entry[2]) + '</small>' : '') + '</span>' +
           '<input class="c-' + entry[0] + ' mono" type="number" step="0.0001" ' +
           'value="' + esc(row.rates[entry[0]]) + '"></label>';
       });
       html += '</div></div>';
     });
+    html += '</div>';
     html += '<div class="hint">Stamp duty is charged to the BUYER and CTT to ' +
       'the SELLER, so a spread pays a different stack on each leg &mdash; ' +
       'and swaps them coming out. There is no swap: an Indian future pays no ' +
@@ -393,7 +399,7 @@
   function pairsHtml() {
     var html = '<h3>Pairs <small>each ladder is two contracts; the spread is ' +
       'B &minus; &beta; &times; A</small></h3>';
-    html += '<table class="grid pairs-table"><thead><tr>' +
+    html += '<table class="grid-form pairs-table"><thead><tr>' +
       '<th>Ladder</th><th>Leg A</th><th>Leg B</th><th>&beta;</th>' +
       '<th>Lots A/B</th><th>Incr</th><th>Product</th><th>Type</th>' +
       '<th></th></tr></thead><tbody>';
@@ -536,7 +542,7 @@
   }
 
   function derivedHtml(derived) {
-    var html = '<table class="grid derived-table"><thead><tr>' +
+    var html = '<table class="grid-form derived-table"><thead><tr>' +
       '<th>Derived</th><th>Value</th><th>From</th></tr></thead><tbody>';
     var rows = [
       ['Increment', derived.increment, derived.increment_note],

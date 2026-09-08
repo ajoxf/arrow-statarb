@@ -426,3 +426,60 @@ def test_the_exchanges_page_shows_ARROW_and_not_a_terminal(panels):
     assert 'used by nothing else' in body          # the declaration
     for gone in ('terminal64', 'Runner endpoint', 'Login'):
         assert gone not in body, f'the Exchanges page still shows "{gone}"'
+
+
+def test_the_exchanges_page_is_actually_LAID_OUT(panels):
+    """The styling gap, asserted.
+
+    The rebuilt Exchanges page passed every test above while looking
+    like a plain HTML form: the markup emitted new classes and
+    `ladder.css` had not one rule for them, so every label sat inline
+    with its input on one run-on line. Behaviour tests cannot see that
+    — they read `inner_text`, and unstyled text reads the same.
+
+    So this asserts the two things the layout is FOR:
+
+      * the label sits ABOVE the control it names (a label beside its
+        input drifts away from it as the column widens, and on this
+        page typing a number into the wrong-looking box costs money);
+      * the fields are on a grid, in a bordered box, not in the
+        document's default inline flow.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+
+    box = tab.evaluate("""() => {
+      const field = document.querySelector('.settings-body .sfield');
+      if (!field) { return {found: false}; }
+      const label = field.querySelector(':scope > span');
+      const input = field.querySelector(':scope > input, :scope > select');
+      if (!label || !input) { return {found: false}; }
+      const l = label.getBoundingClientRect();
+      const i = input.getBoundingClientRect();
+      const row = document.querySelector('.settings-body .field-row');
+      const group = document.querySelector('.settings-body .session-box');
+      return {
+        found: true,
+        labelBottom: l.bottom, inputTop: i.top,
+        fieldWidth: field.getBoundingClientRect().width,
+        inputWidth: i.width,
+        rowDisplay: row ? getComputedStyle(row).display : null,
+        boxBorder: group
+          ? parseFloat(getComputedStyle(group).borderTopWidth) : 0
+      };
+    }""")
+
+    assert box['found'], 'the Exchanges page rendered no .sfield at all'
+    # Label ABOVE control, not beside it.
+    assert box['labelBottom'] <= box['inputTop'] + 1, (
+        'the label is on the same line as its input — .sfield has no CSS')
+    # And the control fills the column it was given, rather than sitting
+    # at the browser's default 20-character width with the next field
+    # trailing off the same line.
+    assert box['inputWidth'] > box['fieldWidth'] * 0.8, (
+        'the control does not fill its field: '
+        f"{box['inputWidth']} of {box['fieldWidth']}")
+    assert box['rowDisplay'] == 'grid', (
+        f"the field rows are not on a grid (display: {box['rowDisplay']})")
+    assert box['boxBorder'] > 0, 'the session box has no border — no grouping'
