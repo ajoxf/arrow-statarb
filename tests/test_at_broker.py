@@ -1,0 +1,442 @@
+"""The Arrow session and the leg above it, against a fake that says no.
+
+Every refusal here is one the live API makes. A fake that agreed to
+everything would prove nothing.
+"""
+
+import sys
+import types
+
+import pytest
+
+from tests import fake_arrow as F
+
+
+@pytest.fixture
+def arrow_sdk(monkeypatch):
+    """Install the fake in place of `pyarrow_client`, for this test only."""
+    module = types.ModuleType('pyarrow_client')
+    for name in ('Exchange', 'OrderType', 'ProductType', 'TransactionType',
+                 'Retention', 'Variety', 'QuoteMode', 'DataMode'):
+        setattr(module, name, getattr(F, name))
+    module.ArrowClient = F.FakeArrowClient
+    module.ArrowStreams = F.FakeStreams
+    monkeypatch.setitem(sys.modules, 'pyarrow_client', module)
+    from arrowtrader import broker
+    monkeypatch.setattr(broker, 'arrow', module)
+    return module
+
+
+@pytest.fixture
+def session(arrow_sdk):
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    now = [0.0]
+    built = ArrowSession(F.Account(), SegmentTable(),
+                         clock=lambda: now[0],
+                         sleep=lambda s: now.__setitem__(0, now[0] + s))
+    assert built.initialize() is True
+    return built
+
+
+@pytest.fixture
+def leg(session):
+    from arrowtrader.legs import make_legs
+    return make_legs(['leg_a', 'leg_b'], session)
+
+
+# -- connecting ---------------------------------------------------------------
+
+def test_the_master_is_loaded_BEFORE_the_session_is_usable(session):
+    """The stat-arb layer loads it on a background thread and answers
+    orders meanwhile, which means an order can be sized from a lot size
+    that has not arrived. Here, no master means no session."""
+    assert session.connected is True
+    assert session.master.rows == 5
+    assert session.master.lot_size('GOLD05DEC25F') == 100
+
+
+def test_an_empty_master_REFUSES_the_connection(arrow_sdk, monkeypatch):
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    monkeypatch.setattr(F.FakeArrowClient, 'get_instruments',
+                        lambda self: [])
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is False
+    assert 'Nothing can be sized' in built.last_error
+    assert built.connected is False
+
+
+def test_a_six_digit_totp_is_refused_with_the_actual_fix(arrow_sdk):
+    """The seed, not the code. It is the mistake everybody makes."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    account = F.Account()
+    account.totp_secret = '123456'
+    built = ArrowSession(account, SegmentTable())
+    assert built.initialize() is False
+    assert 'base32' in built.last_error
+
+
+def test_the_session_token_never_leaves_the_broker_module(session):
+    """Not into a log line, not into the status file, not the browser."""
+    report = session.terminal_report()
+    assert 'FAKE-SESSION-TOKEN' not in repr(report)
+    info = session.account_info()
+    assert 'FAKE-SESSION-TOKEN' not in repr(info)
+
+
+def test_both_legs_share_ONE_session(leg):
+    """Two legs on one login is the normal case here, not a red banner."""
+    assert leg['leg_a'].session is leg['leg_b'].session
+    assert leg['leg_b'].connect() is True
+
+
+# -- prices -------------------------------------------------------------------
+
+def test_the_full_quote_gives_a_book_and_the_ladder_can_price_it(leg):
+    tick = leg['leg_a'].tick('GOLD05DEC25F')
+    assert tick['bid'] == 74999.0 and tick['ask'] == 75001.0
+    assert tick['executable'] is True
+    assert len(tick['depth']) == 10          # five a side
+
+
+def test_an_LTP_ONLY_build_produces_a_tick_that_prices_NOTHING(session):
+    """The degraded case is representable and visibly degraded, rather
+    than papered over by copying `last` into both sides."""
+    session.quote_scale = 1.0
+    session._quote_mode = lambda: F.QuoteMode.LTP
+    session.stop_stream()
+    session._subscribe = lambda contract: False
+    tick = session.symbol_tick('GOLD05DEC25F')
+    assert tick['last'] == 75000.0
+    assert tick['bid'] is None and tick['ask'] is None
+    assert tick['executable'] is False
+
+
+def test_the_stream_is_in_PAISE_and_is_converted_once(session):
+    # Subscribe FIRST — the stream only exists once a symbol is read —
+    # and use prices REST does not carry, so a tick that quietly fell
+    # back to REST cannot pass this by coincidence.
+    session.symbol_tick('GOLD05DEC25F')
+    F.FakeStreams.last.push(218124, bid=74111.0, ask=74113.0, last=74112.0)
+    tick = session.symbol_tick('GOLD05DEC25F')
+    assert tick['bid'] == 74111.0        # not 7411100
+    assert tick['ask'] == 74113.0
+    assert tick['last'] == 74112.0
+
+
+def test_a_last_only_tick_does_not_WIPE_a_bid_and_ask_we_already_have(session):
+    """A QUOTE tick and a DEPTH tick arrive separately. Merging forward
+    is what stops the book flickering out between them."""
+    session.symbol_tick('GOLD05DEC25F')          # subscribe
+    F.FakeStreams.last.push(218124, bid=74111.0, ask=74113.0)
+    F.FakeStreams.last.push(218124, last=74112.5)
+    tick = session.symbol_tick('GOLD05DEC25F')
+    assert tick['bid'] == 74111.0 and tick['ask'] == 74113.0
+    assert tick['last'] == 74112.5
+
+
+def test_session_stats_report_a_missing_field_as_none_not_zero(session,
+                                                               monkeypatch):
+    """A missing high must render as an em dash, never as a real high
+    of 0.00. Brokers fill in different subsets of these fields."""
+    monkeypatch.setattr(
+        F.FakeArrowClient, 'get_quotes',
+        lambda self, mode, pairs: [{'TradingSymbol': 'GOLD05DEC25F',
+                                    'Ltp': 7500000, 'Volume': 4321}])
+    stats = session.session_stats('GOLD05DEC25F')
+    assert stats['high'] is None and stats['open'] is None
+    # CONTROL: a field that IS published comes through.
+    assert stats['volume'] == 4321.0
+
+
+def test_a_quote_call_that_fails_is_none_not_a_stale_price(session):
+    session.stop_stream()
+    session._subscribe = lambda contract: False
+    session._client.raise_on_quotes = True
+    assert session.symbol_tick('GOLD05DEC25F') is None
+
+
+# -- orders: lots in, units out ----------------------------------------------
+
+def test_an_order_carries_UNITS_not_lots(leg):
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 2)
+    assert result['ok'] is True
+    sent = leg['leg_a'].session._client.placed[-1]
+    assert sent['quantity'] == 200          # 2 lots x LotSize 100
+    assert result['filled_volume'] == 2.0   # ...and LOTS come back
+    assert result['filled_units'] == 200.0
+
+
+def test_a_market_order_carries_price_zero_AND_mpp(leg):
+    """Plain MKT is disabled on Arrow. Both halves, or it is rejected."""
+    leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    sent = leg['leg_a'].session._client.placed[-1]
+    assert sent['mpp'] is True
+    assert sent['price'] == 0.0
+
+
+def test_an_unknown_lot_size_REFUSES_rather_than_sizing_at_one(leg,
+                                                               monkeypatch):
+    session = leg['leg_a'].session
+    monkeypatch.setattr(session.master, 'lot_size', lambda symbol: None)
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 2)
+    assert result['ok'] is False
+    assert 'no lot size' in result['error']
+    assert session._client.placed == []      # nothing reached the exchange
+
+
+def test_the_touch_is_recorded_so_the_executor_can_measure_slippage(leg):
+    """Arrow takes no deviation parameter, so the clicked-price guard
+    above is the ONLY slippage protection. It needs this number."""
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    assert result['requested_price'] == 75001.0     # the offer
+    assert result['price'] == 75001.0
+
+
+# -- the exchange says no ------------------------------------------------------
+
+def test_over_the_freeze_quantity_is_refused_in_the_exchanges_words(leg):
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 20)   # 2,000 units
+    assert result['ok'] is False
+    assert 'freeze quantity' in result['error']
+    # ...and the fix is appended.
+    assert 'Reduce the Qty' in result['error']
+    # CONTROL: at the cap it goes through.
+    assert leg['leg_a'].order('GOLD05DEC25F', 'BUY', 10)['ok'] is True
+
+
+def test_an_rms_block_names_the_broker_not_the_exchange(leg):
+    leg['leg_a'].session._client.rms_blocked.add('GOLD05DEC25F')
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    assert 'rms:blocked' in result['error']
+    assert "risk system" in result['error']
+
+
+def test_a_limit_off_the_tick_is_snapped_and_the_note_says_so(leg):
+    result = leg['leg_a'].place_limit('GOLD05DEC25F', 'BUY', 1, 74999.4)
+    assert result['ok'] is True
+    assert result['price'] == 74999.0
+    assert 'not a multiple' in result['price_note']
+
+
+def test_a_price_outside_the_daily_range_is_NOT_clamped_into_it(leg):
+    """A DPR breach is a refusal the operator must see, not something
+    to be quietly moved into range under their click."""
+    result = leg['leg_a'].place_limit('GOLD05DEC25F', 'BUY', 1, 50000.0)
+    assert result['ok'] is False
+    assert 'price range' in result['error']
+
+
+def test_a_closed_market_says_so_rather_than_failing_silently(leg):
+    leg['leg_a'].session._client.market_closed = True
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    assert 'closed' in result['error'].lower()
+
+
+# -- the unresolved order, which is not a rejection ---------------------------
+
+def test_an_order_still_working_at_the_deadline_is_UNRESOLVED(leg):
+    """`mt5.order_send` returns the fill. Arrow returns an id, so an
+    order that has not resolved is a THIRD outcome — and unwinding on
+    it is how a position gets doubled instead of cancelled."""
+    leg['leg_a'].session._client.rest_market_orders = True
+    result = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1, deadline_sec=1.0)
+    assert result['ok'] is False
+    assert result['unresolved'] is True
+    assert 'must not be unwound' in result['error']
+    assert result['ticket'] is not None      # ...and it is nameable
+    # CONTROL: a real rejection is resolved, and IS safe to act on.
+    leg['leg_a'].session._client.rest_market_orders = False
+    leg['leg_a'].session._client.reject_next = 'Insufficient margin'
+    refused = leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    assert refused['unresolved'] is False
+
+
+def test_an_unknown_status_is_unresolved_not_unfilled(session):
+    session._client.orders['999'] = {'orderNo': '999', 'status': '',
+                                     'filledQty': 0}
+    state = session.await_fill('999', deadline_sec=0.5)
+    assert state['status'] == 'UNKNOWN'
+    assert state['unresolved'] is True
+
+
+# -- cancelling ---------------------------------------------------------------
+
+def test_a_cancel_ALWAYS_reports_what_filled_first(leg):
+    """A cancelled order can carry partial fills, and a cancel can lose
+    the race outright. Reporting 'cancelled' on an order that filled is
+    how the book comes to believe a leg is flat."""
+    placed = leg['leg_a'].place_limit('GOLD05DEC25F', 'BUY', 2, 74999.0)
+    client = leg['leg_a'].session._client
+    client.fill_resting(placed['ticket'], units=100)      # 1 lot of 2
+    result = leg['leg_a'].cancel_order(placed['ticket'])
+    assert result['filled_volume'] == 100.0
+    assert result['leaked_fill'] is True
+
+
+def test_a_clean_cancel_reports_no_leak(leg):
+    placed = leg['leg_a'].place_limit('GOLD05DEC25F', 'BUY', 1, 74999.0)
+    result = leg['leg_a'].cancel_order(placed['ticket'])
+    assert result['cancelled'] is True
+    assert result['filled_volume'] == 0.0
+    assert result['leaked_fill'] is False
+
+
+# -- re-pegging ---------------------------------------------------------------
+
+def test_a_repeg_MODIFIES_and_keeps_the_order_id(leg):
+    """Cancel-and-replace loses queue position AND changes the id, so
+    the book cannot follow the order through its own life."""
+    placed = leg['leg_a'].place_limit('GOLD05DEC25F', 'BUY', 1, 74999.0)
+    result = leg['leg_a'].modify_order(placed['ticket'], 75000.0,
+                                       symbol='GOLD05DEC25F')
+    assert result['ok'] is True
+    client = leg['leg_a'].session._client
+    assert client.modified[-1]['order_id'] == placed['ticket']
+    assert client.cancelled == []
+
+
+def test_a_build_with_no_amend_SAYS_SO_rather_than_silently_replacing(
+        session, monkeypatch):
+    """It changes what the peg costs, and the screen has to say it."""
+    for name in ('modify_order', 'amend_order', 'update_order'):
+        monkeypatch.delattr(F.FakeArrowClient, name, raising=False)
+    result = session.modify_pending('123', 75000.0)
+    assert result['ok'] is False
+    assert result['amend_unsupported'] is True
+    assert 'back of the queue' in result['error']
+
+
+# -- positions net ------------------------------------------------------------
+
+def test_an_opposite_order_REDUCES_the_net_instead_of_stacking(leg):
+    """On MT5's hedging accounts this opens a SECOND position. Here it
+    is what it looks like: a close."""
+    leg['leg_a'].order('GOLD05DEC25F', 'BUY', 2)
+    assert leg['leg_a'].positions('GOLD05DEC25F')[0]['net_units'] == 200
+    leg['leg_a'].close_reduce('GOLD05DEC25F', 'BUY', 2)
+    assert leg['leg_a'].positions('GOLD05DEC25F') == []
+
+
+def test_a_close_crosses_the_OTHER_way_from_the_entry_side(leg):
+    leg['leg_a'].order('GOLD05DEC25F', 'SELL', 1)
+    leg['leg_a'].close_reduce('GOLD05DEC25F', 'SELL', 1)
+    assert leg['leg_a'].session._client.placed[-1]['transactionType'] == 'BUY'
+
+
+def test_a_partial_close_leaves_the_rest_on(leg):
+    leg['leg_a'].order('GOLD05DEC25F', 'BUY', 3)
+    leg['leg_a'].close_reduce('GOLD05DEC25F', 'BUY', 1)
+    held = leg['leg_a'].positions('GOLD05DEC25F')[0]
+    assert held['net_units'] == 200
+    assert held['volume'] == 2.0            # lots
+
+
+def test_a_position_reports_lots_AND_units(leg):
+    leg['leg_a'].order('GOLDM05DEC25F', 'BUY', 4)     # LotSize 10
+    held = leg['leg_a'].positions('GOLDM05DEC25F')[0]
+    assert held['net_units'] == 40
+    assert held['volume'] == 4.0
+    assert held['lot_size'] == 10
+    assert held['ticket'] is None           # there ARE none
+
+
+# -- None is unknown, and it is not flat --------------------------------------
+
+def test_positions_are_NONE_when_the_call_fails_not_an_empty_list(leg):
+    """An empty list says 'flat' and would have the reconciler sweep a
+    live account clean in its own report."""
+    leg['leg_a'].order('GOLD05DEC25F', 'BUY', 1)
+    leg['leg_a'].session._client.raise_on_positions = True
+    assert leg['leg_a'].positions() is None
+    # CONTROL: working again, and genuinely flat, IS an empty list.
+    leg['leg_a'].session._client.raise_on_positions = False
+    leg['leg_a'].close_reduce('GOLD05DEC25F', 'BUY', 1)
+    assert leg['leg_a'].positions() == []
+
+
+def test_pending_orders_are_NONE_when_unknown(leg, monkeypatch):
+    monkeypatch.delattr(F.FakeArrowClient, 'get_order_book')
+    monkeypatch.delattr(F.FakeArrowClient, 'get_orders', raising=False)
+    assert leg['leg_a'].pending_orders() is None
+
+
+def test_a_disconnected_session_is_unknown_not_flat(leg):
+    leg['leg_a'].close()
+    assert leg['leg_a'].positions() is None
+    assert leg['leg_a'].pending_orders() is None
+
+
+def test_the_server_offset_is_NONE_when_it_cannot_be_measured(leg):
+    """Unmeasured is not zero: with no measurement the session cutoff
+    does not fire, and the screen says so."""
+    assert leg['leg_a'].server_offset() is None
+
+
+# -- margin --------------------------------------------------------------------
+
+def test_margin_is_NONE_where_the_sdk_has_no_calculator(leg):
+    """Never derived from notional. The screen shows an em dash and
+    the take-profit target is disabled."""
+    assert leg['leg_a'].margin_for(
+        [('GOLD05DEC25F', 'BUY', 100)]) is None
+
+
+def test_margin_asks_for_BOTH_legs_together(leg, monkeypatch):
+    """A calendar spread's margin BENEFIT only appears when the two
+    legs are priced as one basket."""
+    seen = {}
+
+    def calculator(self, basket):
+        seen['legs'] = len(basket)
+        return {'totalMargin': 62000.0}
+
+    monkeypatch.setattr(F.FakeArrowClient, 'get_margin', calculator,
+                        raising=False)
+    total = leg['leg_a'].margin_for([('GOLD05DEC25F', 'BUY', 100),
+                                     ('GOLD05FEB26F', 'SELL', 100)])
+    assert total == 62000.0
+    assert seen['legs'] == 2
+
+
+def test_the_account_reports_ONE_margin_pool(leg):
+    """MT5-Trader's 'the weaker of the two brokers carries the pair' is
+    wrong here and must not be carried across by habit."""
+    info = leg['leg_a'].account_info()
+    assert info['single_pool'] is True
+    assert info['currency'] == 'INR'
+
+
+# -- what the sweep can honestly claim ----------------------------------------
+
+def test_a_dedicated_account_is_declared_so_the_banner_can_be_honest(session):
+    """There is no magic number on a netting position. A dedicated
+    account is what restores the guarantee, and the screen has to know
+    whether it has one."""
+    assert session.terminal_report()['dedicated'] is True
+
+
+# -- three scales, three declarations -----------------------------------------
+
+def test_quote_order_and_stream_scales_are_declared_INDEPENDENTLY(session):
+    """Blocker 3.2's second half. The WebSocket is documented as paise;
+    whether REST quotes and order/position prices are is per build, and
+    they need not agree. One shared `scale` would divide a rupee fill by
+    a hundred the moment quotes turned out to be paise."""
+    session.order_scale = 100.0             # this build reports fills in paise
+    session._client.orders['777'] = {'orderNo': '777', 'status': 'COMPLETE',
+                                     'filledQty': 100, 'avgPrice': 7500100}
+    state = session.order_fill_state('777')
+    assert state['price'] == 75001.0
+    # ...while the quote side, declared in rupees, is untouched.
+    assert session.symbol_tick('GOLD05DEC25F')['ask'] == 75001.0
+
+
+def test_a_position_average_uses_the_ORDER_scale_not_the_quote_scale(session):
+    session.order_scale = 100.0
+    session._client.net[('GOLD05DEC25F', 'NRML')] = {'units': 100,
+                                                     'price': 7500100}
+    held = session.net_positions('GOLD05DEC25F')[0]
+    assert held['price_open'] == 75001.0
