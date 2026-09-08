@@ -32,7 +32,7 @@ import logging
 import threading
 import time
 
-from . import session as session_mod, sizing
+from . import ladder, session as session_mod, sizing
 from .book import Book, reduce_first
 from .executor import PairExecutor, mark_position
 from .models import OrderType, SpreadSide, TimeInForce
@@ -229,6 +229,28 @@ class Coordinator:
                 self.quoter.work(pair, md)
         self._loop_interval = self.clock() - started
         return self.market
+
+    def _anchor(self, key, md):
+        """The price the ladder is pinned to while it is LOCKED.
+
+        Unlocked, the ladder re-centres on the mid and the anchor is
+        None. Locked, it is pinned to wherever the mid was when the
+        lock went on and stays there — that is the whole point: a
+        trader lining up a click does not want the rows moving under
+        the pointer. Recentre clears it, and the next poll re-takes it
+        from the current mid.
+        """
+        if not self._ladder_locked.get(key):
+            self._ladder_anchor.pop(key, None)
+            return None
+        if key not in self._ladder_anchor:
+            if md is None or md.get('spread') is None:
+                # Nothing to pin to yet. NOT zero, and not remembered:
+                # an anchor taken from an unpriced spread would lock
+                # the ladder onto a number nobody quoted.
+                return None
+            self._ladder_anchor[key] = md['spread']
+        return self._ladder_anchor[key]
 
     def _read_pair(self, pair):
         """Both legs' books into one spread snapshot, with its guards."""
@@ -604,6 +626,18 @@ class Coordinator:
                     pair.clip_lots_b,
                     (pair.meta_b or {}).get('contract_size')),
                 'market': md,
+                # THE LADDER ITSELF. Every size in it is derived from
+                # the two legs' depth of market and from nothing else —
+                # a spread has no published book, so an undrawn row is
+                # the honest answer where the legs publish none.
+                'rows': ladder.rows(
+                    md, pair.effective_increment(), pair.rows,
+                    sizing.units(pair.clip_lots_a,
+                                 (pair.meta_a or {}).get('contract_size')),
+                    sizing.units(pair.clip_lots_b,
+                                 (pair.meta_b or {}).get('contract_size')),
+                    anchor=self._anchor(key, md)),
+                'ladder_locked': bool(self._ladder_locked.get(key)),
                 'short_spread': (md or {}).get('short_spread'),
                 'long_spread': (md or {}).get('long_spread'),
                 'errors': self.errors.get(key) or [],

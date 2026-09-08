@@ -433,3 +433,77 @@ def test_with_NO_measured_clock_the_cutoff_does_not_fire(engine):
     assert engine.exchange_offset() is None
     assert engine.run_session_cutoff() == []
     assert engine.book.orders(KEY)              # the DAY order still stands
+
+
+# -- the ladder, end to end ------------------------------------------------------
+
+def test_the_snapshot_CARRIES_A_LADDER_at_all(engine):
+    """The front end draws `row.rows` and nothing else builds it.
+
+    Nothing produced this key. `var rows = row.rows || []` then drew an
+    empty tbody, three times a second, on a ladder whose prices, sizes
+    and market line were all correct in the engine and never reached
+    the screen. The two ladder commands the engine already accepts —
+    lock and recentre — had nothing to act on for the same reason.
+    """
+    row = engine.snapshot()['pairs'][KEY]
+    assert row['rows'], 'the snapshot carries no ladder'
+    assert len(row['rows']) == row['row_count']
+    levels = [line['level'] for line in row['rows']]
+    assert levels == sorted(levels, reverse=True)
+    assert sum(1 for line in row['rows'] if line['is_best_bid']) == 1
+    assert sum(1 for line in row['rows'] if line['is_best_ask']) == 1
+
+
+def test_the_ladder_carries_SIZES_from_the_two_legs_DOM(engine):
+    """The fake serves five levels a side on both legs, so the spread's
+    size columns are derivable — and the number at the touch is the
+    smaller of the two legs, in CLIPS, not in units."""
+    row = engine.snapshot()['pairs'][KEY]
+    sizes = [line['ask_size'] for line in row['rows']
+             if line['ask_size'] is not None]
+    assert sizes, 'the ladder drew no size at all from two full books'
+    touch = next(line for line in row['rows'] if line['is_best_ask'])
+    assert touch['ask_size'] is not None
+    # A gold lot is 100 units. The fake's books hold single-digit
+    # units a level, so in clips this is small — and a ladder reading
+    # units as clips would show hundreds.
+    assert touch['ask_size'] < 10
+
+
+def test_a_leg_in_LTP_MODE_draws_NO_LADDER_rather_than_a_plausible_one(engine):
+    """The control, and the rule this whole system turns on. A leg with
+    a last trade and no book prices nothing: the ladder is empty and
+    the error line says which leg, instead of thirty rows of fiction
+    around a number nobody can trade at."""
+    engine.legs['arrow'].session._client.books = {
+        'GOLD05DEC25F': None, 'GOLD05FEB26F': None}
+    engine.poll_once()
+    row = engine.snapshot()['pairs'][KEY]
+    assert row['rows'] == []
+    assert row['errors']
+
+
+def test_LOCKING_the_ladder_pins_it_and_RECENTRING_lets_it_go(engine):
+    """The two commands that had nothing to act on."""
+    before = [line['level'] for line in engine.snapshot()['pairs'][KEY]['rows']]
+    engine._ladder_locked[KEY] = True
+    engine.poll_once()
+    locked = engine.snapshot()['pairs'][KEY]
+    assert locked['ladder_locked'] is True
+    assert any(line['is_anchor'] for line in locked['rows'])
+    assert [line['level'] for line in locked['rows']] == before
+
+    # The market moves; the LOCKED window does not.
+    engine.legs['arrow'].session._client.books['GOLD05FEB26F'] = (
+        76499.0, 76502.0, 76500.0)
+    engine.poll_once()
+    still = engine.snapshot()['pairs'][KEY]
+    assert [line['level'] for line in still['rows']] == before, (
+        'the locked ladder moved with the market')
+
+    engine._ladder_locked[KEY] = False
+    engine.poll_once()
+    freed = engine.snapshot()['pairs'][KEY]
+    assert [line['level'] for line in freed['rows']] != before
+    assert not any(line['is_anchor'] for line in freed['rows'])

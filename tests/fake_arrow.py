@@ -249,6 +249,9 @@ class FakeArrowClient:
             if book is None:
                 continue
             bid, ask, last = book
+            row = next((r for r in self.master
+                        if r['TradingSymbol'] == symbol), None)
+            lot = int((row or {}).get('LotSize') or 1)
             if mode is QuoteMode.LTP:
                 # The DEGRADED shape: last trade, no book at all.
                 out.append({'TradingSymbol': symbol, 'Ltp': last})
@@ -258,9 +261,16 @@ class FakeArrowClient:
                 'Ltp': last, 'BestBidPrice': bid, 'BestAskPrice': ask,
                 'Open': last, 'High': last + 20, 'Low': last - 20,
                 'Volume': 4321,
-                'Bids': [{'price': bid - n, 'quantity': 3 + n}
+                # DEPTH IS IN UNITS, as it is on the wire — five
+                # levels a side, each a whole number of LOTS times the
+                # contract's lot size. A fake quoting three units of a
+                # hundred-unit contract is quoting a thirtieth of a
+                # lot, which is not a quantity MCX can show, and a
+                # ladder correctly rounding it to nothing then looks
+                # broken.
+                'Bids': [{'price': bid - n, 'quantity': (3 + n) * lot}
                          for n in range(5)],
-                'Asks': [{'price': ask + n, 'quantity': 2 + n}
+                'Asks': [{'price': ask + n, 'quantity': (2 + n) * lot}
                          for n in range(5)],
             })
         return out

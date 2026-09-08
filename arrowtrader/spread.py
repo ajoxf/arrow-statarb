@@ -87,6 +87,18 @@ def compute_spread(pair, tick_a, tick_b, hedge_ratio=1.0, clock=time_mod.time):
         'leg_b_visible': tick_b.get('visible'),
         'leg_a_width': ask_a - bid_a,
         'leg_b_width': ask_b - bid_b,
+        #: THE DEPTH OF MARKET, both legs, carried through verbatim.
+        #: The ladder's size columns are built from these two books and
+        #: from nothing else — a spread has no published depth of its
+        #: own, so the only honest size at a level is what the two legs
+        #: can actually fill between them. None where the leg publishes
+        #: no book, which is NOT an empty book.
+        'leg_a_depth': tick_a.get('depth'),
+        'leg_b_depth': tick_b.get('depth'),
+        'leg_a_bid_size': tick_a.get('bid_size'),
+        'leg_a_ask_size': tick_a.get('ask_size'),
+        'leg_b_bid_size': tick_b.get('bid_size'),
+        'leg_b_ask_size': tick_b.get('ask_size'),
         'hedge_ratio': beta,
         'spread': mid_spread,
         'short_spread': short_spread,
