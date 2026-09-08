@@ -304,16 +304,16 @@ def test_the_roll_offers_the_NEXT_contracts(client):
 
 def test_saving_and_deleting_a_pair(client, paths):
     key = 'GOLD05DEC25F|GOLD05FEB26F'
-    assert client.post(f'/api/pair/{key}',
+    assert client.post(f'/api/pairs/{key}',
                        json={'leg_a': {'symbol': 'GOLD05DEC25F',
                                        'segment': 'mcx_fo'}}).get_json()['ok']
     assert key in client.get('/api/pairs').get_json()
-    assert client.delete(f'/api/pair/{key}').get_json()['ok']
+    assert client.delete(f'/api/pairs/{key}').get_json()['ok']
     assert client.get('/api/pairs').get_json() == {}
 
 
 def test_deleting_a_pair_that_is_not_there_is_a_404(client):
-    assert client.delete('/api/pair/nope').status_code == 404
+    assert client.delete('/api/pairs/nope').status_code == 404
 
 
 # -- settings -------------------------------------------------------------------------

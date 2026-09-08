@@ -1,1178 +1,798 @@
-/* Settings: the two accounts, and the pairs that route across them.
+/* Exchanges: the Arrow session, the segments, the charges, the pairs.
  *
- * This panel is the one part of the UI that must work with the ENGINE
- * DOWN. The coordinator will not start until the symbols are right, and
- * these are the tools for finding out — so everything here talks to the
- * leg runners directly and never through the coordinator.
+ * REWRITTEN FOR ARROW. What was here was MT5-Trader's panel, and it
+ * rendered a TABLE OF TERMINALS: a terminal64.exe path, an MT5 login,
+ * a server name and a runner endpoint per account, policed by three
+ * clash refusals — two accounts on one port, one login, one terminal
+ * folder. Every one of those is a way to end up trading one MT5
+ * account while both screens report two.
  *
- * Two house rules do most of the work in here:
- *   - A warning nobody can act on is not a fix. Where the system can
- *     name the wrong field AND the right value, it offers a one-click
+ * None of it can happen here. There is ONE Arrow session and both legs
+ * hold it; there are no endpoints, no terminal paths and no second
+ * login to collide with. What replaces the three clashes is a single
+ * question with the same weight, asked once:
+ *
+ *     IS THIS ACCOUNT USED BY ANYTHING ELSE?
+ *
+ * On a netting exchange the trader's own position and this system's
+ * are ONE number per contract, and nothing in the API separates them.
+ * A dedicated account restores the guarantee MT5-Trader gets free from
+ * its magic number. It is a DECLARATION, not a measurement, so it
+ * defaults to off and every reconciler finding is shown beside it.
+ *
+ * Two house rules survive from the original and do most of the work:
+ *   - A warning nobody can act on is not a fix. Where this can name
+ *     the wrong field AND the right value it offers a one-click
  *     correction — but it stays a click. Nothing is corrected silently.
- *   - Structural fields need a restart and say so; nothing else does.
+ *   - Structural fields need a restart and SAY so; nothing else does.
+ *
+ * And this panel must work with the ENGINE DOWN. The engine will not
+ * start until the credentials and the contracts are right, and these
+ * are the tools for getting them right — so everything here talks to
+ * the web process's own short-lived Arrow session, never through the
+ * engine.
  */
 
 (function () {
   'use strict';
 
-  var UI = window.MT5Trader;
+  var UI = window.ArrowTrader;
   var DASH = UI.DASH;
 
   var local = {
-    accounts: [],
-    nextPort: '127.0.0.1:9101',
+    account: null,        // app id, user id, dedicated, which secrets are set
+    connection: null,     // the last Connect answer
+    segments: null,       // which segments this account can actually reach
+    charges: null,        // the Indian stack, per segment, + configured
     pairs: {},
-    editing: null,          // the pair key being edited, '' for a new one
-    draft: {},              // the pair form's current values
-    derived: null,          // what MT5 says about the draft's two legs
-    symbols: {},            // account -> last search result
-    tests: {},              // account -> last connectivity answer
-    settings: null,         // the engine's tunables, with their defaults
-    hot: [],                // ...and which of them apply without a restart
-    connection: null,       // is the SYSTEM connected, in one answer
-    timer: null
+    editing: null,        // the pair key being edited, '' for a new one
+    draft: {},            // the pair form's current values
+    derived: null,        // what the MASTER says about the draft's two legs
+    picker: {},           // leg -> {segment, underlying, contracts}
+    settings: null,
+    busy: {}
   };
 
-  function el(id) { return document.getElementById(id); }
-
-  function escape(value) {
+  function esc(value) {
     return String(value === null || value === undefined ? '' : value)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function api(path, options) {
-    // Every caller reads `result.body`, and NO call site has a .catch().
-    // So a failure has to arrive AS a body: an unhandled rejection here
-    // is a button that does nothing at all — no toast, no error, no
-    // clue why. Both ways a request can fail without ever producing
-    // JSON land in the two handlers below: an answer that is not JSON
-    // (a traceback, a proxy page), and a fetch that never connected.
-    function failed(status, error) {
-      return {ok: false, status: status, body: {error: error}};
-    }
-    return fetch(path, options).then(function (response) {
-      return response.json().then(function (body) {
-        return {ok: response.ok && body.ok !== false, status: response.status,
-                body: body};
-      }, function () {
-        return failed(response.status,
-          'the server answered ' + response.status + ' with something that ' +
-          'is not JSON — check the launcher console for a traceback');
-      });
-    }, function (e) {
-      return failed(0, 'could not reach the server (' +
-        ((e && e.message) || 'connection failed') +
-        ') — is the launcher still running?');
+  function get(path) {
+    return fetch(path).then(function (r) {
+      return r.json().then(function (body) { return {ok: r.ok, body: body}; });
+    }).catch(function (error) {
+      return {ok: false, body: {error: String(error)}};
     });
   }
 
-  function refresh() {
-    return Promise.all([
-      api('/api/accounts'), api('/api/pairs'), api('/api/settings')
-    ]).then(function (results) {
-      local.accounts = results[0].body.accounts || [];
-      local.nextPort = results[0].body.next_free_port || local.nextPort;
-      local.pairs = results[1].body.pairs || {};
-      local.settings = results[2].body.settings || {};
-      local.defaults = results[2].body.defaults || {};
-      local.hot = results[2].body.hot || [];
-      render();
+  function post(path, payload, method) {
+    return fetch(path, {
+      method: method || 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {})
+    }).then(function (r) {
+      return r.json().then(function (body) { return {ok: r.ok, body: body}; });
+    }).catch(function (error) {
+      return {ok: false, body: {error: String(error)}};
     });
   }
 
-  // -- the panel ---------------------------------------------------------
+  // -- the panel ----------------------------------------------------------
 
   function node() {
-    var existing = document.querySelector('.window.settings');
-    if (existing) { return existing; }
-    var panel = document.createElement('section');
+    var panel = document.querySelector('.window.settings');
+    if (panel) { return panel; }
+    panel = document.createElement('section');
     panel.className = 'window settings';
     panel.innerHTML =
       '<div class="titlebar"><span class="swatch"></span>' +
-      '<span class="title">Exchanges — accounts, pairs and settings</span>' +
-      '<span class="winbtns"><button class="winbtn close">&times;</button>' +
+      '<span class="title">Exchanges &mdash; Arrow session, segments and pairs</span>' +
+      '<span class="winbtns"><button class="winbtn close" title="Close">&times;</button>' +
       '</span></div>' +
       '<div class="settings-body">' +
+      '<section class="ready"></section>' +
+      '<section class="session"></section>' +
+      '<section class="segments"></section>' +
+      '<section class="charges"></section>' +
       '<section class="trading"></section>' +
-      '<section class="accounts"></section>' +
       '<section class="pairs"></section>' +
       '</div>' +
-      '<div class="note">Accounts, symbols and the hedge ratio are ' +
-      'STRUCTURAL: the launcher reads them at startup, so a change here ' +
-      'takes effect when you restart it. Everything else on the ladder ' +
-      '(mode, time in force, overnight, increment, quantity) applies at ' +
-      'once.</div>';
+      '<div class="note">Credentials and the instrument master are read at ' +
+      'STARTUP, so a change to them restarts the engine. Charges, the ' +
+      'dedicated declaration and everything on a ladder apply at once.</div>';
     panel.querySelector('.close').addEventListener('click', function () {
       UI.closePanel(UI.panelId('settings'));
     });
     panel.addEventListener('click', onClick);
     panel.addEventListener('change', onChange);
-    // A click is mousedown AND mouseup on the SAME element. Replace
-    // that element in between — which the connection poll does every
-    // five seconds, wholesale, with `innerHTML =` — and the browser
-    // fires no click at all: the button the operator pressed no longer
-    // exists to receive it. Save pair did nothing, said nothing, and
-    // sent nothing (live 2026-08-31).
-    //
-    // So while a button is held down, nothing repaints. The redraw is
-    // not skipped, only deferred to the mouseup.
-    panel.addEventListener('mousedown', function () {
-      local.pressing = true;
-    });
-    ['mouseup', 'mouseleave', 'blur'].forEach(function (event) {
-      window.addEventListener(event, function () {
-        if (!local.pressing) { return; }
-        local.pressing = false;
-        // AFTER the click has been dispatched, not instead of it.
-        window.setTimeout(function () {
-          if (local.missed) { local.missed = false; render(); }
-        }, 0);
-      });
-    });
     document.getElementById('desktop').appendChild(panel);
     refresh();
-    refreshConnection();
-    // The connection state is the one thing on this page that changes
-    // without the operator doing anything.
-    if (!local.timer) {
-      local.timer = window.setInterval(function () {
-        if (document.querySelector('.window.settings')) {
-          refreshConnection();
-        }
-      }, 5000);
-    }
     return panel;
   }
 
-  function render(fromForm) {
+  function refresh() {
+    Promise.all([get('/api/account'), get('/api/pairs'), get('/api/settings'),
+                 get('/api/segments'), get('/api/charges')])
+      .then(function (results) {
+        local.account = results[0].body;
+        local.pairs = results[1].body || {};
+        local.settings = results[2].body;
+        local.segments = results[3].body;
+        local.charges = results[4].body;
+        render();
+      });
+  }
+
+  function render(force) {
     var panel = document.querySelector('.window.settings');
     if (!panel) { return; }
-    // The ladders repaint three times a second. A form that repaints
-    // with them loses whatever is half-typed into it — and a field that
-    // empties itself under the operator is worse than no form at all.
-    // So: keep what is in the pair form (it is the draft), and do not
-    // touch a section the cursor is inside.
-    //
-    // `fromForm === false` says the draft was just changed in code — a
-    // one-click correction the operator asked for — and re-reading the
-    // form here would immediately undo it.
-    if (fromForm !== false) { readDraft(); }
-    redraw(panel.querySelector('.trading'), tradingHtml);
-    redraw(panel.querySelector('.accounts'), accountsHtml);
-    redraw(panel.querySelector('.pairs'), pairsHtml);
+    // Never redraw a section the operator is typing into.
+    var focused = document.activeElement;
+    var editing = focused && panel.contains(focused) &&
+      /INPUT|SELECT|TEXTAREA/.test(focused.tagName);
+    if (editing && !force) { return; }
+    redraw(panel.querySelector('.ready'), readyHtml());
+    redraw(panel.querySelector('.session'), sessionHtml());
+    redraw(panel.querySelector('.segments'), segmentsHtml());
+    redraw(panel.querySelector('.charges'), chargesHtml());
+    redraw(panel.querySelector('.trading'), tradingHtml());
+    redraw(panel.querySelector('.pairs'), pairsHtml());
   }
 
-  //: The blank "new account" row's fields, in render order.
-  var NEW_ACCOUNT_FIELDS = ['f-name', 'f-terminal', 'f-login', 'f-server',
-                            'f-endpoint', 'f-password'];
-
-  function newAccountDraft(section) {
-    // What is half-typed into the NEW account row, or null.
-    //
-    // The connection poll repaints this table every 5 seconds and
-    // `innerHTML =` throws away anything not yet saved. isTyping()
-    // only protects a field that HAS FOCUS, so the moment the operator
-    // clicks Save — or leaves the window to copy a terminal path — the
-    // row empties under them, and the save then refuses for a missing
-    // name while the screen shows no reason at all. The row is unsaved
-    // work: carry it across the repaint.
-    if (!section) { return null; }
-    var row = section.querySelector('tr.new');
-    if (!row) { return null; }
-    var draft = {};
-    NEW_ACCOUNT_FIELDS.forEach(function (field) {
-      var input = row.querySelector('.' + field);
-      draft[field] = input ? input.value : '';
-    });
-    // The endpoint arrives PRE-FILLED with the next free port, so it
-    // alone is not the operator having started: carrying it would pin
-    // the row to a port that may no longer be free.
-    var started = NEW_ACCOUNT_FIELDS.some(function (field) {
-      return field !== 'f-endpoint' && draft[field];
-    });
-    return started ? draft : null;
+  function redraw(target, html) {
+    if (target && target.innerHTML !== html) { target.innerHTML = html; }
   }
 
-  function restoreNewAccount(section, draft) {
-    if (!draft || !section) { return; }
-    var row = section.querySelector('tr.new');
-    if (!row) { return; }
-    NEW_ACCOUNT_FIELDS.forEach(function (field) {
-      var input = row.querySelector('.' + field);
-      if (input) { input.value = draft[field]; }
-    });
+  // -- one line: is it working --------------------------------------------
+
+  function readyHtml() {
+    var account = local.account || {};
+    var connection = local.connection;
+    var missing = account.missing || [];
+    var state, message;
+
+    if (missing.length) {
+      state = 'not-ready';
+      message = 'these credentials are not set: <b>' +
+        missing.map(esc).join('</b>, <b>') + '</b> &mdash; enter them below. ' +
+        'They go to <code>.env</code>, never to config.json.';
+    } else if (!connection) {
+      state = 'unknown';
+      message = 'credentials are set. Press <b>Connect</b> to log in and ' +
+        'load the instrument master.';
+    } else if (!connection.ok) {
+      state = 'not-ready';
+      // THE BROKER'S OWN WORDS. Never "check the log".
+      message = esc(connection.error || 'Arrow refused the connection');
+    } else {
+      state = 'ready';
+      message = 'Arrow session live &middot; instrument master <b>' +
+        Number(connection.master_rows || 0).toLocaleString('en-IN') +
+        '</b> contracts across ' +
+        (connection.segments || []).map(esc).join(', ');
+    }
+    return '<div class="ready-line ' + state + '">' +
+      '<b>' + (state === 'ready' ? 'CONNECTED'
+        : state === 'unknown' ? 'NOT CONNECTED' : 'NOT READY') + '</b> ' +
+      message + '</div>';
   }
 
-  function stampRendered(section) {
-    // What each field was RENDERED with. Comparing against this is how
-    // an operator's unapplied edit is told apart from a value that
-    // simply came back unchanged from the server.
-    // input AND select: the ladder-click convention is a <select>,
-    // and a control left out here reverts under the 5s poll and is
-    // then SAVED back at its old value by Apply.
-    Array.prototype.forEach.call(
-      section.querySelectorAll('input, select'), function (input) {
-        input.dataset.rendered = input.type === 'checkbox'
-          ? String(input.checked) : input.value;
-      });
-  }
+  // -- the session ---------------------------------------------------------
 
-  function editedFields(section) {
-    // Settings the operator has CHANGED but not yet applied, or null.
-    //
-    // The same hazard as the new-account row, one section over: the 5s
-    // connection poll repaints this form from the SAVED settings, and
-    // isTyping() stops protecting the moment focus leaves the field. So
-    // a number typed and then clicked away from silently reverts — and
-    // Apply, reading the form, then saves the OLD value back over the
-    // new one. Live: the stale-quote limit was set to 15 three times
-    // and stayed 5.
-    //
-    // Keyed by class, which is unique per field in this form. The
-    // accounts table repeats classes down its rows and is carried by
-    // newAccountDraft() instead.
-    if (!section || !section.querySelector('.s-stale')) { return null; }
-    var edited = null;
-    Array.prototype.forEach.call(
-      section.querySelectorAll('input, select'), function (input) {
-        if (input.dataset.rendered === undefined) { return; }
-        var now = input.type === 'checkbox'
-          ? String(input.checked) : input.value;
-        if (now === input.dataset.rendered) { return; }
-        edited = edited || {};
-        edited[input.className] = now;
-      });
-    return edited;
-  }
+  function sessionHtml() {
+    var account = local.account || {};
+    var secrets = account.secrets || {};
+    var html = '<h3>The Arrow session <small>one login trades both legs ' +
+      '&mdash; there is no second terminal, port or account to configure' +
+      '</small></h3>';
 
-  function restoreEdited(section, edited) {
-    if (!edited) { return; }
-    Object.keys(edited).forEach(function (cls) {
-      var input = section.querySelector('.' + cls);
-      if (!input) { return; }
-      if (input.type === 'checkbox') {
-        input.checked = edited[cls] === 'true';
-      } else {
-        input.value = edited[cls];
-      }
-    });
-  }
-
-  function redraw(section, build) {
-    if (!section) { return; }
-    if (isTyping(section)) { return; }
-    // Not with a button held down: see the mousedown listener.
-    if (local.pressing) { local.missed = true; return; }
-    // Nor while a window is being dragged: these three sections are
-    // large tables, and rebuilding them under the pointer is most of
-    // why this window moved like treacle.
-    if (document.querySelector('.window.dragging')) { return; }
-    // Sections without a new-account row or a settings form give null
-    // for their half of this, so each is a no-op outside its own table.
-    var draft = newAccountDraft(section);
-    var edited = editedFields(section);
-    section.innerHTML = build();
-    stampRendered(section);
-    restoreNewAccount(section, draft);
-    restoreEdited(section, edited);
-  }
-
-  function isTyping(section) {
-    var active = document.activeElement;
-    if (!active || !section.contains(active)) { return false; }
-    // A BUTTON holding focus is a click that just happened, and the
-    // whole point of that click is usually to change what is drawn.
-    // Only a field being typed into blocks the repaint.
-    var tag = active.tagName;
-    return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
-  }
-
-  // -- how a click behaves ------------------------------------------------
-
-  function tradingHtml() {
-    var settings = local.settings;
-    if (!settings) { return '<h3>Trading</h3><p>loading…</p>'; }
-    var confirm = settings.CONFIRM_MARKET_CLICKS;
-    var html = '<h3>Trading <small>what a click does, and how fast</small>' +
-      '</h3><div class="fields trading-fields">';
-    html += field('Market clicks',
-      '<label class="check"><input type="checkbox" class="s-confirm"' +
-      (confirm ? ' checked' : '') + '> ask before crossing</label>' +
-      '<div class="hint">' + (confirm
-        ? 'ON: every market click asks first. Slower, and deliberate.'
-        : 'OFF (default): ONE CLICK IS ONE ORDER — a market click ' +
-          'crosses both accounts immediately. The arming carries the ' +
-          'weight instead: the mode badge, the tinted columns, the ' +
-          'cursor.') + '</div>');
-    var tt = (settings.CLICK_CONVENTION || 'TT') !== 'TOUCH';
-    html += field('Ladder click',
-      '<select class="s-click">' +
-      '<option value="TT"' + (tt ? ' selected' : '') + '>' +
-      'Bids buy — TT price ladder</option>' +
-      '<option value="TOUCH"' + (tt ? '' : ' selected') + '>' +
-      'Asks buy — hit and lift</option></select>' +
-      '<div class="hint">' + (tt
-        ? 'TT: clicking BIDS joins the bid, which is a resting BUY; ' +
-          'clicking ASKS joins the offer and sells. What every desk ' +
-          'arrives with.'
-        : 'HIT/LIFT: clicking ASKS lifts the offer and BUYS; clicking ' +
-          'BIDS hits the bid and sells.') +
-      ' It moves only which column sends which side — the price is the ' +
-      'row you clicked either way, and the BUY and SELL buttons name ' +
-      'their own side and do not change.</div>');
-    // WHY A CLICK SOMETIMES CLOSES SOMETHING. Surprising the first
-    // time it happens on a mixed book, and there was no switch and no
-    // sentence about it anywhere on the screen.
-    var reduce = settings.CLOSE_FIRST !== false;
-    html += field('Opposite clicks',
-      '<label class="check"><input type="checkbox" class="s-closefirst"' +
-      (reduce ? ' checked' : '') + '> reduce before opening</label>' +
-      '<div class="hint">' + (reduce
-        ? 'ON (default): a click the other way CLOSES open tickets ' +
-          'first, oldest first, taking the last one in part. These ' +
-          'accounts are hedging, so MT5 never nets — without this, ' +
-          'covering a short leaves you holding a short AND a long, ' +
-          'both paying carry. On a mixed book a click that ADDS to ' +
-          'the net still clears an opposite ticket: the net moves by ' +
-          'what you clicked either way, but that part CROSSES when ' +
-          'the level prints instead of earning it.'
-        : 'OFF: every click purely OPENS. On a hedging account that ' +
-          'stacks a second, opposite ticket beside what you already ' +
-          'have — both live, both paying carry.') + '</div>');
-    html += field('Slippage protection (ticks)',
-      '<input class="s-protection" type="number" min="0" step="0.5" ' +
-      'value="' + escape(settings.MARKET_PROTECTION_TICKS) + '">' +
-      '<div class="hint">A market click is market-WITH-protection: a ' +
-      'fill worse than the clicked spread by more than this many ' +
-      'increments is refused, and the ladder says why. 0 turns it off.' +
-      '</div>');
-    html += field('Ladder row height (px)',
-      '<input class="s-rowheight" type="number" min="12" max="40" ' +
-      'step="1" value="' + escape(settings.ROW_HEIGHT_PX) + '">' +
-      '<div class="hint">17 is the reference screen\'s. A bigger target ' +
-      'is a faster and safer click on a large monitor.</div>');
-    html += field('Click drain (seconds)',
-      '<input class="s-drain" type="number" min="0.005" max="1" ' +
-      'step="0.005" value="' + escape(settings.COMMAND_POLL_SEC) + '">' +
-      '<div class="hint">How often the engine picks clicks up, on its ' +
-      'own thread. This is the click-to-order latency you feel; the ' +
-      'price poll is separate and slower.</div>');
-    html += field('Re-peg dead band (ticks)',
-      '<input class="s-repeg" type="number" min="0" step="0.5" value="' +
-      escape(settings.REPEG_DEAD_BAND_TICKS) + '">' +
-      '<div class="hint">LIMIT mode only. Every re-peg loses queue ' +
-      'position, so a tight band means never being at the front of a ' +
-      'queue — which defeats quoting.</div>');
-    html += field('Stale quote limit (seconds)',
-      '<input class="s-stale" type="number" min="0" step="0.5" value="' +
-      escape(settings.MAX_QUOTE_AGE_SEC) + '">' +
-      '<div class="hint">A pair is only as good as its worse leg. 0 ' +
-      'turns the guard off — it can withhold an order, never a close.' +
-      '</div>');
+    html += '<div class="session-box">';
+    html += '<div class="field-row">';
+    html += field('App ID', 'f-app-id', account.app_id, 'text',
+                  'from your Arrow app registration');
+    html += field('User ID', 'f-user-id', account.user_id, 'text', '');
+    html += secretField('Password', 'f-password', secrets.ARROW_PASSWORD,
+                        'ARROW_PASSWORD');
     html += '</div>';
 
-    // What a trade COSTS — and therefore where it gets out — is NOT
-    // here. Commission, the slippage allowance, the nights held, the
-    // take-profit percentage and the carry rate belong to ONE LADDER:
-    // a gold basis and an oil differential are charged differently and
-    // held for different lengths of time, and one set of numbers
-    // covering both is a set that is wrong for at least one of them.
-    // They live behind the cog on each ladder.
-    html += '<p class="hint where-exits">Commission, the slippage ' +
-      'allowance, nights held, the take-profit % and the carry rate are ' +
-      'per LADDER \u2014 open a ladder\u2019s <b>&#9881;</b> for its own. ' +
-      'They are not the same trade on every pair.</p>';
+    html += '<div class="field-row">';
+    html += secretField('API secret', 'f-api-secret',
+                        secrets.ARROW_API_SECRET, 'ARROW_API_SECRET');
+    // The mistake everybody makes once.
+    html += '<label class="sfield wide"><span>TOTP <b class="warn">seed' +
+      '</b></span><input class="f-totp" type="password" placeholder="' +
+      (secrets.ARROW_TOTP_SECRET ? 'set — type to replace' : 'not set') +
+      '"><div class="hint warn-hint"><b>The base32 seed from your ' +
+      'authenticator setup &mdash; not the 6-digit code.</b> ' +
+      'ARROW_TOTP_SECRET in <code>.env</code>.</div></label>';
+    html += '</div>';
 
-    html += '</div><div class="actions">' +
-      '<button class="btn save-settings">Apply</button>' +
-      '<span class="hint">These apply to the running engine at once — ' +
-      'no restart.</span></div>';
+    // THE DECLARATION EVERY RECONCILER FINDING DEPENDS ON.
+    html += '<label class="dedicated' + (account.dedicated ? ' on' : '') + '">' +
+      '<input type="checkbox" class="f-dedicated"' +
+      (account.dedicated ? ' checked' : '') + '>' +
+      '<span><b>This Arrow account is used by nothing else.</b>' +
+      '<div class="hint">Leave it off unless it is true. On a netting ' +
+      'exchange your own position and this system’s are ONE number per ' +
+      'contract, and nothing in the API separates them. Off, the reconciler ' +
+      'never calls a difference an orphan and never offers to close one ' +
+      '&mdash; it says it cannot tell.</div></span></label>';
+
+    html += '<div class="session-actions">' +
+      '<button class="btn primary connect">Connect</button>' +
+      '<button class="btn save-session">Save</button>' +
+      '<span class="hint">SEBI requires the host’s IP to be registered ' +
+      'with Arrow. Nothing works from an unregistered box, and the failure ' +
+      'reads like a password problem.</span></div>';
+    html += '</div>';
     return html;
   }
 
-  // -- accounts -----------------------------------------------------------
-
-  function accountsHtml() {
-    var html = '<h3>Exchanges <small>one login, one terminal, one port — ' +
-      'the three things that cannot be shared</small></h3>';
-    html += connectionHtml();
-    html += '<table class="grid-form"><thead><tr><th>Name</th>' +
-      '<th>Terminal (terminal64.exe)</th><th>Login</th><th>Server</th>' +
-      '<th>Runner endpoint</th><th>Password</th><th></th></tr></thead><tbody>';
-    local.accounts.forEach(function (account) {
-      html += accountRow(account);
-    });
-    html += accountRow({name: '', endpoint: local.nextPort, isNew: true});
-    html += '</tbody></table>';
-    return html;
+  function field(label, cls, value, type, hint) {
+    return '<label class="sfield"><span>' + esc(label) + '</span>' +
+      '<input class="' + cls + '" type="' + (type || 'text') +
+      '" value="' + esc(value) + '">' +
+      (hint ? '<div class="hint">' + hint + '</div>' : '') + '</label>';
   }
 
-  function accountRow(account) {
-    var clashes = [account.endpoint_clash, account.login_clash,
-                   account.terminal_clash].filter(Boolean);
-    var test = local.tests[account.name];
-    var html = '<tr data-account="' + escape(account.name) + '"' +
-      (account.isNew ? ' class="new"' : '') + '>';
-    html += '<td>' + (account.isNew
-      ? '<input class="f-name" placeholder="e.g. CFI Spot">'
-      : escape(account.name)) + '</td>';
-    html += '<td><input class="f-terminal" value="' +
-      escape(account.terminal_path) + '" placeholder="blank = attach to ' +
-      'whichever terminal is open"></td>';
-    html += '<td><input class="f-login" value="' + escape(account.login) +
-      '"></td>';
-    html += '<td><input class="f-server" value="' + escape(account.server) +
-      '"></td>';
-    html += '<td><input class="f-endpoint" value="' +
-      escape(account.endpoint) + '" placeholder="127.0.0.1:9101"></td>';
-    html += '<td><input class="f-password" type="password" placeholder="' +
-      (account.password_set ? 'set — type to replace' : 'not set') +
-      '"><div class="hint">' + (account.isNew
-        ? 'goes to .env under a key derived from the name'
-        : '→ ' + escape(account.password_env) + ' in .env') +
-      '</div></td>';
-    html += '<td class="actions">' +
-      '<button class="btn save-account">Save</button>' +
-      (account.isNew ? '' :
-        // The three questions an operator actually asks, in the order
-        // they ask them.
-        '<button class="btn connect-account" title="Is the leg runner ' +
-        'there, and is its terminal logged in?">Connect</button>' +
-        '<button class="btn test-account" title="Can this account ' +
-        'trade — Algo Trading, permissions, hedging?">Test</button>' +
-        '<button class="btn diagnose-account" title="Everything: the ' +
-        'account, its symbols, and whether the two legs fit">Diagnose' +
-        '</button>' +
-        '<button class="btn danger delete-account">Delete</button>') +
-      '</td></tr>';
-
-    if (clashes.length) {
-      html += '<tr class="problem"><td colspan="7">' +
-        clashes.map(escape).join('<br>') + '</td></tr>';
-    }
-    if (test) {
-      html += '<tr class="checklist"><td colspan="7">' +
-        checklistHtml(test) + '</td></tr>';
-    }
-    return html;
+  function secretField(label, cls, isSet, key) {
+    return '<label class="sfield"><span>' + esc(label) + '</span>' +
+      '<input class="' + cls + '" type="password" placeholder="' +
+      (isSet ? 'set — type to replace' : 'not set') + '">' +
+      '<div class="hint">' + esc(key) + ' in <code>.env</code>' +
+      (isSet ? ' &middot; <span class="ok-ink">set</span>' : '') +
+      '</div></label>';
   }
 
-  function checklistHtml(result) {
-    // The answer, as a checklist with a FIX on every failure.
-    if (result.error && !result.checks) {
-      return '<div class="problem-text">' + escape(result.error) + '</div>';
+  // -- segments: what this account can actually reach ----------------------
+
+  function segmentsHtml() {
+    var found = local.segments;
+    var html = '<h3>Segments <small>a segment needs BOTH: contracts in the ' +
+      'master, and a value in the SDK’s Exchange enum</small></h3>';
+    if (!found || !found.ok) {
+      return html + '<p class="hint">' +
+        esc((found && found.error) || 'connect to read the segments') +
+        '</p>';
     }
-    var overall = result.overall || (result.ok ? 'PASS' : 'FAIL');
-    var html = '<div class="checklist-head ' + overall.toLowerCase() + '">' +
-      escape(result.ran || '') + '<b>' + overall + '</b> — ' +
-      result.passed + ' passed, ' + result.warnings + ' warning(s), ' +
-      result.failed + ' failed' +
-      (result.connected ? ' · CONNECTED' : '') + '</div>';
-    html += '<table class="checks"><tbody>';
-    (result.checks || []).forEach(function (check) {
-      html += '<tr class="c-' + check.status.toLowerCase() + '">';
-      html += '<td class="status">' + check.status + '</td>';
-      html += '<td class="what">' + escape(check.name) + '</td>';
-      html += '<td>' + escape(check.message);
-      // A warning nobody can act on is not a fix: every failure carries
-      // the step that makes it pass.
-      if ((check.fix || []).length) {
-        html += '<ul class="fix">';
-        check.fix.forEach(function (step) {
-          html += '<li>' + escape(step) + '</li>';
-        });
-        html += '</ul>';
-      }
-      html += '</td></tr>';
+    html += '<table class="grid segments-table"><thead><tr>' +
+      '<th>Segment</th><th>Master</th><th>SDK</th><th>Contracts</th>' +
+      '<th>If it is not ready, the fix</th></tr></thead><tbody>';
+    Object.keys(found.segments || {}).forEach(function (key) {
+      var row = found.segments[key];
+      html += '<tr class="' + (row.ready ? 'ok' : 'warn') + '">';
+      html += '<td><b>' + esc(row.label) + '</b> <span class="mono dim">' +
+        esc(row.exch_seg) + ' &rarr; ' + esc(row.exchange) + '</span></td>';
+      html += '<td class="' + (row.in_master ? 'ok-ink' : 'bad-ink') + '">' +
+        (row.in_master ? 'yes' : 'no rows') + '</td>';
+      // UNMEASURED IS NOT A FAILURE.
+      html += '<td class="' + (row.in_sdk === false ? 'bad-ink'
+        : row.in_sdk === true ? 'ok-ink' : 'dim') + '">' +
+        (row.in_sdk === false ? 'missing'
+          : row.in_sdk === true ? esc(row.exchange) : 'unknown') + '</td>';
+      html += '<td class="mono">' +
+        (row.contracts === undefined || row.contracts === null ? DASH
+          : Number(row.contracts).toLocaleString('en-IN')) + '</td>';
+      html += '<td>' + esc(row.ready ? 'ready' : row.note) + '</td>';
+      html += '</tr>';
     });
     return html + '</tbody></table>';
   }
 
-  function connectionHtml() {
-    // Is the system connected — plainly, at the top, in one line.
-    var state = local.connection;
-    if (!state) { return '<div class="conn checking">checking…</div>'; }
-    var html = '<div class="conn ' + (state.connected ? 'up' : 'down') +
-      '"><b>' + (state.connected ? 'CONNECTED' : 'NOT READY') + '</b> ' +
-      escape(state.summary);
-    if ((state.blockers || []).length > 1) {
-      html += '<ul>';
-      state.blockers.forEach(function (blocker) {
-        html += '<li>' + escape(blocker) + '</li>';
+  // -- charges --------------------------------------------------------------
+
+  var CHARGE_FIELDS = [
+    ['brokerage_per_order', 'Brokerage /order', ''],
+    ['brokerage_per_lot', 'Brokerage /lot', ''],
+    ['exchange_txn_pct', 'Exchange txn %', 'of turnover'],
+    ['sebi_pct', 'SEBI %', 'of turnover'],
+    ['stamp_duty_pct_buy', 'Stamp duty %', 'BUY side only'],
+    ['gst_pct', 'GST %', 'on brokerage + exchange'],
+    ['ctt_pct_sell', 'CTT %', 'SELL side only']
+  ];
+
+  function chargesHtml() {
+    var charges = local.charges;
+    var html = '<h3>Charges <small>from your Arrow contract note, per ' +
+      'segment</small></h3>';
+    if (!charges) { return html + '<p class="hint">loading&hellip;</p>'; }
+    Object.keys(charges).forEach(function (key) {
+      var row = charges[key];
+      html += '<div class="charge-block" data-segment="' + esc(key) + '">';
+      html += '<div class="charge-head"><b>' + esc(row.label) + '</b>';
+      if (!row.configured) {
+        html += '<span class="warn-pill">not configured &mdash; every cost ' +
+          'on that ladder reads &#8377;0.00, which is an unfilled form and ' +
+          'not a free trade</span>';
+      }
+      html += '</div><div class="charge-fields">';
+      CHARGE_FIELDS.forEach(function (entry) {
+        html += '<label class="sfield tight"><span>' + esc(entry[1]) +
+          (entry[2] ? ' <i>' + esc(entry[2]) + '</i>' : '') + '</span>' +
+          '<input class="c-' + entry[0] + ' mono" type="number" step="0.0001" ' +
+          'value="' + esc(row.rates[entry[0]]) + '"></label>';
       });
-      html += '</ul>';
+      html += '</div></div>';
+    });
+    html += '<div class="hint">Stamp duty is charged to the BUYER and CTT to ' +
+      'the SELLER, so a spread pays a different stack on each leg &mdash; ' +
+      'and swaps them coming out. There is no swap: an Indian future pays no ' +
+      'overnight financing, and its carry is in the price.</div>';
+    html += '<div class="session-actions"><button class="btn save-charges">' +
+      'Save charges</button></div>';
+    return html;
+  }
+
+  // -- the desk-wide tunables ------------------------------------------------
+
+  var TRADING_FIELDS = [
+    ['MARKET_PROTECTION_TICKS', 'Slippage protection (ticks)', 'number',
+     'A market click is market-WITH-protection: a fill worse than the ' +
+     'clicked spread by more than this many increments is refused. ' +
+     '<b>Arrow has no deviation parameter, so this is the ONLY slippage ' +
+     'guard in the system.</b> 0 turns it off.'],
+    ['CONFIRM_MARKET_CLICKS', 'Ask before crossing', 'bool',
+     'OFF (default): one click is one order. The arming carries the weight ' +
+     'instead — the mode badge, the tinted columns, the cursor.'],
+    ['CLICK_AWAY_RESTS', 'A click away from the touch rests', 'bool',
+     'A buy under the offer cannot cross at any price, so it becomes a ' +
+     'working order there. Off refuses the click instead.'],
+    ['MAX_QUOTE_AGE_SEC', 'Stale quote limit (seconds)', 'number',
+     'A pair is only as good as its worse leg. A far-month MCX contract ' +
+     'trades a few times a minute while the near month ticks constantly, so ' +
+     'raise it per ladder rather than here. 0 turns the guard off — it ' +
+     'can withhold an order, never a close.'],
+    ['REPEG_DEAD_BAND_TICKS', 'Re-peg dead band (ticks)', 'number',
+     'LIMIT mode only. Every re-peg loses queue position, so a tight band ' +
+     'means never being at the front of a queue — which defeats quoting.'],
+    ['TENDER_WARN_DAYS', 'Tender warning (days)', 'number',
+     'MCX settles PHYSICALLY. A position carried into the tender period can ' +
+     'be assigned for delivery, which involves a warehouse.'],
+    ['REFUSE_OPEN_IN_TENDER', 'Refuse to OPEN inside tender', 'bool',
+     'Only ever an open. A guard never prevents a close.'],
+    ['AUTO_ROUTE_ENABLED', 'AutoRouting master switch', 'bool',
+     'OFF, no ladder arms a target however its own box is ticked. One place ' +
+     'to stand every automatic order down before a session.'],
+    ['ROW_HEIGHT_PX', 'Ladder row height (px)', 'number',
+     '17 is the reference screen’s. A bigger target is a faster, safer ' +
+     'click on a large monitor.'],
+    ['COMMAND_POLL_SEC', 'Click drain (seconds)', 'number',
+     'How often the engine picks clicks up, on its own thread. This is the ' +
+     'click-to-order latency you feel; the price poll is separate.']
+  ];
+
+  function tradingHtml() {
+    var settings = local.settings;
+    if (!settings) { return '<h3>Trading</h3><p class="hint">loading&hellip;</p>'; }
+    var values = settings.settings || {};
+    var html = '<h3>Trading <small>what a click does, and how fast</small></h3>' +
+      '<div class="trading-fields">';
+    TRADING_FIELDS.forEach(function (entry) {
+      var name = entry[0], value = values[name];
+      html += '<label class="sfield"><span>' + esc(entry[1]) + '</span>';
+      if (entry[2] === 'bool') {
+        html += '<input class="s-' + name + '" type="checkbox"' +
+          (value ? ' checked' : '') + '>';
+      } else {
+        html += '<input class="s-' + name + ' mono" type="number" step="any" ' +
+          'value="' + esc(value) + '">';
+      }
+      html += '<div class="hint">' + entry[3] + '</div></label>';
+    });
+    html += '</div><div class="session-actions">' +
+      '<button class="btn save-trading">Apply</button>' +
+      '<span class="hint">These reach the running engine at once &mdash; no ' +
+      'restart.</span></div>';
+    return html;
+  }
+
+  // -- pairs -----------------------------------------------------------------
+
+  function pairsHtml() {
+    var html = '<h3>Pairs <small>each ladder is two contracts; the spread is ' +
+      'B &minus; &beta; &times; A</small></h3>';
+    html += '<table class="grid pairs-table"><thead><tr>' +
+      '<th>Ladder</th><th>Leg A</th><th>Leg B</th><th>&beta;</th>' +
+      '<th>Lots A/B</th><th>Incr</th><th>Product</th><th>Type</th>' +
+      '<th></th></tr></thead><tbody>';
+    var keys = Object.keys(local.pairs);
+    if (!keys.length) {
+      html += '<tr><td colspan="9" class="hint">no pairs yet &mdash; add one ' +
+        'below</td></tr>';
     }
-    var clock = state.broker_clock || {};
-    if (clock.broker_time) {
-      html += '<div class="hint">Broker time ' + escape(clock.broker_time) +
-        ' · ' + escape(clock.note) + '</div>';
-    } else if (clock.note) {
-      html += '<div class="hint problem-text">' + escape(clock.note) +
-        '</div>';
+    keys.forEach(function (key) {
+      var pair = local.pairs[key] || {};
+      var legA = pair.leg_a || {}, legB = pair.leg_b || {};
+      html += '<tr data-pair="' + esc(key) + '">';
+      html += '<td><b>' + esc(pair.name || key) + '</b></td>';
+      html += '<td class="mono">' + esc(legA.symbol) + '<div class="dim">' +
+        esc(legA.segment) + '</div></td>';
+      html += '<td class="mono">' + esc(legB.symbol) + '<div class="dim">' +
+        esc(legB.segment) + '</div></td>';
+      html += '<td class="mono">' + esc(pair.hedge_ratio) + '</td>';
+      html += '<td class="mono">' + esc(pair.clip_lots_a) + ' / ' +
+        esc(pair.clip_lots_b) + '</td>';
+      html += '<td class="mono">' + (pair.increment === null ||
+        pair.increment === undefined ? 'derived' : esc(pair.increment)) + '</td>';
+      html += '<td>' + esc(pair.product || 'NRML') + '</td>';
+      html += '<td>' + esc(pair.pair_type || '') + '</td>';
+      html += '<td><button class="btn roll-pair" data-pair="' + esc(key) +
+        '" title="MCX contracts expire every month or two; a calendar has to ' +
+        'be re-pointed">Roll</button> ' +
+        '<button class="btn drop-pair" data-pair="' + esc(key) +
+        '">Delete</button></td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+
+    if (local.editing === null) {
+      html += '<div class="session-actions"><button class="btn primary ' +
+        'new-pair">New pair</button></div>';
+    } else {
+      html += newPairHtml();
+    }
+    return html;
+  }
+
+  function newPairHtml() {
+    var draft = local.draft || {};
+    var html = '<div class="pair-form"><div class="pair-form-head"><b>New pair' +
+      '</b></div><div class="pair-legs">';
+    ['a', 'b'].forEach(function (leg) {
+      html += legPickerHtml(leg, draft);
+    });
+    html += '</div>';
+
+    html += '<div class="session-actions">' +
+      '<button class="btn primary derive-pair">Read both legs from the ' +
+      'instrument master</button>' +
+      '<span class="hint">Nothing below is applied until you Save.</span>' +
+      '</div>';
+
+    if (local.derived) { html += derivedHtml(local.derived); }
+
+    html += '<div class="field-row">';
+    html += '<label class="sfield"><span>Lots A per Qty</span>' +
+      '<input class="d-lots-a mono" type="number" step="1" value="' +
+      esc(draft.clip_lots_a || 1) + '"></label>';
+    html += '<label class="sfield"><span>Lots B per Qty</span>' +
+      '<input class="d-lots-b mono" type="number" step="1" value="' +
+      esc(draft.clip_lots_b || 1) + '"><div class="hint">Both typed. Nothing ' +
+      'derives leg B — GOLD vs GOLDM is 1 and 10.</div></label>';
+    html += '<label class="sfield"><span>Pair type</span>' +
+      '<select class="d-pair-type">' +
+      option('FUTURE_FUTURE', 'Calendar (same underlying)', draft.pair_type) +
+      option('SPOT_FUTURE', 'Spot vs future', draft.pair_type) +
+      option('RELATED', 'Related (no fair spread)', draft.pair_type) +
+      '</select></label>';
+    html += '<label class="sfield"><span>Product</span>' +
+      '<select class="d-product">' +
+      option('NRML', 'NRML (carry)', draft.product) +
+      option('MIS', 'MIS (intraday)', draft.product) +
+      '</select><div class="hint">MIS is squared off by the broker near the ' +
+      'close, without asking. A spread half-squared-off is an outright.</div>' +
+      '</label>';
+    html += '</div>';
+
+    html += '<div class="session-actions">' +
+      '<button class="btn primary save-pair">Save pair</button>' +
+      '<button class="btn cancel-pair">Cancel</button>' +
+      '<span class="hint">The key is the two trading symbols. Two GOLD ' +
+      'calendars a month apart are different ladders with different ' +
+      'positions.</span></div>';
+    return html + '</div>';
+  }
+
+  function legPickerHtml(leg, draft) {
+    var picker = local.picker[leg] || {};
+    var html = '<div class="pair-leg" data-leg="' + leg + '">' +
+      '<div class="leg-head leg-' + leg + '">Leg ' + leg.toUpperCase() +
+      '</div>';
+
+    html += '<label class="sfield"><span>Segment</span>' +
+      '<select class="p-segment">' + segmentOptions(picker.segment) +
+      '</select></label>';
+    html += '<label class="sfield"><span>Search</span>' +
+      '<input class="p-search" placeholder="GOLD, SILVER, CRUDEOIL…" ' +
+      'value="' + esc(picker.query) + '"></label>';
+    html += '<label class="sfield"><span>Contract <i>oldest expiry first</i>' +
+      '</span><select class="p-symbol mono">' +
+      contractOptions(picker.contracts, draft['symbol_' + leg]) +
+      '</select></label>';
+
+    var spec = (local.derived && local.derived.legs &&
+                local.derived.legs[leg]) || null;
+    if (spec && spec.found) {
+      html += '<table class="spec"><tbody>' +
+        specRow('Lot size', spec.lot_size, 'units/lot') +
+        specRow('Tick size', spec.tick_size, '') +
+        specRow('Expiry', spec.expiry, spec.days_to_expiry === null ||
+                spec.days_to_expiry === undefined ? ''
+                : '(' + spec.days_to_expiry + 'd)') +
+        specRow('Freeze qty', spec.freeze_qty, 'units') +
+        specRow('Token', spec.token, '') +
+        '</tbody></table>';
+      (spec.problems || []).forEach(function (problem) {
+        html += '<div class="spec-problem">' + esc(problem) + '</div>';
+      });
+    } else if (spec) {
+      html += '<div class="spec-problem">' + esc(spec.error) + '</div>';
+    } else {
+      html += '<div class="hint">Lot size, tick size, expiry, freeze quantity ' +
+        'and token are READ from the master — never typed. Lot size ' +
+        'varies per expiry.</div>';
     }
     return html + '</div>';
   }
 
-  // -- pairs ---------------------------------------------------------------
+  function specRow(label, value, unit) {
+    var shown = (value === null || value === undefined || value === '')
+      ? '<span class="dim">' + DASH + '</span>'
+      : '<b>' + esc(value) + '</b>' + (unit ? ' ' + esc(unit) : '');
+    return '<tr><td>' + esc(label) + '</td><td class="mono">' + shown +
+      '</td></tr>';
+  }
 
-  function pairsHtml() {
-    var html = '<h3>Pairs <small>each ladder is leg A on one account and ' +
-      'leg B on the other; the spread is B − β × A</small></h3>';
-    html += '<table class="grid-form"><thead><tr><th>Key</th><th>Name</th>' +
-      '<th>Leg A</th><th>Leg B</th><th>β</th><th>Increment</th>' +
-      '<th>Enabled</th><th>Status</th><th></th></tr></thead><tbody>';
-    Object.keys(local.pairs).forEach(function (key) {
-      var pair = local.pairs[key];
-      html += '<tr data-pair="' + escape(key) + '">';
-      html += '<td>' + escape(key) + '</td>';
-      html += '<td>' + escape(pair.name || key) + '</td>';
-      html += '<td>' + legText(pair.leg_a) + '</td>';
-      html += '<td>' + legText(pair.leg_b) + '</td>';
-      html += '<td>' + escape(pair.hedge_ratio) +
-        (pair.hedge_ratio_for
-          ? '<div class="hint">stamped for ' + escape(pair.hedge_ratio_for) +
-            '</div>'
-          : '<div class="hint problem-text">not stamped for any pair</div>') +
-        '</td>';
-      html += '<td>' + escape(pair.increment === null ||
-                              pair.increment === undefined
-                              ? 'derived' : pair.increment) + '</td>';
-      html += '<td>' + (pair.enabled === false ? 'no' : 'yes') + '</td>';
-      html += pairStatusCell(key, pair);
-      html += '<td class="actions">' +
-        '<button class="btn edit-pair">Edit</button>' +
-        '<button class="btn danger delete-pair">Delete</button></td></tr>';
+  function derivedHtml(derived) {
+    var html = '<table class="grid derived-table"><thead><tr>' +
+      '<th>Derived</th><th>Value</th><th>From</th></tr></thead><tbody>';
+    var rows = [
+      ['Increment', derived.increment, derived.increment_note],
+      ['&beta; (hedge ratio)', derived.hedge_ratio,
+       'stamped for ' + esc(derived.hedge_ratio_for || '')],
+      ['Units on the wire', derived.units_note, derived.lot_note]
+    ];
+    rows.forEach(function (row) {
+      if (row[1] === undefined) { return; }
+      html += '<tr><td>' + row[0] + '</td><td class="mono"><b>' +
+        (row[1] === null ? DASH : esc(row[1])) + '</b></td><td class="dim">' +
+        esc(row[2] || '') + '</td></tr>';
     });
     html += '</tbody></table>';
-    html += '<button class="btn new-pair">New pair</button>';
-    if (local.editing !== null) { html += pairForm(); }
-    return html;
-  }
-
-  function pairStatus(key, pair) {
-    /* Is this ladder actually working? Read from the ENGINE's own
-     * snapshot, never from the fact that a row was saved.
-     *
-     * The distinction that matters to whoever is setting this up: a
-     * pair that is configured, a pair the engine has picked up, and a
-     * pair that is quoting are three different things, and only the
-     * last one can be traded. Saying "connected" for any of the others
-     * is how a symbol that does not exist at the broker survives all
-     * the way to a click.
-     */
-    var snapshot = (UI.state && UI.state.snapshot) || {};
-    if (pair.enabled === false) {
-      return {state: 'off', text: 'disabled'};
-    }
-    if (snapshot.engine !== 'up') {
-      return {state: 'unknown',
-              text: 'the engine is not running — nothing to check against'};
-    }
-    var live = (snapshot.pairs || {})[key];
-    if (!live) {
-      return {state: 'bad',
-              text: 'saved, but the engine has not picked it up yet — ' +
-                    'it restarts itself within a few seconds'};
-    }
-    if ((live.errors || []).length) {
-      // The engine's own words, which name the symbol and what the
-      // account actually offers.
-      return {state: 'bad', text: live.errors[0]};
-    }
-    if (!live.market || live.short_spread === null ||
-        live.short_spread === undefined) {
-      return {state: 'bad',
-              text: 'both legs resolved, but no two-sided quote has ' +
-                    'arrived yet'};
-    }
-    return {state: 'ok',
-            text: 'CONNECTED — quoting at ' +
-                  UI.fmt(live.short_spread, 4) + ' / ' +
-                  UI.fmt(live.long_spread, 4)};
-  }
-
-  function pairStatusCell(key, pair) {
-    var status = pairStatus(key, pair);
-    var className = status.state === 'ok' ? 'c-pass'
-      : status.state === 'bad' ? 'c-fail' : 'c-info';
-    return '<td class="pair-status ' + className + '">' +
-      escape(status.text) + '</td>';
-  }
-
-  function legText(leg) {
-    /* The symbol, and the ACCOUNT it trades on — by name, MT5 login and
-     * server. Two accounts is the whole architecture of this thing, and
-     * which login a leg is actually on is the first question anyone
-     * asks of a spread that has gone wrong. Reading it off the account
-     * row instead of the pair row means holding two tables in your head
-     * at once.
-     */
-    leg = leg || {};
-    if (!leg.account && !leg.symbol) { return DASH; }
-    var account = null;
-    (local.accounts || []).forEach(function (row) {
-      if (row.name === leg.account) { account = row; }
-    });
-    var detail = escape(leg.account || '?');
-    if (account && account.login) { detail += ' · #' + escape(account.login); }
-    if (account && account.server) {
-      detail += ' · ' + escape(account.server);
-    }
-    if (!account) {
-      // A leg pointing at an account that is no longer configured is a
-      // pair that cannot trade, and it says so here rather than at the
-      // first click.
-      detail += ' — no such account';
-    }
-    return escape(leg.symbol) + '<div class="hint">on ' + detail + '</div>';
-  }
-
-  function pairForm() {
-    var draft = local.draft;
-    var derived = local.derived;
-    var html = '<div class="pair-form"><h4>' +
-      (local.editing ? 'Editing ' + escape(local.editing) : 'New pair') +
-      '</h4><div class="fields">';
-    html += field('Key', '<input class="p-key" value="' +
-                  escape(draft.key) + '" placeholder="' +
-                  escape(autoKey() || 'built from the two symbols') + '"' +
-                  (local.editing ? ' disabled' : '') + '>' +
-                  '<div class="hint">Leave it blank and it is built from ' +
-                  'the two symbols — the key is an identifier, not a ' +
-                  'setting, and typing one by hand is not something this ' +
-                  'should ask for.' +
-                  (local.editing && autoKey() && autoKey() !== local.editing
-                    ? ' <b class="problem-text">Saving will rename this ' +
-                      'pair to ' + escape(autoKey()) + ', because its ' +
-                      'symbols changed.</b>'
-                    : '') + '</div>');
-    html += field('Name', '<input class="p-name" value="' +
-                  escape(draft.name) + '">');
-    html += field('Leg A', accountSelect('p-account-a', draft.leg_a_account) +
-                  symbolInput('a', draft.leg_a_symbol));
-    html += field('Leg B', accountSelect('p-account-b', draft.leg_b_account) +
-                  symbolInput('b', draft.leg_b_symbol));
-    html += field('Pair type',
-                  '<select class="p-type">' +
-                  option('SPOT_FUTURE', draft.pair_type) +
-                  option('FUTURE_FUTURE', draft.pair_type) +
-                  option('RELATED', draft.pair_type) + '</select>' +
-                  '<div class="hint">Same underlying → β is 1 and the ' +
-                  'spread IS the basis. Different instruments on the same ' +
-                  'price scale → β 1 and the spread is the differential. ' +
-                  'Different scales → the price ratio.</div>');
-    html += field('β (hedge ratio)',
-                  '<input class="p-beta" type="number" step="0.000001" ' +
-                  'value="' + escape(draft.hedge_ratio) + '">' +
-                  (derived && derived.suggested_beta !== null &&
-                   derived.suggested_beta !== undefined
-                    ? '<div class="hint">' + escape(derived.beta_reason) +
-                      ' <button class="btn tiny use-beta" data-value="' +
-                      derived.suggested_beta + '">use ' +
-                      derived.suggested_beta + '</button></div>'
-                    : ''));
-    html += field('Futures expiry',
-                  '<input class="p-expiry" type="date" value="' +
-                  escape(draft.expiry || '') + '">' +
-                  '<div class="hint">The futures leg\'s last trading ' +
-                  'day. With the broker\'s own swap it gives the FAIR ' +
-                  'spread: a basis converges to zero at expiry, and ' +
-                  'until then it is worth its carry. The swaps live on ' +
-                  'the ladder\'s own settings, per leg and per side.' +
-                  '</div>');
-    html += field('Increment',
-                  '<input class="p-increment" type="number" step="0.000001" ' +
-                  'value="' + escape(draft.increment) +
-                  '" placeholder="blank = derived">' +
-                  (derived
-                    ? '<div class="hint">' +
-                      escape(derived.increment_derivation) + ' = ' +
-                      escape(derived.increment) +
-                      ' <button class="btn tiny use-increment" ' +
-                      'data-value="' + derived.increment + '">use it</button>' +
-                      '</div>'
-                    : ''));
-    html += field('Default quantity (spreads)',
-                  '<input class="p-quantity" type="number" min="0" ' +
-                  'step="0.01" value="' + escape(draft.default_quantity) +
-                  '">' + (derived
-                    ? '<div class="hint">' + escape(derived.clip_derivation) +
-                      ', ' + UI.money(derived.spread_units) +
-                      ' per 1.00 of spread</div>' : ''));
-    html += field('Quoting leg (LIMIT mode)',
-                  '<select class="p-quoting">' +
-                  '<option value="">auto — the wider book</option>' +
-                  option('a', draft.quoting_leg) +
-                  option('b', draft.quoting_leg) + '</select>' +
-                  (derived
-                    ? '<div class="hint">measured widths: A ' +
-                      UI.fmt(derived.widths.a, 4) + ' · B ' +
-                      UI.fmt(derived.widths.b, 4) + ' — ' +
-                      escape(derived.quoting_note) + '</div>'
-                    : ''));
-    html += field('Enabled',
-                  '<input class="p-enabled" type="checkbox"' +
-                  (draft.enabled === false ? '' : ' checked') + '>');
-    html += '</div>';
-
-    if (derived) {
-      html += '<div class="derived">';
-      html += '<div>Spread now: <b>' + UI.fmt(derived.spread_now, 4) +
-        '</b></div>';
-      html += '<div>Minimum this pair can trade: <b>' +
-        (derived.min_notional_usd
-          ? UI.money(derived.min_notional_usd) + ' a leg' : DASH) +
-        '</b> — state it before anyone tries to trade under it</div>';
-      html += '<div>Contract sizes read from MT5: A ' +
-        escape((derived.specs.a || {}).contract_size) + ' · B ' +
-        escape((derived.specs.b || {}).contract_size) +
-        ' (never typed in)</div>';
-      html += '</div>';
-    }
-    html += '<div class="actions">' +
-      '<button class="btn derive-pair">Read both legs from MT5</button>' +
-      '<button class="btn save-pair">Save pair</button>' +
-      '<button class="btn cancel-pair">Cancel</button></div></div>';
-    return html;
-  }
-
-  function field(label, control) {
-    return '<label class="field"><span>' + label + '</span>' + control +
-      '</label>';
-  }
-
-  function option(value, selected) {
-    return '<option value="' + value + '"' +
-      (value === selected ? ' selected' : '') + '>' + value + '</option>';
-  }
-
-  function accountSelect(cls, selected) {
-    var html = '<select class="' + cls + '"><option value="">account…' +
-      '</option>';
-    local.accounts.forEach(function (account) {
-      if (!account.name) { return; }
-      html += '<option value="' + escape(account.name) + '"' +
-        (account.name === selected ? ' selected' : '') + '>' +
-        escape(account.name) + '</option>';
-    });
-    return html + '</select>';
-  }
-
-  function symbolInput(side, value) {
-    var found = local.symbols[side] || null;
-    var html = '<span class="symbol-row">' +
-      '<input class="p-symbol-' + side + '" value="' + escape(value) +
-      '" placeholder="symbol">' +
-      '<button class="btn tiny find-symbol" data-side="' + side +
-      '">Find</button></span>';
-    if (found) {
-      html += '<div class="hint symbols">';
-      if (found.error) {
-        html += escape(found.error);
-      } else if (!found.symbols.length) {
-        html += 'nothing on that account matches — it is probably the ' +
-          'wrong account for this leg';
-      } else {
-        found.symbols.slice(0, 12).forEach(function (symbol) {
-          html += '<button class="btn tiny pick-symbol" data-side="' + side +
-            '" data-symbol="' + escape(symbol.symbol) + '">' +
-            escape(symbol.symbol) + '</button> ';
-        });
+    (derived.problems || []).forEach(function (problem) {
+      if (problem) {
+        html += '<div class="spec-problem">' + esc(problem) + '</div>';
       }
-      html += '</div>';
-    }
+    });
     return html;
   }
 
-  // -- events ---------------------------------------------------------------
-
-  function onChange(e) {
-    if (e.target.closest('.pair-form')) { readDraft(); }
+  function segmentOptions(chosen) {
+    var found = (local.segments && local.segments.segments) || {};
+    var html = '';
+    Object.keys(found).forEach(function (key) {
+      if (!found[key].ready) { return; }
+      html += option(key, found[key].label, chosen);
+    });
+    return html || option('mcx_fo', 'MCX futures', chosen);
   }
 
-  function onClick(e) {
-    /* Every click on this page goes through here, and one that throws
-     * used to do nothing and SAY nothing — indistinguishable, from the
-     * operator's side, from a button that is not wired up. */
-    try {
-      return dispatch(e);
-    } catch (error) {
-      UI.toast('that click failed: ' + (error && error.message));
-      throw error;                      // still in the console, in full
+  function contractOptions(contracts, chosen) {
+    if (!contracts || !contracts.length) {
+      return '<option value="">search to list contracts</option>';
     }
+    return contracts.map(function (row) {
+      return option(row.trading_symbol,
+                    row.trading_symbol + '  ' + (row.expiry || ''), chosen);
+    }).join('');
   }
 
-  function dispatch(e) {
-    var button = e.target.closest('button');
-    if (!button) { return; }
-    var row = button.closest('tr');
+  function option(value, label, chosen) {
+    return '<option value="' + esc(value) + '"' +
+      (String(chosen) === String(value) ? ' selected' : '') + '>' +
+      esc(label) + '</option>';
+  }
 
-    if (button.classList.contains('save-settings')) {
-      return saveSettings();
-    }
-    if (button.classList.contains('save-account')) {
-      return saveAccount(row);
-    }
-    if (button.classList.contains('connect-account')) {
-      return runCheck(row.dataset.account, 'connect', button);
-    }
-    if (button.classList.contains('test-account')) {
-      return runCheck(row.dataset.account, 'test', button);
-    }
-    if (button.classList.contains('diagnose-account')) {
-      return runCheck(row.dataset.account, 'diagnose', button);
-    }
-    if (button.classList.contains('delete-account')) {
-      var target = row.dataset.account;
-      return UI.ask('Delete account ' + target + '?',
-        'The password stays in .env until you clear it there. A pair ' +
-        'still routing to this account will refuse the deletion.',
-        'Delete', function () {
-          api('/api/accounts/' + encodeURIComponent(target),
-              {method: 'DELETE'}).then(afterWrite);
-        });
-    }
-    if (button.classList.contains('new-pair')) {
+  // -- events -----------------------------------------------------------------
+
+  function onClick(event) {
+    var target = event.target;
+    if (target.closest('.connect')) { return doConnect(); }
+    if (target.closest('.save-session')) { return saveSession(); }
+    if (target.closest('.save-charges')) { return saveCharges(); }
+    if (target.closest('.save-trading')) { return saveTrading(); }
+    if (target.closest('.new-pair')) {
       local.editing = '';
-      local.draft = {enabled: true, pair_type: 'SPOT_FUTURE',
-                     hedge_ratio: 1.0, default_quantity: 1.0};
+      local.draft = {clip_lots_a: 1, clip_lots_b: 1,
+                     pair_type: 'FUTURE_FUTURE', product: 'NRML'};
       local.derived = null;
-      local.symbols = {};
-      return render(false);
+      return render(true);
     }
-    if (button.classList.contains('edit-pair')) {
-      var key = row.dataset.pair;
-      var pair = local.pairs[key] || {};
-      local.editing = key;
-      local.draft = {
-        key: key, name: pair.name, pair_type: pair.pair_type || 'SPOT_FUTURE',
-        hedge_ratio: pair.hedge_ratio, increment: pair.increment,
-        default_quantity: pair.default_quantity,
-        quoting_leg: pair.quoting_leg || '',
-        enabled: pair.enabled !== false,
-        leg_a_account: (pair.leg_a || {}).account,
-        leg_a_symbol: (pair.leg_a || {}).symbol,
-        leg_b_account: (pair.leg_b || {}).account,
-        leg_b_symbol: (pair.leg_b || {}).symbol,
-        expiry: pair.expiry || '',
-      };
-      local.derived = null;
-      local.symbols = {};
-      return render(false);
-    }
-    if (button.classList.contains('delete-pair')) {
-      var doomed = row.dataset.pair;
-      return UI.ask('Delete pair ' + doomed + '?',
-        'A pair with an open position refuses this — flatten it first.',
-        'Delete', function () {
-          api('/api/pairs/' + encodeURIComponent(doomed),
-              {method: 'DELETE'}).then(afterWrite);
-        });
-    }
-    if (button.classList.contains('cancel-pair')) {
+    if (target.closest('.cancel-pair')) {
       local.editing = null;
-      return render();
+      local.derived = null;
+      return render(true);
     }
-    if (button.classList.contains('find-symbol')) {
-      return findSymbols(button.dataset.side);
-    }
-    if (button.classList.contains('pick-symbol')) {
-      readDraft();
-      local.draft['leg_' + button.dataset.side + '_symbol'] =
-        button.dataset.symbol;
-      local.symbols[button.dataset.side] = null;
-      return render(false);
-    }
-    if (button.classList.contains('use-beta')) {
-      readDraft();
-      local.draft.hedge_ratio = parseFloat(button.dataset.value);
-      return render(false);
-    }
-    if (button.classList.contains('use-increment')) {
-      readDraft();
-      local.draft.increment = parseFloat(button.dataset.value);
-      return render(false);
-    }
-    if (button.classList.contains('derive-pair')) { return derive(); }
-    if (button.classList.contains('save-pair')) { return savePair(); }
+    if (target.closest('.derive-pair')) { return derivePair(); }
+    if (target.closest('.save-pair')) { return savePair(); }
+    var drop = target.closest('.drop-pair');
+    if (drop) { return dropPair(drop.dataset.pair); }
+    var roll = target.closest('.roll-pair');
+    if (roll) { return rollPair(roll.dataset.pair); }
   }
 
-  function runCheck(name, kind, button) {
-    var label = button.textContent;
-    button.textContent = '…';
-    button.disabled = true;
-    return api('/api/accounts/' + encodeURIComponent(name) + '/' + kind)
-      .then(function (result) {
-        var body = result.body || {};
-        body.ran = kind.charAt(0).toUpperCase() + kind.slice(1) + ': ';
-        local.tests[name] = body;
-        button.textContent = label;
-        button.disabled = false;
-        render(false);
-        refreshConnection();
-      })
-      .catch(function (error) {
-        button.textContent = label;
-        button.disabled = false;
-        UI.toast(kind + ' could not run: ' + error.message);
-      });
+  function onChange(event) {
+    var target = event.target;
+    if (target.classList.contains('p-segment') ||
+        target.classList.contains('p-search')) {
+      return searchLeg(target.closest('.pair-leg').dataset.leg);
+    }
+    if (target.classList.contains('p-symbol')) {
+      var leg = target.closest('.pair-leg').dataset.leg;
+      local.draft['symbol_' + leg] = target.value;
+    }
   }
 
-  function refreshConnection() {
-    return api('/api/connection').then(function (result) {
-      var was = local.connection && local.connection.connected;
-      // A real answer always carries `blockers` (possibly empty). Any
-      // body without it is api()'s failure shape — render THAT as the
-      // reason, rather than an empty banner that reads like a
-      // considered "not ready".
-      local.connection = result.body && result.body.blockers
-        ? result.body
-        : {connected: false,
-           summary: (result.body && result.body.error) ||
-             'the connection check did not answer',
-           blockers: [(result.body && result.body.error) ||
-             'the connection check did not answer']};
-      // Say it ONCE when it becomes true, rather than every poll: a
-      // banner that never changes is a banner nobody reads. The words
-      // are the SERVER's — a second copy here drifts from it, and this
-      // one still said "both accounts" with one account configured.
-      if (local.connection.connected && was === false) {
-        UI.toast(local.connection.summary, 'ok');
-      }
-      render(false);
+  function panelValue(selector) {
+    var found = document.querySelector('.window.settings ' + selector);
+    if (!found) { return undefined; }
+    return found.type === 'checkbox' ? found.checked : found.value;
+  }
+
+  function searchLeg(leg) {
+    var box = document.querySelector('.pair-leg[data-leg="' + leg + '"]');
+    if (!box) { return; }
+    var segment = box.querySelector('.p-segment').value;
+    var query = box.querySelector('.p-search').value;
+    local.picker[leg] = {segment: segment, query: query, contracts: []};
+    if (!query) { return render(true); }
+    get('/api/find?q=' + encodeURIComponent(query) + '&segment=' +
+        encodeURIComponent(segment)).then(function (result) {
+      local.picker[leg].contracts = (result.body || {}).symbols || [];
+      if (!result.body.ok) { UI.toast(result.body.error); }
+      render(true);
     });
   }
 
-  function saveSettings() {
-    var panel = document.querySelector('.window.settings .trading');
-    function number(selector) {
-      return parseFloat(panel.querySelector(selector).value);
-    }
-    var fields = {
-      CONFIRM_MARKET_CLICKS: panel.querySelector('.s-confirm').checked,
-      CLICK_CONVENTION: panel.querySelector('.s-click').value,
-      CLOSE_FIRST: panel.querySelector('.s-closefirst').checked,
-      MARKET_PROTECTION_TICKS: number('.s-protection'),
-      ROW_HEIGHT_PX: number('.s-rowheight'),
-      COMMAND_POLL_SEC: number('.s-drain'),
-      REPEG_DEAD_BAND_TICKS: number('.s-repeg'),
-      MAX_QUOTE_AGE_SEC: number('.s-stale')
-    };
-    return api('/api/settings',
-               {method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({fields: fields})})
-      .then(function (result) {
-        if (!result.ok) { UI.toast(result.body.error); return; }
-        var cold = result.body.restart_required || [];
-        UI.toast(cold.length
-          ? 'applied — except ' + cold.join(', ') + ', which the launcher ' +
-            'only reads at startup'
-          : 'applied to the running engine', 'ok');
-        refresh();
-      });
-  }
-
-  function saveAccount(row) {
-    var name = row.dataset.account ||
-      (row.querySelector('.f-name') || {}).value;
-    if (!name) {
-      UI.toast('an account needs a name before it can be saved');
-      return;
-    }
-    var body = {
-      terminal_path: row.querySelector('.f-terminal').value,
-      login: row.querySelector('.f-login').value,
-      server: row.querySelector('.f-server').value,
-      endpoint: row.querySelector('.f-endpoint').value,
-      password: row.querySelector('.f-password').value
-    };
-    return api('/api/accounts/' + encodeURIComponent(name),
-               {method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body)}).then(function (result) {
-      if (!result.ok) {
-        // The refusal's own words — it names the field and, where it
-        // can, the value to use instead.
-        UI.toast(result.body.error);
-        return;
-      }
-      UI.toast('saved ' + name + ' — restart the launcher for it to take ' +
-               'effect', 'ok');
-      // This row has BECOME an account. Clear it, or the draft the
-      // repaint carries across would reappear in the next blank row.
-      if (!row.dataset.account) {
-        NEW_ACCOUNT_FIELDS.forEach(function (field) {
-          var input = row.querySelector('.' + field);
-          if (input) { input.value = ''; }
-        });
-      }
+  function doConnect() {
+    UI.toast('connecting to Arrow…', 'ok');
+    post('/api/connect').then(function (result) {
+      local.connection = result.body;
+      // The broker's own words, on the panel, not in a log.
+      UI.toast(result.body.ok ? 'Arrow session live' : result.body.error,
+               result.body.ok ? 'ok' : undefined);
       refresh();
     });
   }
 
-  function readDraft() {
-    var form = document.querySelector('.pair-form');
-    if (!form) { return; }
-    function value(selector) {
-      var input = form.querySelector(selector);
-      return input ? input.value : '';
-    }
-    function checked(selector, fallback) {
-      var input = form.querySelector(selector);
-      return input ? input.checked : fallback;
-    }
-    local.draft = {
-      key: value('.p-key') || local.draft.key,
-      name: value('.p-name'),
-      pair_type: value('.p-type'),
-      hedge_ratio: parseFloat(value('.p-beta')) || local.draft.hedge_ratio,
-      increment: value('.p-increment') === ''
-        ? null : parseFloat(value('.p-increment')),
-      default_quantity: parseFloat(value('.p-quantity')) || 1.0,
-      quoting_leg: value('.p-quoting'),
-      // Never a hard read: this runs on every repaint, and one missing
-      // control must not take the whole form down with it.
-      enabled: checked('.p-enabled', local.draft.enabled !== false),
-      leg_a_account: value('.p-account-a'),
-      leg_a_symbol: value('.p-symbol-a'),
-      leg_b_account: value('.p-account-b'),
-      leg_b_symbol: value('.p-symbol-b'),
-      expiry: value('.p-expiry') || null
+  function saveSession() {
+    var payload = {
+      app_id: panelValue('.f-app-id'),
+      user_id: panelValue('.f-user-id'),
+      dedicated: panelValue('.f-dedicated')
     };
+    // A secret is only sent when it was TYPED. An empty box means
+    // "leave what is in .env alone", never "clear it".
+    ['password:.f-password', 'api_secret:.f-api-secret',
+     'totp_secret:.f-totp'].forEach(function (entry) {
+      var parts = entry.split(':');
+      var typed = panelValue(parts[1]);
+      if (typed) { payload[parts[0]] = typed; }
+    });
+    post('/api/account', payload).then(function (result) {
+      if (!result.body.ok) { return UI.toast(result.body.error); }
+      UI.toast('saved — the engine reads the session at startup, so it ' +
+               'restarts to pick this up', 'ok');
+      refresh();
+    });
   }
 
-  function findSymbols(side) {
-    readDraft();
-    var account = local.draft['leg_' + side + '_account'];
-    if (!account) {
-      UI.toast('choose the account for leg ' + side.toUpperCase() +
-               ' first — symbols are per broker');
-      return;
-    }
-    var query = local.draft['leg_' + side + '_symbol'] || '';
-    return api('/api/accounts/' + encodeURIComponent(account) +
-               '/symbols?q=' + encodeURIComponent(query))
-      .then(function (result) {
-        local.symbols[side] = result.ok
-          ? {symbols: result.body.symbols || []}
-          : {error: result.body.error};
-        render();
+  function saveCharges() {
+    var table = {};
+    document.querySelectorAll('.window.settings .charge-block')
+      .forEach(function (block) {
+        var rates = {};
+        CHARGE_FIELDS.forEach(function (entry) {
+          var input = block.querySelector('.c-' + entry[0]);
+          if (input) { rates[entry[0]] = parseFloat(input.value) || 0; }
+        });
+        table[block.dataset.segment] = rates;
       });
+    post('/api/settings', {fields: {CHARGES: table}}).then(function (result) {
+      UI.toast(result.body.ok ? 'charges saved' : result.body.error,
+               result.body.ok ? 'ok' : undefined);
+      refresh();
+    });
   }
 
-  function draftPayload() {
-    var draft = local.draft;
-    return {
-      name: draft.name || draft.key,
-      leg_a: {account: draft.leg_a_account, symbol: draft.leg_a_symbol},
-      leg_b: {account: draft.leg_b_account, symbol: draft.leg_b_symbol},
-      pair_type: draft.pair_type,
-      hedge_ratio: draft.hedge_ratio,
-      increment: draft.increment,
-      default_quantity: draft.default_quantity,
-      quoting_leg: draft.quoting_leg || null,
-      enabled: draft.enabled,
-      expiry: draft.expiry || null
+  function saveTrading() {
+    var fields = {};
+    TRADING_FIELDS.forEach(function (entry) {
+      var value = panelValue('.s-' + entry[0]);
+      if (value === undefined) { return; }
+      fields[entry[0]] = entry[2] === 'bool' ? !!value : parseFloat(value);
+    });
+    post('/api/settings', {fields: fields}).then(function (result) {
+      if (!result.body.ok) { return UI.toast(result.body.error); }
+      var cold = result.body.restart_required || [];
+      UI.toast(cold.length ? 'saved — ' + cold.join(', ') +
+               ' need a restart' : 'applied to the running engine', 'ok');
+      refresh();
+    });
+  }
+
+  function derivePair() {
+    var payload = {
+      symbol_a: local.draft.symbol_a || panelValue('.pair-leg[data-leg="a"] .p-symbol'),
+      symbol_b: local.draft.symbol_b || panelValue('.pair-leg[data-leg="b"] .p-symbol'),
+      hedge_ratio: 1.0
     };
-  }
-
-  function derive() {
-    readDraft();
-    var key = local.editing || cleanKey(local.draft.key) || autoKey();
-    if (!key) {
-      UI.toast('give leg A and leg B a symbol first — the key is built '
-               + 'from them');
-      return;
-    }
-    return api('/api/pairs/' + encodeURIComponent(key) + '/derive',
-               {method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(draftPayload())})
-      .then(function (result) {
-        if (!result.ok) { UI.toast(result.body.error); return; }
-        local.derived = result.body;
-        render();
-      });
-  }
-
-  function cleanKey(key) {
-    /* A pair's key is an IDENTIFIER, and it is matched exactly — by the
-     * snapshot, by every panel, and in the URL of every call about this
-     * pair. Typed by hand it arrives with the spaces a person puts
-     * round a separator, and `XAUUSD.f | GCZ6.f` is then a different
-     * pair from the `XAUUSD.f|GCZ6.f` everything else writes.
-     *
-     * So it is tidied here rather than refused: same two symbols, one
-     * spelling. */
-    return String(key || '').trim().replace(/\s*\|\s*/g, '|');
-  }
-
-  function autoKey() {
-    /* A pair's key IS its two symbols. Deriving it means the operator
-     * never has to know that, and a key can never drift away from the
-     * instruments it names. */
-    var draft = local.draft || {};
-    if (!draft.leg_a_symbol || !draft.leg_b_symbol) { return ''; }
-    return draft.leg_a_symbol + '|' + draft.leg_b_symbol;
-  }
-
-  function openOn(key) {
-    var live = ((UI.state.snapshot || {}).pairs || {})[key] || {};
-    return (live.positions || []).length;
+    local.draft.symbol_a = payload.symbol_a;
+    local.draft.symbol_b = payload.symbol_b;
+    post('/api/pair/derive', payload).then(function (result) {
+      local.derived = result.body;
+      if (!result.body.ok) { UI.toast(result.body.error); }
+      render(true);
+    });
   }
 
   function savePair() {
-    readDraft();
-    var payload = draftPayload();
-    if (!payload.leg_a.symbol || !payload.leg_b.symbol) {
-      UI.toast('both legs need a symbol — Find lists what each account '
-               + 'actually offers');
-      return;
+    var draft = local.draft;
+    var legA = document.querySelector('.pair-leg[data-leg="a"]');
+    var legB = document.querySelector('.pair-leg[data-leg="b"]');
+    var symbolA = draft.symbol_a || (legA && legA.querySelector('.p-symbol').value);
+    var symbolB = draft.symbol_b || (legB && legB.querySelector('.p-symbol').value);
+    if (!symbolA || !symbolB) {
+      return UI.toast('pick a contract for both legs first');
     }
-    var key = local.editing || cleanKey(local.draft.key) || autoKey();
-    // The symbols were changed on an existing pair: the key names the
-    // instruments, so it moves with them rather than being left
-    // pointing at something that is no longer traded here.
-    var rename = (local.editing && autoKey() && autoKey() !== local.editing)
-      ? autoKey() : null;
-    if (rename && openOn(local.editing)) {
-      UI.toast('this pair has an open position — flatten it before ' +
-               'changing its symbols; the position is on the OLD ' +
-               'instruments and nothing here can move it');
-      return;
-    }
-    var target = rename || key;
-    return api('/api/pairs/' + encodeURIComponent(target),
-               {method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)})
+    var key = symbolA + '|' + symbolB;
+    var payload = {
+      name: symbolA + ' / ' + symbolB,
+      leg_a: {account: 'arrow', symbol: symbolA,
+              segment: legA.querySelector('.p-segment').value},
+      leg_b: {account: 'arrow', symbol: symbolB,
+              segment: legB.querySelector('.p-segment').value},
+      hedge_ratio: (local.derived && local.derived.hedge_ratio) || 1.0,
+      hedge_ratio_for: key,
+      increment: (local.derived && local.derived.increment) || null,
+      clip_lots_a: parseFloat(panelValue('.d-lots-a')) || 1,
+      clip_lots_b: parseFloat(panelValue('.d-lots-b')) || 1,
+      pair_type: panelValue('.d-pair-type'),
+      product: panelValue('.d-product'),
+      enabled: true
+    };
+    post('/api/pairs/' + encodeURIComponent(key), payload)
       .then(function (result) {
-        if (!result.ok) { UI.toast(result.body.error); return; }
-        if (!rename) { return result; }
-        return api('/api/pairs/' + encodeURIComponent(local.editing),
-                   {method: 'DELETE'}).then(function (dropped) {
-          if (!dropped.ok) {
-            UI.toast('saved as ' + target + ', but the old ' +
-                     local.editing + ' could not be removed: ' +
-                     dropped.body.error);
-          }
-          return result;
-        });
-      })
-      .then(function (result) {
-        if (!result) { return; }
-        UI.toast(result.body.restart_required
-          ? 'saved ' + target + ' — symbols, accounts and β are structural, ' +
-            'so the engine restarts itself to pick them up'
-          : 'saved ' + target, 'ok');
+        if (!result.body.ok) { return UI.toast(result.body.error); }
+        UI.toast('saved ' + key + ' — contracts and β are read at ' +
+                 'startup, so the engine restarts to pick them up', 'ok');
         local.editing = null;
+        local.derived = null;
         refresh();
       });
   }
 
-  function afterWrite(result) {
-    if (!result.ok) { UI.toast(result.body.error); return; }
-    refresh();
+  function dropPair(key) {
+    UI.ask('Delete this ladder?', key + ' — the ladder goes and its ' +
+           'configuration with it. Any POSITION it holds stays at the ' +
+           'exchange and the reconciler will report it as unexplained.',
+           'Delete', function () {
+      post('/api/pairs/' + encodeURIComponent(key), {}, 'DELETE')
+        .then(function (result) {
+          UI.toast(result.body.ok ? 'deleted ' + key : result.body.error,
+                   result.body.ok ? 'ok' : undefined);
+          refresh();
+        });
+    });
   }
 
-  window.MT5Settings = {render: function () { node(); render(true); },
-                        refresh: refresh, state: local};
+  function rollPair(key) {
+    var pair = local.pairs[key] || {};
+    var symbol = (pair.leg_a || {}).symbol;
+    get('/api/roll/' + encodeURIComponent(symbol)).then(function (result) {
+      var next = (result.body || {}).next || [];
+      if (!next.length) {
+        return UI.toast('the master lists no later contract on that ' +
+                        'underlying');
+      }
+      UI.toast('next on ' + symbol + ': ' +
+               next.map(function (row) { return row.trading_symbol; })
+                 .join(', ') + ' — add a new pair on them', 'ok');
+    });
+  }
+
+  window.ArrowSettings = {render: function () { node(); render(true); },
+                          refresh: refresh, state: local};
 })();

@@ -32,7 +32,8 @@ import time
 
 from flask import Flask, jsonify, render_template, request
 
-from . import config as cfg, costs, instruments as instr, segments
+from . import config as cfg, costs, instruments as instr, \
+    segments, slippage
 from .commands import CommandLog
 
 #: How old the status file may be before the UI says the engine is not
@@ -355,7 +356,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 f'UNITS, which is lots x LotSize')
         return jsonify(out)
 
-    @app.post('/api/pair/<path:key>')
+    @app.post('/api/pairs/<path:key>')
     def api_save_pair(key):
         payload = request.get_json(silent=True) or {}
         raw = cfg.load_raw(config_path)
@@ -365,7 +366,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         cfg.save_raw(config_path, raw)
         return jsonify({'ok': True, 'key': key})
 
-    @app.delete('/api/pair/<path:key>')
+    @app.delete('/api/pairs/<path:key>')
     def api_delete_pair(key):
         raw = cfg.load_raw(config_path)
         pairs = dict(raw.get('pairs') or {})
@@ -406,6 +407,51 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                         # HOW ownership was decided, per row, because
                         # here it is an inference and not a fact.
                         'unattributed': len(store.unattributed_fills())})
+
+    # -- the slippage report ---------------------------------------------
+
+    @app.get('/api/slippage')
+    def api_slippage():
+        """What the clicks actually cost, over the session.
+
+        Entries measured against the touch the click was taken at, exits
+        against the CLOSING fills. Positive is a cost at both ends.
+
+        **A fill that could not be priced is UNMEASURED, never averaged
+        in as zero.** Half this report's value is knowing what it could
+        not see: a run of unmeasured entries means the touch was not
+        being recorded, not that the desk traded perfectly.
+        """
+        store = _store(db_path)
+        if store is None:
+            return jsonify({'ok': False,
+                            'error': 'no database yet — the report starts '
+                                     'when the engine does'})
+        raw = cfg.load_raw(config_path)
+        settings = dict(cfg.DEFAULT_SETTINGS)
+        settings.update(raw.get('settings') or {})
+        names = {key: (value or {}).get('name') or key
+                 for key, value in (raw.get('pairs') or {}).items()}
+        window = None if request.args.get('session') == 'all' else _session(
+            settings, status())
+        return jsonify(slippage.report(store, window=window, names=names))
+
+    @app.get('/api/slippage.csv')
+    def api_slippage_csv():
+        """The same report as a file. Empty cells where nothing was
+        measured — never zeros, which would read as no slippage."""
+        store = _store(db_path)
+        if store is None:
+            return 'no database yet\n', 200, {'Content-Type': 'text/csv'}
+        raw = cfg.load_raw(config_path)
+        settings = dict(cfg.DEFAULT_SETTINGS)
+        settings.update(raw.get('settings') or {})
+        window = None if request.args.get('session') == 'all' else _session(
+            settings, status())
+        return (slippage.as_csv(store, window=window), 200,
+                {'Content-Type': 'text/csv',
+                 'Content-Disposition': 'attachment; '
+                                        'filename=slippage.csv'})
 
     @app.get('/api/events')
     def api_events():
@@ -455,6 +501,36 @@ class _Setup:
             return None, built.last_error
         self._session = built
         return built, None
+
+
+def _session(settings, snapshot):
+    """(start, end) of the session the report is cut at, on the EXCHANGE's
+    clock, or None where that clock has not been measured.
+
+    None means "every fill we have" rather than a window computed on the
+    wrong clock — a report cut at a cutoff that never fired is a report
+    that quietly loses the evening's trades.
+    """
+    from .session import IST, session_for
+    import datetime
+    offset = None
+    for pair in (snapshot.get('pairs') or {}).values():
+        found = (pair.get('session') or {}).get('offset_sec')
+        if found is not None:
+            offset = found
+            break
+    if offset is None:
+        return None
+    now = (datetime.datetime.now(datetime.timezone.utc)
+           + datetime.timedelta(seconds=offset)).astimezone(IST)
+    found, _source = session_for('mcx_fo', settings)
+    close = found.close_hm if found else (23, 30)
+    cutoff = now.replace(hour=close[0], minute=close[1], second=0,
+                         microsecond=0)
+    if now < cutoff:
+        cutoff -= datetime.timedelta(days=1)
+    return cutoff.timestamp(), (cutoff
+                                + datetime.timedelta(days=1)).timestamp()
 
 
 def _store(db_path):

@@ -1114,7 +1114,7 @@
   //:           built-in value, shown plainly — nothing inherits, and
   //:           nothing is hidden behind a word.
   //:   text    a fact about this pair with no default at all — an
-  //:           expiry, a swap. Blank is a real state here.
+  //:           expiry, a carry rate. Blank is a real state here.
   var LADDER_FIELDS = [
     ['.ls-order-type', 'order_type', 'live'],
     ['.ls-exit-type', 'exit_type', 'live'],
@@ -1162,7 +1162,7 @@
     // the price, which is what the basis is. For a physically-settled
     // commodity — every MCX metal and energy contract — that carry is
     // money plus warehousing, so it is an interest rate and a storage
-    // cost rather than a swap the broker quotes.
+    // cost rather than a swap the broker quotes — there is none.
     //
     // Blank is a real state on both: no fair value, and the box shows
     // an em dash rather than a number built on nothing.
@@ -1184,7 +1184,7 @@
      * defaults page, so the box shows a real value — seeded from the
      * built-in one for a pair nobody has configured yet — and saving
      * writes it to this pair. And a fact about this pair alone — an
-     * expiry, a swap — comes from the config, where blank is a real
+     * expiry, a carry rate — comes from the config, where blank is real
      * state.
      */
     var pane = node.querySelector('.ladder-settings');
@@ -1281,7 +1281,7 @@
     function overridden(used, fromMt5, symbol) {
       if (!used || !fromMt5 || Math.abs(used - fromMt5) < 1e-9) { return ''; }
       return (symbol || '') + ' set to ' + fmt(used, 2) +
-        ', MT5 says ' + fmt(fromMt5, 2);
+        ', the master says ' + fmt(fromMt5, 2);
     }
     function inUnits(lots, contract) {
       return contract ? ' = ' + fmt(lots * contract, 2) + ' units' : '';
@@ -1304,7 +1304,7 @@
           [overridden(live.contract_a, live.contract_a_mt5, live.symbol_a),
            overridden(live.contract_b, live.contract_b_mt5, live.symbol_b)]
             .filter(Boolean).join('; ') + '.'
-        : ' Contract sizes come from MT5 and are never typed in.');
+        : ' Lot sizes come from the instrument master and are never typed in.');
   }
 
   function fairKindFields(pane, saved) {
@@ -1335,7 +1335,7 @@
         var input = row.querySelector('input');
         row.classList.toggle('not-applicable', !entry[1]);
         input.disabled = !entry[1];
-        input.placeholder = entry[1] ? 'from MT5' : entry[2];
+        input.placeholder = entry[1] ? 'from the master' : entry[2];
       });
   }
 
@@ -1625,7 +1625,7 @@
           + 'broker for it. It rests as soon as the reason above clears.'
         : 'LIMIT mode rests a real pending on ONE leg and crosses the '
           + 'other at market when it fills. Leg A showing no PENDING in '
-          + 'MT5 is the mode working, not a fault: it takes a position '
+          + 'the exchange is the mode working, not a fault: it takes a position '
           + 'the instant the quoting leg fills, and never an order '
           + 'before that.';
     }
@@ -1740,28 +1740,36 @@
         button.classList.toggle('on',
           armedFor(key, 'buy') === size && armedFor(key, 'sell') === size);
       });
-    // Which accounts this ladder is routed across, and their logins.
-    var accounts = state.snapshot.accounts || {};
-    function routeText(account, symbol) {
-      var info = accounts[account] || {};
-      var login = info.login ? ' #' + info.login : '';
-      // EQUITY, not balance: balance ignores what is open, and the
-      // number a trader sizes the next spread against is the one that
-      // already carries the running P&L. Unmeasured stays a dash —
-      // a leg that could not be read must never read as zero money.
-      var money = info.equity === undefined || info.equity === null
-        ? DASH
-        : money_(info.equity, info.currency);
-      return (symbol || '?') + '<div class="hint">' + (account || '?') +
-        login + '</div><div class="hint route-eq" title="Equity: balance ' +
-        'plus the P&L of everything open on this account">' + money +
+    /* WHICH CONTRACTS this ladder trades.
+     *
+     * On MT5 this box showed which of two ACCOUNTS each leg was on,
+     * with its login, because two accounts was the whole architecture.
+     * One Arrow session trades both legs, so there is no login to
+     * disambiguate — and what does need saying is the SEGMENT:
+     * GOLD05DEC25F means nothing without MCXFO beside it. The master
+     * is keyed on the pair, the order carries a different field again,
+     * and the charge schedule is per segment because CTT applies to
+     * one of them.
+     *
+     * The lot size sits under it because it is what UNITS are computed
+     * from, and units is the number that can be wrong by a hundredfold. */
+    function routeText(segment, symbol, lot, days) {
+      var expiry = (days === null || days === undefined) ? ''
+        : '<span class="' + (days <= 7 ? 'warn-ink' : '') + '"> &middot; ' +
+          days + 'd</span>';
+      return (symbol || '?') +
+        '<div class="hint">' + (segment || '?') + expiry + '</div>' +
+        '<div class="hint" title="Units per lot, from the instrument ' +
+        'master. The order carries lots x LotSize UNITS.">' +
+        (lot === null || lot === undefined ? DASH : lot + ' u/lot') +
         '</div>';
     }
     node.querySelector('.route-a b').innerHTML =
-      routeText(row.account_a, row.symbol_a);
+      routeText(row.segment_a, row.symbol_a, row.contract_a,
+                row.days_to_expiry_a);
     node.querySelector('.route-b b').innerHTML =
-      routeText(row.account_b, row.symbol_b);
-    // The three cancel buttons, with what they would pull ON them —
+      routeText(row.segment_b, row.symbol_b, row.contract_b,
+                row.days_to_expiry_b);
     // and disabled when that is nothing, so a button that cannot do
     // anything cannot be pressed and wondered about.
     var buys = row.working_buys || 0;
@@ -1881,7 +1889,7 @@
      *
      * Two columns, because buying the spread pays the offer and
      * selling it receives the bid, and those are charged different
-     * swaps on different legs. One number here would be right half the
+     * carry on different legs. One number here would be right half the
      * time, and the gap would be measured against a price nobody
      * fills at.
      *
@@ -1934,12 +1942,12 @@
     var note = node.querySelector('.fair-note');
     var expiring = fair.days_to_expiry;
     note.textContent = fair.fair_buy === null || fair.fair_buy === undefined
-      ? (fair.expects_expiry === false ? '' : 'set expiry + swap')
+      ? (fair.expects_expiry === false ? '' : 'set the interest rate + storage')
       : (expiring === null || expiring === undefined
           ? '' : expiring + 'd to expiry');
     note.title = fair.note || '';
 
-    // A swap that disagrees with an annual rate — or a long leg showing
+    // A carry that disagrees with an annual rate — or a long leg showing
     // a credit — REPLACES the reading rather than printing beneath it.
     var warn = node.querySelector('.fair-warn');
     var fix = node.querySelector('.fair-fix');
@@ -1991,7 +1999,7 @@
   }
 
   function applyCarryFix(key, fix) {
-    /* Correct one swap field, on the operator's click. */
+    /* Correct one carry field, on the operator's click. */
     var body = {};
     body[fix.field] = fix.value;
     fetch('/api/pairs/' + encodeURIComponent(key), {
@@ -2048,13 +2056,14 @@
       exit.commission === null || exit.commission === undefined
         ? DASH : money(exit.commission);
     // Two terms that are ZERO by default and shown only when they are
-    // in play: an allowance nobody set and a swap over no nights are
+    // in play: an allowance nobody set and a carry over no nights are
     // rows that say nothing, and the rail is 100px wide.
     showTerm(node, '.x-slip', exit.slippage_allowance,
       'a BUDGET for slippage, not a measurement — the realised figure ' +
       'is in the slippage report');
-    showTerm(node, '.x-swap', exit.swap_money,
-      exit.nights ? exit.nights + ' night(s) of swap, both legs, signed: ' +
+    showTerm(node, '.x-swap', exit.carry_money,
+      exit.nights ? exit.nights + ' night(s) of CARRY (interest + storage; ' +
+        'an Indian future pays no swap), both legs, signed: ' +
         'a credit reduces what has to be recovered'
         : 'set BREAK_EVEN_NIGHTS to price a holding period');
     var target = node.querySelector('.x-target');
@@ -2174,7 +2183,7 @@
         (visible === undefined || visible === null ? ''
           : (visible ? '. In Market Watch: the terminal is subscribed, so '
                      + 'a frozen age here means it is receiving nothing — '
-                     + 'look at this symbol in MT5'
+                     + 'look at this contract at the broker'
                      : '. NOT in Market Watch — not subscribed. Press '
                      + 'Feed, and add it in the terminal')) +
         (stamp ? '. Broker stamp ' + stamp : '');
@@ -2564,6 +2573,17 @@
 
   // -- the Market Grid --------------------------------------------------
 
+  function nearestExpiry(row) {
+    /* Whichever leg goes first — that is the one that ends the pair.
+     * None known reads as an em dash, never as "far away". */
+    var days = [row.days_to_expiry_a, row.days_to_expiry_b]
+      .filter(function (value) {
+        return value !== null && value !== undefined;
+      });
+    if (!days.length) { return DASH; }
+    return Math.min.apply(null, days) + 'd';
+  }
+
   function renderGrid() {
     var node = document.querySelector('.market-grid');
     if (!node) {
@@ -2583,9 +2603,10 @@
     }
     node.querySelector('thead').innerHTML =
       '<tr><th>Contract</th><th>Bid</th><th>Ask</th><th>Last</th>' +
-      '<th>Chg</th><th>Incr</th><th>Qty</th><th>k $</th><th>Net</th>' +
+      '<th>Chg</th><th>Incr</th><th>Qty</th><th>k &#8377;</th><th>Net</th>' +
       '<th>Work</th><th>Avg</th><th>Open P&amp;L</th><th>Mode</th>' +
-      '<th>TIF</th><th>O/N</th><th>Feed</th><th>&beta;</th><th></th></tr>';
+      '<th>TIF</th><th>O/N</th><th>Prod</th><th>Expiry</th>' +
+      '<th>Feed</th><th>&beta;</th><th></th></tr>';
 
     var html = '';
     Object.keys(state.snapshot.pairs || {}).forEach(function (key) {
@@ -2620,6 +2641,19 @@
       html += '<td>' + select('tif', ['DAY', 'GTC'], row.time_in_force) + '</td>';
       html += '<td>' + select('on', ['ALLOW', 'EXIT_IF_PROFIT', 'EXIT_ALWAYS'],
                               row.overnight) + '</td>';
+      // NRML or MIS. Amber on MIS, because the BROKER squares an
+      // intraday position off near the close without asking — and a
+      // spread half-squared-off is an outright.
+      html += '<td class="' + (row.product === 'MIS' ? 'warn-ink' : '') +
+        '" title="' + (row.product === 'MIS'
+          ? 'the broker flattens MIS near the close, without asking'
+          : 'carried overnight') + '">' + (row.product || 'NRML') + '</td>';
+      // The NEARER leg's expiry. Amber inside the tender window: MCX
+      // settles PHYSICALLY, and a position carried in can be assigned.
+      html += '<td class="' + (row.tender && row.tender.length
+        ? 'warn-ink' : '') + '" title="' +
+        escapeHtml((row.tender || []).join(' ') || 'days to expiry') + '">' +
+        nearestExpiry(row) + '</td>';
       html += '<td>' + (market.feed_badge || DASH) + '</td>';
       html += '<td title="Stamped for ' + (row.hedge_ratio_for || '?') + '">' +
         fmt(row.hedge_ratio, 4) + '</td>';
@@ -2825,14 +2859,14 @@
       }
     });
     if (!known) {
-      return '<div class="note">MT5’s own profit could not be read, ' +
+      return '<div class="note">the broker’s own profit could not be read, ' +
         'so there is nothing to reconcile against — unmeasured, not zero.</div>';
     }
     var difference = ourTotal - theirs;
     var bad = Math.abs(difference) > 0.01;
     return '<table><tbody><tr' + (bad ? ' class="mismatch"' : '') +
       '><td>our total</td><td>' + money(ourTotal) +
-      '</td><td>MT5’s own</td><td>' + money(theirs) +
+      '</td><td>the broker’s own</td><td>' + money(theirs) +
       '</td><td>difference</td><td>' + money(difference) +
       '</td></tr></tbody></table>';
   }
@@ -2964,7 +2998,7 @@
       '<label class="check"><input type="checkbox" class="ours-only"' +
       (state.fillsFilter.ours ? ' checked' : '') + '> ours only</label>' +
       '<a class="btn" href="/api/fills.csv" download>Export CSV</a>' +
-      '<span class="hint">Read back from MT5\'s own deal history — so it ' +
+      '<span class="hint">Read back from the broker\'s own trade book — so it ' +
       'carries the trader\'s terminal clicks too, marked as not ours.' +
       '</span></div>';
 
@@ -2979,16 +3013,16 @@
     html += '<table><tbody><tr><td>' + (totals.fills || 0) + ' fills</td>' +
       '<td>' + fmt(totals.volume, 2) + ' lots</td>' +
       '<td>commission ' + money(totals.commission) + '</td>' +
-      '<td>swap ' + money(totals.swap) + '</td>' +
+      '<td>charges ' + money(totals.charges) + '</td>' +
       '<td>the broker\'s own P&amp;L ' +
       '<b class="' + upDown(totals.profit) + '">' + money(totals.profit) +
       '</b></td></tr></tbody></table>';
 
     html += '<table><thead><tr><th>Broker time</th><th>Account</th>' +
       '<th>Symbol</th><th>Pair</th><th>Leg</th><th>Side</th><th>In/Out</th>' +
-      '<th>Volume</th><th>Price</th><th>Comm</th><th>Swap</th>' +
-      '<th>P&amp;L</th><th>Ticket</th><th>Deal</th><th>Ours</th>' +
-      '<th>Comment</th></tr></thead><tbody>';
+      '<th>Lots</th><th>Units</th><th>Price</th><th>Charges</th>' +
+      '<th>P&amp;L</th><th>Order</th><th>Trade</th><th>Ours</th>' +
+      '<th>How</th></tr></thead><tbody>';
     (journal.fills || []).forEach(function (fill) {
       html += '<tr class="' + (fill.is_ours ? '' : 'theirs') + '">';
       html += '<td>' + brokerTime(fill) + '</td>';
@@ -2998,10 +3032,10 @@
       html += '<td>' + (fill.leg || DASH) + '</td>';
       html += '<td>' + (fill.side || DASH) + '</td>';
       html += '<td>' + (fill.entry || DASH) + '</td>';
-      html += '<td>' + fmt(fill.volume, 2) + '</td>';
+      html += '<td>' + fmt(fill.lots, 2) + '</td>';
+      html += '<td>' + fmt(fill.units, 0) + '</td>';
       html += '<td>' + fmt(fill.price, 4) + '</td>';
-      html += '<td>' + money(fill.commission) + '</td>';
-      html += '<td>' + money(fill.swap) + '</td>';
+      html += '<td>' + money(fill.charges) + '</td>';
       // The broker's own P&L on this deal: green made, red lost. An
       // opening deal books nothing, so 0.00 stays black — colouring it
       // green would make every entry look like a winner.
@@ -3532,8 +3566,8 @@
     });
     if (wanted[panelId('grid')]) { renderGrid(); }
     if (wanted[panelId('monitor')]) { renderMonitor(); }
-    if (wanted[panelId('settings')] && window.MT5Settings) {
-      window.MT5Settings.render();
+    if (wanted[panelId('settings')] && window.ArrowSettings) {
+      window.ArrowSettings.render();
     }
 
     // Remove the panels that are no longer open.
@@ -4019,7 +4053,7 @@
   // The settings panel lives in its own file and borrows these: one
   // modal, one toast rack, one command path. A second copy of any of
   // them is a second set of house rules to keep.
-  window.MT5Trader = {
+  window.ArrowTrader = {
     state: state, render: render, toast: toast, ask: ask, send: send,
     panelId: panelId, openPanel: openPanel, closePanel: closePanel,
     fmt: fmt, money: money, DASH: DASH,

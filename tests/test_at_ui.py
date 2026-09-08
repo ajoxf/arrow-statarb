@@ -27,14 +27,32 @@ def read(name):
 
 # -- the UI is not a redesign -------------------------------------------------
 
-def test_the_front_end_is_the_SAME_FILES():
+def test_the_LADDER_is_the_reference_screen():
     """The trader must not be able to tell the two apart by looking.
-    These are MT5-Trader's files; if one has been rewritten rather than
-    adapted, the line counts will say so."""
-    assert len(read('app.js').splitlines()) > 3900
-    assert len(read('ladder.css').splitlines()) > 1800
-    assert len(read('settings.js').splitlines()) > 1100
-    assert len(read('index.html').splitlines()) > 450
+
+    THIS REPLACED A LINE-COUNT ASSERTION, which was the worst kind of
+    test: it proved the files had been COPIED and gave no evidence at
+    all that they worked. It stayed green through an Exchanges page
+    that called three endpoints which did not exist.
+
+    So this checks the things that are actually load-bearing about the
+    look — the grid, the colour convention, the row height — and the
+    browser tests below check that the panels function.
+    """
+    css = read('ladder.css')
+    # BID IS BLUE, ASK IS RED, and that convention is global: a price
+    # must not change colour depending on which table it sits in.
+    assert '--bid: #4a9ede' in css
+    assert '--ask: #b83232' in css
+    assert '--row-h: 17px' in css
+    # The five columns, in order, in the LADDER's own header — not the
+    # help overlay, which names Work and LTQ first and would let a
+    # scrambled grid pass.
+    page = read('index.html')
+    header = page[page.index('<th class="c-work"'):page.index('</thead>')]
+    order = [header.index(f'>{column}<')
+             for column in ('Work', 'Bids', 'Price', 'Asks', 'LTQ')]
+    assert order == sorted(order), 'the five columns are out of order'
 
 
 def test_the_five_column_grid_is_intact():
@@ -270,3 +288,141 @@ def test_the_help_overlay_opens_and_closes(page):
     assert 'hidden' in tab.query_selector('#help-overlay').get_attribute(
         'class')
     assert errors == [], errors
+
+
+# -- the browser test that WOULD have caught it --------------------------------
+
+@pytest.fixture
+def panels(tmp_path):
+    """A live page, with every network response recorded.
+
+    The old browser test loaded `/`, checked some elements existed, and
+    stopped. It never opened the Exchanges page, the Market Grid or the
+    Monitor — so it never made one call to a `settings.js` endpoint, and
+    stayed green through three 404s that broke half the UI.
+
+    This one opens every panel and watches every response.
+    """
+    playwright = pytest.importorskip('playwright.sync_api',
+                                     reason='playwright is not installed')
+    import json
+    import threading
+    import time
+    from werkzeug.serving import make_server
+    from arrowtrader import config as cfg
+    from arrowtrader.webapp import create_app
+
+    status = str(tmp_path / 'status.json')
+    with open(status, 'w') as handle:
+        json.dump({'at': time.time(), 'pairs': {}, 'unresolved': [],
+                   'accounts': {}, 'dark_accounts': [], 'currency': 'INR',
+                   'single_pool': True, 'dedicated': False,
+                   'reconciler': {}, 'recovery': {}, 'session_events': [],
+                   'hedge_times_ms': [], 'click_to_on_ms': []}, handle)
+    config_path = str(tmp_path / 'config.json')
+    cfg.save_raw(config_path, {'account': {'name': 'arrow'}, 'pairs': {},
+                               'settings': {}})
+    app = create_app(status_path=status,
+                     command_path=str(tmp_path / 'commands.jsonl'),
+                     results_path=str(tmp_path / 'results.json'),
+                     config_path=config_path,
+                     db_path=str(tmp_path / 'db.sqlite'),
+                     env_path=str(tmp_path / '.env'))
+    server = make_server('127.0.0.1', 0, app)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_port
+
+    try:
+        with playwright.sync_playwright() as driver:
+            browser = None
+            for launch in _launchers(driver):
+                try:
+                    browser = launch()
+                    break
+                except Exception:                       # noqa: BLE001
+                    continue
+            if browser is None:
+                pytest.skip('no usable Chromium for this playwright build')
+            tab = browser.new_page()
+            errors, responses = [], []
+            tab.on('pageerror', lambda error: errors.append(str(error)))
+            tab.on('console', lambda message: errors.append(message.text)
+                   if message.type == 'error' else None)
+            tab.on('response', lambda response: responses.append(
+                (response.url, response.status,
+                 response.header_value('content-type') or '')))
+            tab.goto(f'http://127.0.0.1:{port}/')
+            tab.wait_for_timeout(500)
+            yield tab, errors, responses
+            browser.close()
+    finally:
+        server.shutdown()
+
+
+def _api(responses):
+    return [row for row in responses if '/api/' in row[0]]
+
+
+def test_EVERY_panel_opens_and_every_call_answers_JSON(panels):
+    """One test for the whole class of bug.
+
+    A 404 comes back as an HTML error page; the browser parses it as
+    JSON and the panel shows `Unexpected token '<'`. Anything but a
+    200 of JSON on an `/api/` call is that bug, whichever panel it is.
+    """
+    tab, errors, responses = panels
+
+    # Opened through the app's OWN entry point rather than by hunting
+    # for buttons: the `+` menu's items are hidden until it opens, and a
+    # test that times out on an invisible element tells you nothing
+    # about whether the panel works.
+    tab.click('#open-settings')          # Exchanges
+    tab.wait_for_timeout(700)
+    for panel in ('grid', 'monitor'):
+        tab.evaluate(
+            "(name) => window.ArrowTrader.openPanel("
+            "window.ArrowTrader.panelId(name))", panel)
+        tab.wait_for_timeout(500)
+
+    for name in ('positions', 'orders', 'fills', 'slippage', 'accounts',
+                 'reconcile'):
+        tab_button = tab.query_selector(f'.monitor .tabs button[data-tab="{name}"]')
+        if tab_button:
+            tab_button.click()
+            tab.wait_for_timeout(350)
+
+    bad = [row for row in _api(responses)
+           if row[1] != 200 or 'json' not in row[2]]
+    assert not bad, (
+        'these calls did not answer 200 JSON — a panel parsing one of them '
+        'shows "Unexpected token \'<\'" and names nothing: '
+        + '; '.join(f'{url} -> {status} {kind}' for url, status, kind in bad))
+    assert errors == [], errors
+
+
+def test_the_panels_actually_CALLED_something(panels):
+    """The control for the test above.
+
+    If the clicks silently did nothing, every assertion up there passes
+    over an empty list — green, and proving nothing. This is the same
+    failure the line-count test had, and it must not come back in a
+    different shape.
+    """
+    tab, _errors, responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    called = {row[0].split('/api/')[1].split('?')[0] for row in _api(responses)}
+    # The Exchanges page alone must have asked for all five.
+    for endpoint in ('account', 'segments', 'charges', 'settings', 'pairs'):
+        assert endpoint in called, f'nothing requested /api/{endpoint}'
+
+
+def test_the_exchanges_page_shows_ARROW_and_not_a_terminal(panels):
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    body = tab.query_selector('.window.settings').inner_text()
+    assert 'Arrow session' in body
+    assert 'used by nothing else' in body          # the declaration
+    for gone in ('terminal64', 'Runner endpoint', 'Login'):
+        assert gone not in body, f'the Exchanges page still shows "{gone}"'
