@@ -107,6 +107,11 @@
     });
     panel.addEventListener('click', onClick);
     panel.addEventListener('change', onChange);
+    // `change` fires on BLUR. The operator types a contract name, looks
+    // at the dropdown beside it, and nothing has happened yet — which
+    // is exactly what "instruments not loading" looked like. Search as
+    // they type.
+    panel.addEventListener('input', onInput);
     document.getElementById('desktop').appendChild(panel);
     refresh();
     return panel;
@@ -171,10 +176,20 @@
       message = esc(connection.error || 'Arrow refused the connection');
     } else {
       state = 'ready';
+      var sources = connection.master_sources || {};
+      var routes = Object.keys(sources);
       message = 'Arrow session live &middot; instrument master <b>' +
         Number(connection.master_rows || 0).toLocaleString('en-IN') +
         '</b> contracts across ' +
-        (connection.segments || []).map(esc).join(', ');
+        (connection.segments || []).map(esc).join(', ') +
+        // Which routes it came from. `/all` is not always the whole
+        // master, and "no MCX contracts" means one thing if /mcx
+        // answered with none and another if it was never reachable.
+        (routes.length > 1 ? ' <span class="dim">(' + routes.map(
+          function (route) {
+            return esc(route) + ' ' +
+              Number(sources[route]).toLocaleString('en-IN');
+          }).join(' + ') + ')</span>' : '');
     }
     return '<div class="ready-line ' + state + '">' +
       '<b>' + (state === 'ready' ? 'CONNECTED'
@@ -505,7 +520,7 @@
       'value="' + esc(picker.query) + '"></label>';
     html += '<label class="sfield"><span>Contract <i>oldest expiry first</i>' +
       '</span><select class="p-symbol mono">' +
-      contractOptions(picker.contracts, draft['symbol_' + leg]) +
+      contractOptions(picker, draft['symbol_' + leg]) +
       '</select></label>';
 
     var spec = (local.derived && local.derived.legs &&
@@ -575,9 +590,21 @@
     return html || option('mcx_fo', 'MCX futures', chosen);
   }
 
-  function contractOptions(contracts, chosen) {
+  function contractOptions(picker, chosen) {
+    var contracts = picker.contracts;
     if (!contracts || !contracts.length) {
-      return '<option value="">search to list contracts</option>';
+      // FOUR DIFFERENT STATES, and they had one sentence between them.
+      // "search to list contracts" was shown when nothing had been
+      // typed, while a search was in flight, when the master held no
+      // match, AND when the search failed because there is no Arrow
+      // session — so a broken connection looked exactly like an empty
+      // search box.
+      return '<option value="">' + esc(
+        picker.error ? picker.error
+          : picker.busy ? 'searching\u2026'
+          : !picker.query ? 'type a name above to list contracts'
+          : 'no contract in the master matches "' + picker.query + '"'
+      ) + '</option>';
     }
     return contracts.map(function (row) {
       return option(row.trading_symbol,
@@ -621,14 +648,30 @@
 
   function onChange(event) {
     var target = event.target;
-    if (target.classList.contains('p-segment') ||
-        target.classList.contains('p-search')) {
+    if (target.classList.contains('p-segment')) {
       return searchLeg(target.closest('.pair-leg').dataset.leg);
     }
     if (target.classList.contains('p-symbol')) {
       var leg = target.closest('.pair-leg').dataset.leg;
       local.draft['symbol_' + leg] = target.value;
     }
+  }
+
+  //: The search runs as the operator types, so it is debounced: one
+  //: request per pause, not one per keystroke. Each of those requests
+  //: can open an Arrow session, and hammering a broker's login is how
+  //: an account gets rate-limited.
+  var SEARCH_DEBOUNCE_MS = 250;
+  var searchTimers = {};
+
+  function onInput(event) {
+    var target = event.target;
+    if (!target.classList.contains('p-search')) { return; }
+    var leg = target.closest('.pair-leg').dataset.leg;
+    clearTimeout(searchTimers[leg]);
+    searchTimers[leg] = setTimeout(function () {
+      searchLeg(leg);
+    }, SEARCH_DEBOUNCE_MS);
   }
 
   function panelValue(selector) {
@@ -642,14 +685,43 @@
     if (!box) { return; }
     var segment = box.querySelector('.p-segment').value;
     var query = box.querySelector('.p-search').value;
-    local.picker[leg] = {segment: segment, query: query, contracts: []};
-    if (!query) { return render(true); }
+    var mine = (local.picker[leg] = {
+      segment: segment, query: query, contracts: [], busy: !!query,
+      error: null, at: Date.now()
+    });
+    if (!query) { return paintContracts(leg); }
+    paintContracts(leg);
     get('/api/find?q=' + encodeURIComponent(query) + '&segment=' +
         encodeURIComponent(segment)).then(function (result) {
-      local.picker[leg].contracts = (result.body || {}).symbols || [];
-      if (!result.body.ok) { UI.toast(result.body.error); }
-      render(true);
+      // A slower earlier search must not overwrite a later one — the
+      // operator would be looking at the contracts for a prefix they
+      // have already finished typing past.
+      if (local.picker[leg] !== mine) { return; }
+      var body = result.body || {};
+      mine.busy = false;
+      mine.contracts = body.symbols || [];
+      // The BROKER'S OWN WORDS, in the dropdown where the contracts
+      // would have been — not only in a toast that clears itself.
+      mine.error = body.ok ? null : (body.error || 'the search failed');
+      if (mine.error) { UI.toast(mine.error); }
+      paintContracts(leg);
     });
+  }
+
+  //: Repaint ONE dropdown, in place.
+  //:
+  //: `render(true)` rewrites the whole Pairs section, which contains
+  //: the search box the operator is typing into: the input is
+  //: replaced, the caret is lost, and the next keystroke goes nowhere.
+  //: The search cannot use it.
+  function paintContracts(leg) {
+    var box = document.querySelector('.pair-leg[data-leg="' + leg + '"]');
+    if (!box) { return; }
+    var select = box.querySelector('.p-symbol');
+    if (!select) { return; }
+    var html = contractOptions(local.picker[leg] || {},
+                               local.draft['symbol_' + leg]);
+    if (select.innerHTML !== html) { select.innerHTML = html; }
   }
 
   function doConnect() {

@@ -349,3 +349,96 @@ def test_the_page_renders_and_is_never_cached(client):
     assert response.status_code == 200
     assert response.headers['Cache-Control'] == 'no-store'
     assert b'NEXUS' in response.data
+
+
+# -- a failed login is not retried on every keystroke -------------------------
+
+def test_a_REFUSED_login_is_not_re_attempted_on_every_call(paths, monkeypatch):
+    """The picker searches AS THE OPERATOR TYPES.
+
+    Every one of those searches needs a session, and a session that is
+    not up used to mean a full three-step login — a password POST, a
+    TOTP and a token exchange — per pause in typing. Against a broker
+    that rate-limits authentication, looking for a contract is then
+    enough to get the account locked out.
+
+    The cooldown answers with the SAME WORDS as the first refusal. One
+    that said "please wait" instead would hide the reason.
+    """
+    for key in ('ARROW_PASSWORD', 'ARROW_API_SECRET', 'ARROW_TOTP_SECRET'):
+        monkeypatch.setenv(key, 'set')
+    from arrowtrader import config as cfg
+    cfg.save_raw(paths['config_path'],
+                 {'account': {'name': 'arrow'}, 'pairs': {}, 'settings': {}})
+    tries = []
+
+    def refuse(account):
+        tries.append(account)
+        return FakeSession(account, ok=False,
+                           error="this host's IP is not registered with Arrow")
+
+    app = create_app(session_factory=refuse, **paths)
+    app.config['TESTING'] = True
+    client = app.test_client()
+
+    for _ in range(8):
+        body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
+        assert body['ok'] is False
+        assert "IP is not registered" in body['error']
+    assert len(tries) == 1, (
+        f'{len(tries)} login attempts for 8 searches — the picker is '
+        f'hammering the broker while somebody types')
+
+
+def test_pressing_CONNECT_always_tries_AGAIN_immediately(paths, monkeypatch):
+    """The control for the cooldown.
+
+    Connect is the operator saying "try again NOW", usually right after
+    fixing the thing that was wrong. A cooldown that swallowed it would
+    replay the stale refusal and the corrected password would look
+    broken too.
+    """
+    for key in ('ARROW_PASSWORD', 'ARROW_API_SECRET', 'ARROW_TOTP_SECRET'):
+        monkeypatch.setenv(key, 'set')
+    from arrowtrader import config as cfg
+    cfg.save_raw(paths['config_path'],
+                 {'account': {'name': 'arrow'}, 'pairs': {}, 'settings': {}})
+    tries = []
+
+    def refuse(account):
+        tries.append(account)
+        return FakeSession(account, ok=False, error='Invalid OTP')
+
+    app = create_app(session_factory=refuse, **paths)
+    app.config['TESTING'] = True
+    client = app.test_client()
+
+    for _ in range(3):
+        assert client.post('/api/connect').get_json()['ok'] is False
+    assert len(tries) == 3
+
+
+def test_MISSING_credentials_are_never_put_behind_a_cooldown(paths, monkeypatch):
+    """Nothing was asked of Arrow, so there is nothing to back off from
+    — and the moment the operator fills the field in, the next call has
+    to try."""
+    monkeypatch.delenv('ARROW_PASSWORD', raising=False)
+    monkeypatch.delenv('ARROW_API_SECRET', raising=False)
+    monkeypatch.delenv('ARROW_TOTP_SECRET', raising=False)
+    from arrowtrader import config as cfg
+    cfg.save_raw(paths['config_path'],
+                 {'account': {'name': 'arrow'}, 'pairs': {}, 'settings': {}})
+    tries = []
+    app = create_app(session_factory=lambda account: tries.append(account)
+                     or FakeSession(account), **paths)
+    app.config['TESTING'] = True
+    client = app.test_client()
+    body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
+    assert body['ok'] is False
+    assert 'not set' in body['error']
+    assert tries == []
+
+    for key in ('ARROW_PASSWORD', 'ARROW_API_SECRET', 'ARROW_TOTP_SECRET'):
+        monkeypatch.setenv(key, 'set')
+    body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
+    assert body['ok'] is True, 'the next call after fixing it must try'

@@ -67,6 +67,144 @@ def test_an_empty_master_REFUSES_the_connection(arrow_sdk, monkeypatch):
     assert built.connected is False
 
 
+def _refused(sdk, **answers):
+    """Initialize against a login step that answers with `answers`."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    for field, body in answers.items():
+        setattr(F.FakeArrowClient, field, body)
+    try:
+        built = ArrowSession(F.Account(), SegmentTable())
+        assert built.initialize() is False
+        return built.last_error
+    finally:
+        for field in answers:
+            setattr(F.FakeArrowClient, field, None)
+
+
+def test_a_login_refusal_names_the_STEP_and_quotes_ARROW(arrow_sdk):
+    """The bug the operator actually hit, in one test.
+
+    The SDK reads `resp["redirectUrl"]` out of the 2FA response and its
+    transport only raises on a body carrying `status: error`. A refusal
+    shaped any other way therefore surfaced as the bare string
+    `'redirectUrl'` — a KeyError's argument, on the screen, naming
+    neither the step nor the reason.
+
+    A refusal carries the broker's own words. This is that rule applied
+    to the login.
+    """
+    said = _refused(arrow_sdk, twofa_answer={
+        'message': 'Invalid OTP', 'status': 'failure'})
+    assert 'redirectUrl' in said            # which key was missing
+    assert 'validate-2fa' in said           # WHICH STEP
+    assert 'Invalid OTP' in said            # ARROW'S OWN WORDS
+    assert 'ARROW_TOTP_SECRET' in said      # and the thing to check
+    # And the class it was recognised as, which is what carries the fix.
+    assert 'base32' in said
+
+
+def test_the_FIRST_step_failing_is_not_reported_as_the_second(arrow_sdk):
+    """The control. The three steps fail with three different fixes —
+    a password, a TOTP seed and an API secret — and a message that
+    named the wrong one would send the operator to the wrong field."""
+    said = _refused(arrow_sdk, login_answer={
+        'message': 'required validation for field userID failed'})
+    assert 'auth/app/login' in said
+    assert 'requestId' in said
+    assert 'User ID and password' in said
+    assert 'validate-2fa' not in said
+    assert 'ARROW_TOTP_SECRET' not in said
+
+
+def test_the_TOKEN_step_failing_points_at_the_API_SECRET(arrow_sdk):
+    said = _refused(arrow_sdk, token_answer={'message': 'checksum mismatch'})
+    assert 'authenticate-token' in said
+    assert 'ARROW_API_SECRET' in said
+    assert 'checksum mismatch' in said
+
+
+def test_a_login_refusal_NEVER_carries_the_password(arrow_sdk):
+    """CREDENTIALS LIVE ONLY IN .env — never in code, config, chat or a
+    log line. This message goes to both a log line and the screen, and
+    the body it quotes is the login body, which carries the password
+    that was sent."""
+    said = _refused(arrow_sdk, twofa_answer={
+        'message': 'no', 'password': 'secret', 'token': 'abc',
+        'apiSecret': 'apisecret'})
+    for secret in ('secret', 'abc', 'apisecret'):
+        assert secret not in said, f'the refusal leaked {secret!r}'
+    assert '(hidden)' in said
+
+
+def test_an_EMPTY_answer_says_so_rather_than_reading_as_nothing_wrong(arrow_sdk):
+    """UNMEASURED IS NOT ZERO. A step that answered with nothing at all
+    is a different fault from one that answered with a refusal, and a
+    message that rendered it as an empty string said neither."""
+    said = _refused(arrow_sdk, twofa_answer={})
+    assert 'empty body' in said
+
+
+def test_MCX_is_fetched_from_its_OWN_route_when_all_does_not_carry_it(
+        arrow_sdk, monkeypatch):
+    """pyarrow-client says so in the enum it ships:
+
+        # MCX is used for user-permission checks and instrument segment
+        # downloads (GET /mcx).
+
+    ...and then wraps no method for it. `get_instruments()` is `/all`.
+    So a master fetched the documented way can be complete for NSE and
+    BSE and carry not one commodity contract — and the Exchanges page
+    would report that the account is not entitled to MCX. A WRONG
+    diagnosis is worse than none: it sends the operator to Arrow's
+    support desk to ask for a segment they already have.
+    """
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    nse_only = [row for row in F.MASTER if row['ExchSeg'] != 'MCXFO']
+    monkeypatch.setattr(F.FakeArrowClient, 'get_instruments',
+                        lambda self: list(nse_only))
+    monkeypatch.setattr(F.FakeArrowClient, 'mcx_rows',
+                        [row for row in F.MASTER if row['ExchSeg'] == 'MCXFO'])
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    assert 'MCXFO' in built.master.exch_segs
+    assert built.master.lot_size('GOLD05DEC25F') == 100
+    assert built.master_sources['/mcx'] == 4
+
+
+def test_the_extra_route_is_NOT_asked_for_when_all_already_has_it(
+        arrow_sdk, monkeypatch):
+    """The control. `/all` on a live account is ~223k rows and the
+    commodity rows are in it or they are not; asking a second time for
+    something already held is a slower connect for nothing."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    asked = []
+    monkeypatch.setattr(F.FakeArrowClient, '_get',
+                        lambda self, url, **kw: asked.append(url) or [])
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    assert asked == []
+    assert built.master_sources == {'/all': 5}
+
+
+def test_a_broker_with_NO_such_route_still_connects(arrow_sdk, monkeypatch):
+    """A supplement that is not there is not a connection failure.
+    `/all` succeeded; whether this account has MCX is then a question
+    for the Segments page, answered in Arrow's own words."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    nse_only = [row for row in F.MASTER if row['ExchSeg'] != 'MCXFO']
+    monkeypatch.setattr(F.FakeArrowClient, 'get_instruments',
+                        lambda self: list(nse_only))
+    # `mcx_rows` is None by default: the route 404s.
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    assert 'MCXFO' not in built.master.exch_segs
+    assert '/mcx' not in built.master_sources
+
+
 def test_a_six_digit_totp_is_refused_with_the_actual_fix(arrow_sdk):
     """The seed, not the code. It is the mistake everybody makes."""
     from arrowtrader.broker import ArrowSession

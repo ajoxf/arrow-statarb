@@ -202,6 +202,7 @@ def page(tmp_path):
     playwright = pytest.importorskip('playwright.sync_api',
                                      reason='playwright is not installed')
     import json
+    import os
     import threading
     import time
     from werkzeug.serving import make_server
@@ -306,6 +307,7 @@ def panels(tmp_path):
     playwright = pytest.importorskip('playwright.sync_api',
                                      reason='playwright is not installed')
     import json
+    import os
     import threading
     import time
     from werkzeug.serving import make_server
@@ -322,12 +324,29 @@ def panels(tmp_path):
     config_path = str(tmp_path / 'config.json')
     cfg.save_raw(config_path, {'account': {'name': 'arrow'}, 'pairs': {},
                                'settings': {}})
+    # A session that connects, so the PICKER can be exercised. Without
+    # one every search answers "these credentials are not set", and the
+    # contract dropdown is empty for a reason that has nothing to do
+    # with the code under test.
+    from tests.test_at_webapp import FakeSession
+
+    class Connected(FakeSession):
+        # The fake SDK used in the webapp tests deliberately has no MCX
+        # value, so that the two MCX failure modes can be told apart
+        # there. Here the segment has to be READY, or the picker never
+        # offers it and the test measures the wrong absence.
+        def sdk_exchanges(self):
+            return ['NSE', 'NFO', 'MCXFO']
+
+    for key in ('ARROW_PASSWORD', 'ARROW_API_SECRET', 'ARROW_TOTP_SECRET'):
+        os.environ[key] = 'set'
     app = create_app(status_path=status,
                      command_path=str(tmp_path / 'commands.jsonl'),
                      results_path=str(tmp_path / 'results.json'),
                      config_path=config_path,
                      db_path=str(tmp_path / 'db.sqlite'),
-                     env_path=str(tmp_path / '.env'))
+                     env_path=str(tmp_path / '.env'),
+                     session_factory=lambda account: Connected(account))
     server = make_server('127.0.0.1', 0, app)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_port
@@ -483,3 +502,71 @@ def test_the_exchanges_page_is_actually_LAID_OUT(panels):
     assert box['rowDisplay'] == 'grid', (
         f"the field rows are not on a grid (display: {box['rowDisplay']})")
     assert box['boxBorder'] > 0, 'the session box has no border — no grouping'
+
+
+def test_TYPING_a_contract_name_lists_contracts(panels):
+    """The bug the operator reported, in one test.
+
+    The search was wired to `change`, which fires on BLUR. They typed
+    CRUDEOILSEP26 into the box, looked at the dropdown beside it, and
+    it still said "search to list contracts" — because no event had
+    fired yet and nothing had been asked of the master.
+
+    And the fix has its own trap: the old handler answered by calling
+    `render(true)`, which rewrites the whole Pairs section — including
+    the input being typed into. On every keystroke the box would be
+    replaced and the caret lost. So this asserts BOTH: that typing
+    lists contracts, and that the box survives it.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+
+    box = '.pair-leg[data-leg="a"] .p-search'
+    tab.click(box)
+    tab.type(box, 'GOLD', delay=40)
+    # Longer than the debounce, and no blur anywhere.
+    tab.wait_for_timeout(900)
+
+    assert tab.evaluate(
+        "() => document.activeElement === document.querySelector("
+        f"'{box}')"), 'typing destroyed the search box — the caret is gone'
+    assert tab.input_value(box) == 'GOLD', 'the typed text did not survive'
+
+    options = tab.eval_on_selector_all(
+        '.pair-leg[data-leg="a"] .p-symbol option',
+        'nodes => nodes.map(n => n.value).filter(Boolean)')
+    assert options, (
+        'nothing was listed for GOLD — the contract dropdown still shows '
+        'only its placeholder')
+
+
+def test_an_EMPTY_dropdown_says_WHICH_of_the_four_reasons_it_is(panels):
+    """The control, and the second half of the same bug.
+
+    One sentence — "search to list contracts" — covered four states:
+    nothing typed, a search in flight, no match in the master, and a
+    search that failed because there is no Arrow session. A broken
+    connection looked exactly like an empty search box.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+
+    def placeholder():
+        return tab.eval_on_selector(
+            '.pair-leg[data-leg="a"] .p-symbol option', 'n => n.textContent')
+
+    before = placeholder()
+    assert 'type a name' in before, before
+
+    tab.click('.pair-leg[data-leg="a"] .p-search')
+    tab.type('.pair-leg[data-leg="a"] .p-search', 'ZZQQNOTHING', delay=20)
+    tab.wait_for_timeout(900)
+    after = placeholder()
+    assert after != before, 'the dropdown says the same thing either way'
+    assert 'ZZQQNOTHING' in after, after

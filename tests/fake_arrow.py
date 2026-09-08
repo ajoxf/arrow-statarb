@@ -15,11 +15,22 @@ import enum
 
 
 class Exchange(enum.Enum):
+    """pyarrow-client 1.8.0's own enum, values and all.
+
+    This fake used to carry MCX and not MCXFO, which is the reverse of
+    what the SDK says: `MCX` is for permission checks and instrument
+    downloads, and `MCXFO` is what an order, a quote and a margin
+    request carry. A fake missing the value the real one has is a fake
+    that certifies the wrong constant.
+    """
+
     MCX = 'MCX'
+    MCXFO = 'MCXFO'
     NSE = 'NSE'
     NFO = 'NFO'
     BSE = 'BSE'
     BFO = 'BFO'
+    INDEX = 'INDEX'
 
 
 class OrderType(enum.Enum):
@@ -96,6 +107,12 @@ class Rejected(Exception):
     """What the SDK raises when the exchange or RMS says no."""
 
 
+class _Routes:
+    """The SDK's route holder, which carries the API root."""
+
+    _root_url = 'https://edge.arrow.trade'
+
+
 class FakeArrowClient:
     """The SDK surface `arrowtrader.broker` actually calls."""
 
@@ -127,6 +144,51 @@ class FakeArrowClient:
 
     # -- session ----------------------------------------------------------
 
+    #: The real SDK's three login URLs, and the real SDK's transport:
+    #: `_post` returns whatever the body is and only RAISES when the
+    #: body carries `status: error` or an `errorCode`. A refusal shaped
+    #: any other way comes back as an ordinary dict, and it is the
+    #: caller's job to notice the key it wanted is missing. Faking the
+    #: convenient behaviour instead of this one is how the bare
+    #: `KeyError: 'redirectUrl'` reached the operator's screen.
+    DEFAULT_LOGIN_URL = 'https://api.arrow.trade/auth/app/login'
+    VALIDATE_2FA_URL = 'https://api.arrow.trade/auth/validate-2fa'
+
+    #: Bodies a login step answers with instead of the good one. Class
+    #: attributes, because the client the session logs in with is built
+    #: inside `initialize` and a test never holds it.
+    login_answer = None
+    twofa_answer = None
+    token_answer = None
+
+    def set_token(self, token):
+        self.token = token
+
+    def _post(self, url, params=None, **_kw):
+        params = params or {}
+        if url == self.DEFAULT_LOGIN_URL:
+            if self.login_answer is not None:
+                return self.login_answer
+            if not params.get('userID'):
+                return {'status': 'error', 'message':
+                        'required validation for field userID failed'}
+            return {'requestId': 'REQ-1'}
+        if url == self.VALIDATE_2FA_URL:
+            if self.twofa_answer is not None:
+                return self.twofa_answer
+            return {'redirectUrl':
+                    'https://app.arrow.trade/cb?request-token=RT-1'}
+        raise Rejected(f'no such route {url}')
+
+    def login(self, request_token=None, api_secret=None, **_kw):
+        if self.token_answer is not None:
+            return self.token_answer
+        if not api_secret:
+            return {'message': 'checksum mismatch'}
+        self.logged_in = True
+        self.token = 'FAKE-SESSION-TOKEN'
+        return {'token': self.token}
+
     def auto_login(self, user_id=None, password=None, api_secret=None,
                    totp_secret=None):
         if not totp_secret:
@@ -149,6 +211,22 @@ class FakeArrowClient:
 
     def get_instruments(self):
         return self.master
+
+    #: `/all` is the only master route the SDK wraps. A per-segment
+    #: download is a raw GET against the same root, which is why the
+    #: fake carries the SDK's private transport too — code that reaches
+    #: for `_get` has to be exercised against something that has one.
+    _routes = _Routes()
+    #: Rows `/mcx` answers with. Empty means the route exists and has
+    #: nothing; None means there is no such route.
+    mcx_rows = None
+
+    def _get(self, url, **_kw):
+        if url.endswith('/mcx'):
+            if self.mcx_rows is None:
+                raise Rejected('404 Not Found')
+            return self.mcx_rows
+        raise Rejected(f'no such route {url}')
 
     # -- quotes -----------------------------------------------------------
 

@@ -31,7 +31,8 @@ class Segment:
     """One tradeable segment: what the master calls it, what an order
     calls it, and what kind of thing lives there."""
 
-    def __init__(self, key, exch_seg, exchange, label, kinds=('future',)):
+    def __init__(self, key, exch_seg, exchange, label, kinds=('future',),
+                 aliases=()):
         #: our own stable key, used in config and in a pair's legs.
         self.key = key
         #: the master's `ExchSeg` value — how instruments are grouped.
@@ -40,11 +41,25 @@ class Segment:
         self.exchange = exchange
         self.label = label
         self.kinds = tuple(kinds)
+        #: OTHER spellings the master has been seen to use for this same
+        #: segment. Arrow's own documented values are `NSECM`, `NSEFO`,
+        #: `BSECM`, `BSEFO` — the commodity one is not documented
+        #: anywhere, and a master that spells it `MCX` where we expect
+        #: `MCXFO` does not fail loudly: every row lands in
+        #: `unknown_exch_segs`, the picker finds nothing, and the page
+        #: reports the account is not entitled to a segment it is
+        #: perfectly entitled to. Matching a set costs nothing and
+        #: removes that whole failure.
+        self.aliases = tuple(str(name).strip().upper() for name in aliases)
+
+    def spellings(self):
+        """Every `ExchSeg` value that means this segment."""
+        return (self.exch_seg,) + self.aliases
 
     def to_dict(self):
         return {'key': self.key, 'exch_seg': self.exch_seg,
                 'exchange': self.exchange, 'label': self.label,
-                'kinds': list(self.kinds)}
+                'kinds': list(self.kinds), 'aliases': list(self.aliases)}
 
     def __repr__(self):
         return f'<Segment {self.key} {self.exch_seg}->{self.exchange}>'
@@ -57,14 +72,28 @@ class Segment:
 #: `MCXFO` is the master's own spelling for the MCX futures segment and
 #: `MCX` the order-side exchange. Both are asserted against the master
 #: at connect time rather than trusted — see `available_segments`.
+#:
+#: THE MCX ORDER-SIDE EXCHANGE IS `MCXFO`, NOT `MCX`. The SDK carries
+#: both values and says which is which in its own source:
+#:
+#:     # MCX is used for user-permission checks and instrument segment
+#:     # downloads (GET /mcx). Prefer MCXFO for order, quote, and
+#:     # margin requests.
+#:     MCX = "MCX"
+#:     MCXFO = "MCXFO"   # MCX Futures & Options
+#:
+#: Sending `MCX` on a quote is not refused — it comes back with no
+#: book, which reads on the ladder exactly like a contract that is not
+#: trading. That is the worst shape a wrong constant can take, and it
+#: is why this one is spelled out here rather than left as a guess.
 BUILT_IN = (
-    Segment('mcx_fo', 'MCXFO', 'MCX', 'MCX futures',
-            kinds=('future', 'option')),
+    Segment('mcx_fo', 'MCXFO', 'MCXFO', 'MCX futures',
+            kinds=('future', 'option'), aliases=('MCX', 'MCX_FO', 'MCXCM')),
     Segment('nse_fo', 'NSEFO', 'NFO', 'NSE F&O',
-            kinds=('future', 'option')),
+            kinds=('future', 'option'), aliases=('NFO',)),
     Segment('nse_cm', 'NSECM', 'NSE', 'NSE cash', kinds=('cash',)),
     Segment('bse_fo', 'BSEFO', 'BFO', 'BSE F&O',
-            kinds=('future', 'option')),
+            kinds=('future', 'option'), aliases=('BFO',)),
     Segment('bse_cm', 'BSECM', 'BSE', 'BSE cash', kinds=('cash',)),
 )
 
@@ -85,7 +114,8 @@ class SegmentTable:
                 raw.get('exch_seg') or key.upper(),
                 raw.get('exchange') or key.upper(),
                 raw.get('label') or key,
-                kinds=raw.get('kinds') or ('future',))
+                kinds=raw.get('kinds') or ('future',),
+                aliases=raw.get('aliases') or ())
 
     def __contains__(self, key):
         return self._normal(key) in self._by_key
@@ -111,10 +141,19 @@ class SegmentTable:
         return segment.exch_seg if segment else None
 
     def key_for_exch_seg(self, exch_seg):
-        """The reverse lookup: the master says `MCXFO`, we say `mcx_fo`."""
+        """The reverse lookup: the master says `MCXFO`, we say `mcx_fo`.
+
+        The canonical spelling is tried across every segment BEFORE any
+        alias is: an alias is a tolerance, and a tolerance that can
+        outrank an exact match is a bug waiting for the first master
+        that uses both.
+        """
         needle = str(exch_seg or '').strip().upper()
         for segment in self._by_key.values():
             if segment.exch_seg == needle:
+                return segment.key
+        for segment in self._by_key.values():
+            if needle in segment.aliases:
                 return segment.key
         return None
 
@@ -149,14 +188,15 @@ def available_segments(table, master_exch_segs, sdk_exchanges=None):
                    for value in sdk_exchanges})
     out = {}
     for segment in table:
-        in_master = segment.exch_seg in seen
+        in_master = bool(seen & set(segment.spellings()))
         in_sdk = None if known is None else segment.exchange in known
         if in_master and in_sdk is not False:
             note = f'{segment.label} is ready'
         elif not in_master:
-            note = (f'the instrument master carries no {segment.exch_seg} '
-                    f'contracts — this account may not be entitled to '
-                    f'{segment.label}. Ask Arrow to enable the segment.')
+            note = (f'the instrument master carries no '
+                    f'{" / ".join(segment.spellings())} contracts — this '
+                    f'account may not be entitled to {segment.label}. Ask '
+                    f'Arrow to enable the segment.')
         else:
             note = (f"the SDK's Exchange enum has no {segment.exchange} "
                     f"value — this build of pyarrow-client cannot address "

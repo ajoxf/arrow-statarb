@@ -58,6 +58,94 @@ MARKET_RESOLVE_SEC = 5.0
 FILL_POLL_SEC = 0.2
 
 
+#: Keys that must never reach a log line or the screen. `_readable`
+#: strips them from a response body before that body is quoted back.
+#: Compared with `-` and `_` stripped, so `api_secret`, `api-secret`
+#: and `apiSecret` are all the same key.
+_SECRET_KEYS = ('password', 'token', 'apisecret', 'appsecret', 'totp',
+                'totpsecret', 'code', 'checksum', 'requesttoken',
+                'sessiontoken', 'secret')
+
+
+def _dig(body, *keys):
+    """First present, non-empty value under any of `keys`, case-blind.
+
+    Arrow's own responses are already inconsistent about case
+    (`requestId`, `redirectUrl`, `token`), and the SDK unwraps a `data`
+    envelope on some routes and not others. Reading one exact spelling
+    is how a working response gets mistaken for a refusal.
+    """
+    if isinstance(body, dict):
+        inner = body.get('data')
+        low = {str(k).lower(): v for k, v in body.items()}
+        for key in keys:
+            value = low.get(str(key).lower())
+            if value not in (None, ''):
+                return value
+        if isinstance(inner, (dict, list)):
+            return _dig(inner, *keys)
+    elif isinstance(body, list):
+        for item in body:
+            found = _dig(item, *keys)
+            if found not in (None, ''):
+                return found
+    return None
+
+
+def _readable(body):
+    """Arrow's answer, quotable — with every secret taken out of it.
+
+    THE CREDENTIALS RULE APPLIES TO ERROR TEXT. A login body carries
+    the password that was sent, and this string goes on the screen and
+    into the log, so the redaction happens here and not at the call
+    sites.
+
+    The result is a sentence, not a dict repr: the operator reads it on
+    a panel, and `{'message': 'Invalid OTP'}` makes them parse Python
+    to find the one word that matters.
+    """
+    if isinstance(body, dict):
+        if not body:
+            # UNMEASURED IS NOT ZERO. A step that answered with nothing
+            # at all is a different fault from one that refused, and an
+            # empty `{}` on the screen says neither.
+            return 'nothing at all — an empty body'
+        parts = []
+        for key, value in body.items():
+            if str(key).lower().replace('-', '').replace('_', '') \
+                    in _SECRET_KEYS:
+                parts.append(f'{key}: (hidden)')
+            elif isinstance(value, (dict, list)):
+                parts.append(f'{key}: {_readable(value)}')
+            else:
+                parts.append(f'{key}: {value}')
+        return ' | '.join(parts)[:400]
+    if isinstance(body, list):
+        if not body:
+            return 'nothing at all — an empty body'
+        return ' | '.join(_readable(item) for item in body)[:400]
+    if body in (None, ''):
+        return 'nothing at all — an empty body'
+    return str(body)[:400]
+
+
+def _totp(seed):
+    """The 6-digit code for a base32 seed."""
+    import pyotp
+    return pyotp.TOTP(seed).now()
+
+
+def _request_token(redirect_url):
+    """The `request-token` query parameter out of Arrow's redirect."""
+    from urllib.parse import parse_qs, urlparse
+    try:
+        found = parse_qs(urlparse(str(redirect_url)).query)
+        return (found.get('request-token') or found.get('request_token')
+                or [None])[0]
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
 class OrderResult:
     """Outcome of an order, decoupled from the SDK's return values."""
 
@@ -140,7 +228,68 @@ class ArrowSession:
             return False
         try:
             self._client = arrow.ArrowClient(app_id=self.account.app_id)
-            ok = self._client.auto_login(
+            ok = self._login(self._client)
+        except Exception as error:                      # noqa: BLE001
+            self.last_error = arrow_errors.refusal(error, 'Arrow login')
+            self._client = None
+            return False
+        if not ok:
+            # `_login` has already written the reason, in Arrow's words.
+            self._client = None
+            return False
+        if not self.load_master():
+            return False
+        self.connected = True
+        self.last_error = None
+        return True
+
+    #: The three steps of Arrow's login, named. A refusal has to say
+    #: WHICH one failed: a bad password, a bad TOTP seed and an
+    #: unregistered IP all end the same way, and they have three
+    #: different fixes.
+    LOGIN_STEPS = (
+        ('login', 'POST /auth/app/login', 'requestId',
+         'App ID, User ID and password'),
+        ('2fa', 'POST /auth/validate-2fa', 'redirectUrl',
+         'the TOTP seed (ARROW_TOTP_SECRET) and this machine\'s clock'),
+        ('token', 'POST /auth/app/authenticate-token', 'token',
+         'the API secret (ARROW_API_SECRET)'),
+    )
+
+    def _login(self, client):
+        """Log in, and say what Arrow ACTUALLY answered when it fails.
+
+        The SDK's own `auto_login` walks three steps and reads one key
+        out of each response — `requestId`, then `redirectUrl`, then
+        `token`. Its transport only raises when the body carries
+        `status: error` or an `errorCode`, so a refusal shaped any
+        other way falls straight through and the step's `resp[key]`
+        raises a bare `KeyError`. What the operator then sees is the
+        word `'redirectUrl'` and nothing else — no status, no message,
+        and no indication that the TOTP was the thing Arrow rejected.
+
+        That is precisely the failure this system is not allowed to
+        have. So we walk the same three steps ourselves, through the
+        SDK's own client and its own URLs, and when a step does not
+        return the key it owes us we report the step, the fix, and the
+        body Arrow sent — verbatim, minus anything secret.
+        """
+        steps = dict((name, (where, key, fix))
+                     for name, where, key, fix in self.LOGIN_STEPS)
+
+        def refuse(step, body):
+            where, key, fix = steps[step]
+            said = _readable(body)
+            self.last_error = arrow_errors.refusal(
+                f'{where} answered without "{key}". Check {fix}. '
+                f'Arrow said: {said}', 'Arrow login')
+            return False
+
+        post = getattr(client, '_post', None)
+        if not callable(post):
+            # An SDK build without the private surface: fall back to its
+            # own login and take whatever error it gives.
+            got = client.auto_login(
                 user_id=self.account.user_id,
                 password=self.account.password,
                 # The installed SDK's parameter is `api_secret`. The
@@ -148,19 +297,55 @@ class ArrowSession:
                 api_secret=self.account.api_secret,
                 # The base32 SEED, never the 6-digit code.
                 totp_secret=self.account.totp_secret)
+            if not got:
+                self.last_error = arrow_errors.refusal(
+                    'Arrow refused the login', 'Arrow login')
+                return False
+            return True
+
+        first = post(client.DEFAULT_LOGIN_URL, params={
+            'userID': self.account.user_id,
+            'password': self.account.password,
+            'captchaValue': '', 'captchaID': None,
+            'appID': self.account.app_id, 'isAppLogin': True})
+        request_id = _dig(first, 'requestId')
+        if not request_id:
+            return refuse('login', first)
+
+        # The base32 SEED, never the 6-digit code.
+        try:
+            code = _totp(self.account.totp_secret)
         except Exception as error:                      # noqa: BLE001
-            self.last_error = arrow_errors.refusal(error, 'Arrow login')
-            self._client = None
-            return False
-        if not ok:
+            # NOT "login failed". A seed that will not generate a code
+            # is a typo in `.env`, and saying which of the three things
+            # is wrong is the whole point of walking the steps.
             self.last_error = arrow_errors.refusal(
-                'Arrow refused the login', 'Arrow login')
-            self._client = None
+                'No TOTP could be generated from ARROW_TOTP_SECRET. It must '
+                'be the base32 SEED from your authenticator setup, not the '
+                '6-digit code: ' + str(error), 'Arrow login')
             return False
-        if not self.load_master():
+        second = post(client.VALIDATE_2FA_URL, params={
+            'code': code, 'requestId': request_id,
+            'userID': self.account.user_id})
+        redirect = _dig(second, 'redirectUrl', 'redirect_url')
+        if not redirect:
+            return refuse('2fa', second)
+
+        token = _request_token(redirect)
+        if not token:
+            self.last_error = arrow_errors.refusal(
+                'Arrow returned a redirect with no request-token in it: '
+                + str(redirect)[:200], 'Arrow login')
             return False
-        self.connected = True
-        self.last_error = None
+
+        # The installed SDK's parameter is `api_secret`. The docs say
+        # `app_secret` and the docs are wrong.
+        third = client.login(request_token=token,
+                             api_secret=self.account.api_secret)
+        if not _dig(third, 'token'):
+            return refuse('token', third)
+        if not client.token:
+            client.set_token(_dig(third, 'token'))
         return True
 
     def load_master(self):
@@ -170,6 +355,9 @@ class ArrowSession:
         except Exception as error:                      # noqa: BLE001
             self.last_error = arrow_errors.refusal(error, 'Instrument master')
             return False
+        #: Where each batch of rows came from, for the log and the page.
+        self.master_sources = {'/all': len(rows)}
+        rows = rows + self._extra_segment_rows(rows)
         if not rows:
             self.last_error = (
                 'The instrument master came back empty. Nothing can be '
@@ -180,8 +368,10 @@ class ArrowSession:
             rows, segments=self.segments,
             freeze_quantities=self._freeze_quantities,
             tick_sizes=self._tick_sizes)
-        logging.info('Arrow: master loaded — %d contracts across %s',
-                     self.master.rows, sorted(self.master.exch_segs))
+        logging.info('Arrow: master loaded — %d contracts across %s (%s)',
+                     self.master.rows, sorted(self.master.exch_segs),
+                     ', '.join(f'{route} {count}' for route, count
+                               in self.master_sources.items()))
         if self.master.unknown_exch_segs:
             # Named, not dropped silently: a master full of MCXFO rows
             # and a build that knows no MCX segment is a one-line fix.
@@ -189,6 +379,58 @@ class ArrowSession:
                             'know — they cannot be grouped in the picker',
                             self.master.unknown_exch_segs)
         return True
+
+    #: Segment downloads that are NOT on `/all`, as {route: segment key}.
+    #:
+    #: pyarrow-client's own source says so, in the enum it ships:
+    #:
+    #:     # MCX is used for user-permission checks and instrument
+    #:     # segment downloads (GET /mcx).
+    #:
+    #: and then provides no method for it — `get_instruments()` is
+    #: `/all` and nothing else. So a master fetched the documented way
+    #: can be complete for NSE and BSE and carry not one commodity
+    #: contract, and the Exchanges page would report that the account is
+    #: not entitled to MCX. That is a WRONG DIAGNOSIS, which is worse
+    #: than no diagnosis: it sends the operator to Arrow's support desk
+    #: to ask for a segment they already have.
+    SEGMENT_ROUTES = (('/mcx', 'mcx_fo'),)
+
+    def _extra_segment_rows(self, have):
+        """Rows for segments `/all` did not carry, from their own routes.
+
+        Only asked for where `/all` came back with NOTHING for that
+        segment — a master that already has the rows is never fetched
+        twice — and a route that is not there is not an error: it means
+        this account's `/all` is the whole story.
+        """
+        client, extra = self._client, []
+        get = getattr(client, '_get', None)
+        routes = getattr(client, '_routes', None)
+        if not callable(get) or routes is None:
+            return extra
+        root = getattr(routes, '_root_url', '') or ''
+        seen = {str(row.get('ExchSeg') or row.get('exch_seg') or '')
+                .strip().upper() for row in have}
+        for route, key in self.SEGMENT_ROUTES:
+            segment = self.segments.get(key)
+            if segment is None or seen & set(segment.spellings()):
+                continue
+            try:
+                found = instr.parse_master(get(root + route))
+            except Exception as error:                  # noqa: BLE001
+                # NOT a connection failure. `/all` succeeded; this is a
+                # supplement, and a broker that does not serve it is
+                # answered by the Segments page, in its own words.
+                logging.info('Arrow: %s carries no extra instruments (%s)',
+                             route, error)
+                continue
+            if found:
+                logging.info('Arrow: %s added %d %s contracts that /all did '
+                             'not carry', route, len(found), segment.label)
+                self.master_sources[route] = len(found)
+                extra.extend(found)
+        return extra
 
     def shutdown(self):
         self.stop_stream()

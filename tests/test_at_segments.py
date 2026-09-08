@@ -9,7 +9,13 @@ def test_mcx_is_in_the_table_at_all():
     table = SegmentTable()
     segment = table.get('mcx_fo')
     assert segment.exch_seg == 'MCXFO'
-    assert segment.exchange == 'MCX'
+    # MCXFO, not MCX. The SDK carries both and says which is which:
+    # `MCX` is for permission checks and the instrument download,
+    # `MCXFO` is what an order, a quote and a margin request carry. A
+    # quote sent to `MCX` is not refused — it comes back with no book,
+    # which on a ladder is indistinguishable from a contract that is
+    # not trading.
+    assert segment.exchange == 'MCXFO'
 
 
 def test_the_master_field_and_the_order_field_are_not_the_same():
@@ -62,3 +68,46 @@ def test_an_unreadable_sdk_enum_is_UNKNOWN_not_a_failure():
     report = available_segments(SegmentTable(), ['MCXFO'], None)
     assert report['mcx_fo']['in_sdk'] is None
     assert report['mcx_fo']['ready'] is True
+
+
+def test_a_master_spelling_MCX_still_lands_in_the_MCX_segment():
+    """The tolerance, and why it exists.
+
+    Arrow documents four `ExchSeg` values — NSECM, NSEFO, BSECM,
+    BSEFO — and documents nothing for the commodity segment. If the
+    master spells it `MCX` where this build expects `MCXFO`, nothing
+    fails loudly: every MCX row lands in `unknown_exch_segs`, the
+    picker finds no contracts, and the Exchanges page reports that the
+    account is not entitled to a segment it is perfectly entitled to.
+    """
+    from arrowtrader.segments import SegmentTable, available_segments
+    table = SegmentTable()
+    assert table.key_for_exch_seg('MCX') == 'mcx_fo'
+    assert table.key_for_exch_seg('MCXFO') == 'mcx_fo'
+    found = available_segments(table, {'MCX'}, {'MCXFO'})
+    assert found['mcx_fo']['in_master'] is True
+    assert found['mcx_fo']['ready'] is True
+
+
+def test_an_EXACT_spelling_always_outranks_another_segments_alias():
+    """The control. An alias is a tolerance; a tolerance that can beat
+    an exact match is a bug waiting for the first master that carries
+    both spellings."""
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable()
+    # `NFO` is NSE F&O's alias and nobody else's exact value...
+    assert table.key_for_exch_seg('NFO') == 'nse_fo'
+    # ...and `NSEFO`, an exact value, still resolves to itself.
+    assert table.key_for_exch_seg('NSEFO') == 'nse_fo'
+    # An unknown segment stays unknown rather than being absorbed.
+    assert table.key_for_exch_seg('CDS') is None
+
+
+def test_a_segment_the_master_does_not_carry_names_EVERY_spelling_it_looked_for():
+    """The operator has to be able to check the claim. 'No MCXFO
+    contracts' is not checkable if the code also looked for MCX."""
+    from arrowtrader.segments import SegmentTable, available_segments
+    found = available_segments(SegmentTable(), {'NSEFO'}, {'MCXFO', 'NFO'})
+    note = found['mcx_fo']['note']
+    assert 'MCXFO' in note and 'MCX' in note
+    assert found['mcx_fo']['ready'] is False

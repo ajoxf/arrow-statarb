@@ -261,6 +261,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         one that will actually happen: this host's IP is not registered
         with Arrow.
         """
+        # Connect is the operator saying "try again NOW". It is the one
+        # call that must never be answered out of the cooldown a failed
+        # login leaves behind — otherwise fixing the password and
+        # pressing Connect replays the old refusal.
+        setup.forget()
         built, error = setup.session()
         if built is None:
             return jsonify({'ok': False, 'error': error}), 200
@@ -269,6 +274,12 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             'master_rows': built.master.rows,
             'segments': sorted(built.master.exch_segs),
             'unknown_segments': dict(built.master.unknown_exch_segs),
+            # WHICH ROUTES the master was assembled from. `/all` is not
+            # always the whole of it, and "no MCX contracts" means
+            # something different depending on whether `/mcx` was asked
+            # and answered or was never reachable.
+            'master_sources': dict(getattr(built, 'master_sources', None)
+                                   or {}),
         })
 
     @app.get('/api/segments')
@@ -473,20 +484,43 @@ class _Setup:
     getting them right.
     """
 
-    def __init__(self, config_path, factory=None):
+    #: How long a failed login is remembered before it is tried again.
+    #:
+    #: The picker searches as the operator types, and every search on a
+    #: dead session used to attempt a FULL THREE-STEP LOGIN — a
+    #: password POST, a TOTP, and a token exchange, per pause in
+    #: typing. Against a broker that rate-limits authentication that is
+    #: how an account gets locked out while somebody is doing nothing
+    #: more than looking for a contract.
+    RETRY_AFTER_SEC = 5.0
+
+    def __init__(self, config_path, factory=None, clock=time.time):
         self.config_path = config_path
         self.factory = factory
         self._session = None
+        self._clock = clock
+        #: (when, why) of the last refusal, or None.
+        self._refused = None
 
     def session(self):
         if self._session is not None and self._session.connected:
             return self._session, None
+        if self._refused is not None:
+            when, why = self._refused
+            if self._clock() - when < self.RETRY_AFTER_SEC:
+                # The SAME words as the first attempt. A cooldown that
+                # said "please wait" instead would hide the reason.
+                return None, why
+            self._refused = None
         raw = cfg.load_raw(self.config_path)
         account = cfg.AccountConfig.from_dict(
             (raw.get('account') or {}).get('name', 'arrow'),
             raw.get('account'))
         missing = account.missing_secrets()
         if missing:
+            # NOT remembered: nothing was asked of Arrow, so there is
+            # nothing to back off from, and the moment the operator
+            # fills the field in the next call should try.
             return None, ('these credentials are not set: '
                           + ', '.join(missing)
                           + '. Enter them on this page — they are written to '
@@ -498,9 +532,20 @@ class _Setup:
             built = ArrowSession(account, segments.SegmentTable(
                 (raw.get('settings') or {}).get('SEGMENTS_EXTRA')))
         if not built.initialize():
+            self._refused = (self._clock(), built.last_error)
             return None, built.last_error
+        self._refused = None
         self._session = built
         return built, None
+
+    def forget(self):
+        """Drop the session and any remembered refusal.
+
+        Pressing Connect is the operator saying "try again now", and it
+        must never be answered out of a cooldown.
+        """
+        self._session = None
+        self._refused = None
 
 
 def _session(settings, snapshot):
