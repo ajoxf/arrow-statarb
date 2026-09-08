@@ -102,6 +102,31 @@ class Book:
                 if (pair_key is None or o.pair_key == pair_key)
                 and (o.is_working or not working_only)]
 
+    def is_our_order_id(self, broker_order_id):
+        """Did WE send this broker order id?
+
+        The only ownership evidence this venue offers that is a FACT
+        rather than an inference. A netted position carries no marker,
+        and there is no magic number — but an order id we were handed
+        when we sent an order is ours beyond argument.
+
+        Both places one can be held are searched: the ticket a resting
+        synthetic holds at the broker, and the order ticket on every
+        leg fill of every position, open or closed.
+        """
+        wanted = str(broker_order_id or '')
+        if not wanted:
+            return False
+        for order in self._orders.values():
+            if str(order.pending_ticket or '') == wanted:
+                return True
+        for position in self._positions.values():
+            for fill in (position.leg_a, position.leg_b):
+                if fill is not None and str(
+                        getattr(fill, 'order_ticket', '') or '') == wanted:
+                    return True
+        return False
+
     def order(self, order_id):
         return self._orders.get(order_id)
 

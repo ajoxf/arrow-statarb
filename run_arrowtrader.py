@@ -100,12 +100,24 @@ def run_engine(args, stop):
                         'will wait.')
         return False
 
-    session = ArrowSession(config.account, SegmentTable(
-        config.get('SEGMENTS_EXTRA')))
-    legs = make_legs([config.account.name], session)
-    store = Store(args.db)
-    engine = Coordinator(config, legs, status_path=args.status, store=store)
-    engine.start()
+    # STARTING UP IS ITS OWN FAILURE MODE, and it must not take the web
+    # server with it. A bad database path, a read-only directory, a
+    # broker that will not log in: every one of those used to raise out
+    # of here, out of `main`, and end the process — killing the daemon
+    # web thread, which is the ONLY place the operator could have read
+    # what went wrong. What they got was a traceback in a terminal they
+    # may not be looking at and no screen at all.
+    try:
+        session = ArrowSession(config.account, SegmentTable(
+            config.get('SEGMENTS_EXTRA')))
+        legs = make_legs([config.account.name], session)
+        store = Store(args.db)
+        engine = Coordinator(config, legs, status_path=args.status,
+                             store=store)
+        engine.start()
+    except Exception as error:                          # noqa: BLE001
+        logging.exception('the engine could not start: %s', error)
+        return False
 
     runner = CommandRunner(engine, args.commands, args.results)
     # PRIMED BEFORE THE FIRST DRAIN. Everything already in the file
@@ -133,6 +145,11 @@ def run_engine(args, stop):
                 engine.run_session_cutoff()
                 if time.time() - last_reconcile > reconcile_every:
                     engine.reconcile_if_due()
+                    # The broker's own trade book, into the journal.
+                    # Every charge figure in every report is read back
+                    # from it, so a journal nobody writes is a cost
+                    # model with no input.
+                    engine.journal()
                     last_reconcile = time.time()
                 engine.publish()
             except Exception as error:                  # noqa: BLE001

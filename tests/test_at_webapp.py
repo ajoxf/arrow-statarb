@@ -442,3 +442,68 @@ def test_MISSING_credentials_are_never_put_behind_a_cooldown(paths, monkeypatch)
         monkeypatch.setenv(key, 'set')
     body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
     assert body['ok'] is True, 'the next call after fixing it must try'
+
+
+# -- a command that cannot run says WHY ------------------------------------------
+
+def test_a_command_MISSING_A_FIELD_names_the_field(paths, tmp_path):
+    """`str(KeyError('pair'))` is `"'pair'"` — a quoted field name and
+    nothing else. It reached the operator as a toast reading `pair`,
+    naming neither the command nor what was wrong. Same fault as the
+    SDK's bare `KeyError: 'redirectUrl'`, and the same fix."""
+    from arrowtrader.commands import CommandRunner
+
+    class Nothing:
+        # A coordinator that WOULD take the click. The point is that
+        # the payload never gets far enough to reach it.
+        def click(self, *args, **kwargs):
+            raise AssertionError('a click with no pair must not be sent')
+
+    runner = CommandRunner(Nothing(), str(tmp_path / 'c.jsonl'),
+                           str(tmp_path / 'r.json'))
+    answer = runner.execute({'id': 'x', 'kind': 'click', 'payload': {}})
+    assert answer['ok'] is False
+    assert answer['error'] != "'pair'"
+    assert 'click' in answer['error'] and 'pair' in answer['error']
+    assert 'bug in the page' in answer['error']
+
+
+def test_a_setting_this_build_CANNOT_APPLY_is_refused_not_ignored(paths,
+                                                                  tmp_path):
+    """`ok: true, changed: []` said the change was made. A renamed
+    field, a typo, or a page newer than the engine is a setting the
+    operator watched turn green and which did nothing."""
+    from arrowtrader.commands import CommandRunner
+    from arrowtrader.config import TraderConfig
+
+    config = TraderConfig.from_raw({
+        'account': {'name': 'arrow'},
+        'pairs': {'K': {'leg_a': {'account': 'arrow', 'symbol': 'A'},
+                        'leg_b': {'account': 'arrow', 'symbol': 'B'}}},
+        'settings': {}})
+
+    class Engine:
+        pass
+
+    engine = Engine()
+    engine.config = config
+    runner = CommandRunner(engine, str(tmp_path / 'c.jsonl'),
+                           str(tmp_path / 'r.json'))
+
+    bad = runner.execute({'id': 'x', 'kind': 'set_pair', 'payload': {
+        'pair': 'K', 'fields': {'no_such_field': 3}}})
+    assert bad['data']['ok'] is False
+    assert 'no_such_field' in bad['data']['error']
+
+    # The control: a field it CAN set is applied and reported.
+    good = runner.execute({'id': 'y', 'kind': 'set_pair', 'payload': {
+        'pair': 'K', 'fields': {'rows': 40}}})
+    assert good['data']['ok'] is True
+    assert good['data']['changed'] == ['rows']
+    assert config.pairs['K'].rows == 40
+
+    # And a MIXED one applies what it can and says what it did not.
+    mixed = runner.execute({'id': 'z', 'kind': 'set_pair', 'payload': {
+        'pair': 'K', 'fields': {'rows': 12, 'nope': 1}}})
+    assert mixed['data']['changed'] == ['rows']
+    assert 'nope' in mixed['data']['error']

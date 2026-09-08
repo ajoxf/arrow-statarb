@@ -507,3 +507,143 @@ def test_LOCKING_the_ladder_pins_it_and_RECENTRING_lets_it_go(engine):
     freed = engine.snapshot()['pairs'][KEY]
     assert [line['level'] for line in freed['rows']] != before
     assert not any(line['is_anchor'] for line in freed['rows'])
+
+
+# -- the ladder's header ---------------------------------------------------------
+
+def test_the_FEED_LIGHT_actually_says_something(engine):
+    """`market.feed_badge` is read in two places on the screen — the
+    indicator on every ladder and the Feed column of the Market Grid —
+    and nothing ever wrote it. Both were permanently an em dash, so a
+    DEAD FEED and a QUIET MARKET looked identical, which is the single
+    most expensive thing a trading screen can fail to distinguish.
+    """
+    md = engine.market[KEY]
+    assert md['feed_badge'] is not None
+    # On the first observation nothing has been seen twice yet. That is
+    # not stale — a red light one second after startup is a light
+    # nobody believes by the end of the week.
+    assert md['feed_badge'] in ('warming up',) or \
+        md['feed_badge'].startswith('OK')
+
+
+def test_a_FROZEN_leg_turns_the_feed_light_and_the_ladder_says_which(engine):
+    """The control. A spread is only as good as its worse leg."""
+    from arrowtrader.spread import feed_badge
+    frozen = dict(engine.market[KEY], leg_a_quote_age_sec=9.0,
+                  leg_b_quote_age_sec=0.0)
+    assert feed_badge(frozen, 5.0) == 'stale 9.0s'
+    # ...and with the guard turned off it is not called stale.
+    assert feed_badge(frozen, 0).startswith('OK')
+
+
+def test_the_SESSION_STRIP_is_ours_and_says_so(engine):
+    """The exchange publishes a high, low and open for each CONTRACT
+    and nothing for the difference — and the difference of two highs is
+    not the high of the difference, because the legs reach their
+    extremes at different moments. So the range is ours, and the screen
+    says `ours` rather than borrowing the exchange's word for it."""
+    strip = engine.market[KEY]['session']
+    assert strip is not None
+    assert strip['ours'] is True
+    assert strip['high'] is not None and strip['low'] is not None
+    # Volume is per LEG and never added: one lot of the near month and
+    # one of the far are not two lots of anything.
+    assert 'volume_a' in strip and 'volume_b' in strip
+
+
+def test_the_session_HIGH_and_LOW_follow_what_was_actually_SEEN(engine):
+    first = engine.market[KEY]['session']
+    low_before = first['low']
+    engine.legs['arrow'].session._client.books['GOLD05FEB26F'] = (
+        75399.0, 75402.0, 75400.0)
+    engine.poll_once()
+    after = engine.market[KEY]['session']
+    assert after['low'] < low_before
+    assert after['high'] == first['high'], 'the high moved on a fall'
+
+
+def test_NET_CHANGE_is_NONE_when_the_legs_publish_no_session_open(engine):
+    """UNMEASURED IS NOT ZERO, and change-since-this-process-started is
+    a different number from change on the day. Printing one under the
+    other's label is the quiet substitution this system does not
+    make."""
+    md = engine.market[KEY]
+    # The fake publishes an Open, so there IS a real one.
+    assert md['session']['open'] is not None
+    assert md['net_change'] is not None
+    from arrowtrader.spread import SpreadSession
+    blind = SpreadSession().observe(KEY, md, {'open': None}, {'open': None})
+    assert blind['open'] is None
+    assert blind['net_change'] is None
+
+
+# -- the journal ------------------------------------------------------------------
+
+def test_the_JOURNAL_is_actually_WRITTEN(engine):
+    """`Store.record_fills` and `ArrowLeg.order_log` were both built and
+    never connected, so the Fills tab and every report drawn from it
+    were permanently empty — on a system whose whole cost model is
+    charges read back from the contract note."""
+    md = engine.market[KEY]
+    engine.click(KEY, 'BUY', md['long_spread'], quantity=1)
+    assert engine.journal() > 0
+    rows = engine.store.fills()
+    assert rows, 'nothing reached the fills table'
+    symbols = {row['symbol'] for row in rows}
+    assert {'GOLD05DEC25F', 'GOLD05FEB26F'} <= symbols
+
+
+def test_the_journal_records_HOW_ownership_was_decided_not_just_whether(engine):
+    """There is no magic number here and a netted position carries no
+    marker, so ownership is an INFERENCE. The report has to be able to
+    say which kind."""
+    md = engine.market[KEY]
+    engine.click(KEY, 'BUY', md['long_spread'], quantity=1)
+    engine.journal()
+    ours = [row for row in engine.store.fills() if row['is_ours']]
+    assert ours
+    assert all(row['ours_source'] for row in ours)
+
+
+def test_the_journal_records_the_SIDE_and_the_LOTS(engine):
+    """Two columns that came back blank on a live run.
+
+    Arrow answers `transactionType` where the store read `side`, so the
+    side column of the journal — on a report whose whole point is which
+    way a trade went — was empty. And the trade book carries no lot
+    size, so `lots` was blank too, on the unit the trader actually
+    thinks in: 1 lot, not 100 units.
+    """
+    md = engine.market[KEY]
+    engine.click(KEY, 'BUY', md['long_spread'], quantity=1)
+    engine.journal()
+    rows = {row['symbol']: row for row in engine.store.fills()}
+    near = rows['GOLD05DEC25F']
+    assert near['side'] in ('BUY', 'SELL')
+    assert near['units'] == 100
+    assert near['lots'] == 1, 'units were reported where lots belong'
+
+
+def test_an_UNKNOWN_lot_size_leaves_lots_BLANK_rather_than_reporting_units(
+        engine):
+    """The control. Read as 1 it would report 100 lots for one."""
+    engine.click(KEY, 'BUY', engine.market[KEY]['long_spread'], quantity=1)
+    engine.legs['arrow'].session.master = None
+    engine.journal()
+    rows = engine.store.fills()
+    assert rows
+    assert all(row['lots'] is None for row in rows)
+    assert all(row['units'] for row in rows), 'units must still be recorded'
+
+
+def test_a_leg_that_CANNOT_BE_READ_is_not_journalled_as_a_quiet_day(engine):
+    """None means unknown, never 'no activity'. A journal that recorded
+    a failed read as no trades would show a clean session on the day
+    the broker was unreachable."""
+    engine.click(KEY, 'BUY', engine.market[KEY]['long_spread'], quantity=1)
+    engine.journal()
+    before = len(engine.store.fills())
+    engine.legs['arrow'].order_log = lambda hours=24: None
+    assert engine.journal() == 0
+    assert len(engine.store.fills()) == before

@@ -622,3 +622,40 @@ def test_a_segment_that_is_NOT_ready_is_SHOWN_disabled_not_hidden(panels):
     assert all('not ready' in row['t'] for row in off)
     # ...and a disabled one is never the default.
     assert tab.input_value('.pair-leg[data-leg="a"] .p-segment') == 'mcx_fo'
+
+
+def test_a_HANDLER_refusal_reaches_the_screen(panels):
+    """The command RAN — so the envelope says ok — and the handler
+    inside it said no.
+
+    `no such pair`, `that order is already gone`, `nothing unclaimed on
+    GOLD05DEC25F`: eight refusals across the engine, all shaped
+    `{'ok': False, 'error': ...}` inside `result.data`, and nothing
+    read `data.ok`. Every one was silent — the operator clicked, no
+    toast appeared, and nothing on the screen changed either, which is
+    indistinguishable from the click not registering at all.
+    """
+    tab, _errors, _responses = panels
+    # Read the SCREEN, not a stubbed function: the module toasts
+    # through its own closure, so a stub on the exported name would
+    # pass while the operator still saw nothing.
+    def outcome(payload):
+        return tab.evaluate(
+            """(payload) => {
+              document.querySelectorAll('.toast').forEach(n => n.remove());
+              window.ArrowTrader.toastOutcome(payload);
+              return Array.from(document.querySelectorAll('.toast'))
+                          .map(n => n.textContent);
+            }""", payload)
+
+    refused = outcome({'ok': True, 'data': {'ok': False,
+                                            'error': 'no such pair'}})
+    assert refused and 'no such pair' in refused[0]
+
+    partial = outcome({'ok': True, 'data': {
+        'ok': True, 'changed': ['rows'],
+        'error': 'these fields were not applied: nope'}})
+    assert partial and 'nope' in partial[0]
+
+    # The control: an ordinary success does not put a refusal on screen.
+    assert outcome({'ok': True, 'data': {'ok': True}}) == []

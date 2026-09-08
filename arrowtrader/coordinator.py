@@ -39,7 +39,8 @@ from .models import OrderType, SpreadSide, TimeInForce
 from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
-                     compute_spread, executable_spread, stale_quote)
+                     SpreadSession, compute_spread, executable_spread,
+                     feed_badge, stale_quote)
 
 
 #: How long a dead order stays on the ladder with its reason. A rejected
@@ -81,6 +82,7 @@ class Coordinator:
         self._offset = None
         self._offset_at = 0.0
         self._loop_interval = None
+        self.sessions = SpreadSession()
         self._ladder_locked = {}
         self._ladder_anchor = {}
         self._stop = threading.Event()
@@ -277,6 +279,19 @@ class Coordinator:
             pair.key, LevelSigma(self.config.get('SIGMA_WINDOW_QUOTES', 600)))
         sigma.observe(md)
         reasons = []
+        # THE BETA'S OWN PROVENANCE, checked rather than merely stored.
+        # It defines every price on this ladder, so a beta derived for
+        # OTHER contracts is not a warning about a setting — it is a
+        # warning that every number on the screen means something else,
+        # and it withholds orders.
+        #
+        # A MISSING stamp is a different thing: an older config predates
+        # the field, and refusing to trade every pair on an upgrade
+        # would be a guard doing far more harm than the risk it covers.
+        # That one is said on the screen and blocks nothing.
+        md['hedge_ratio_note'] = pair.hedge_ratio_note()
+        if pair.stale_hedge_ratio() is True:
+            reasons.append(md['hedge_ratio_note'])
         stale = stale_quote(md, pair.max_quote_age_sec
                             if pair.max_quote_age_sec is not None
                             else self.config.get('MAX_QUOTE_AGE_SEC'))
@@ -294,6 +309,22 @@ class Coordinator:
         md['guard_reason'] = reasons[0] if reasons else None
         md['guard_reasons'] = reasons
         md['tender'] = self._tender(pair)
+        # THE LADDER'S HEADER. Three fields the screen has always read
+        # and nothing ever wrote, so the feed light, the change on the
+        # day and the H/L/O strip were permanently em dashes — and a
+        # dead feed looked exactly like a quiet market, which is the
+        # single most expensive thing a trading screen can fail to
+        # distinguish.
+        max_age = (pair.max_quote_age_sec
+                   if pair.max_quote_age_sec is not None
+                   else self.config.get('MAX_QUOTE_AGE_SEC'))
+        md['feed_badge'] = feed_badge(md, max_age)
+        strip = self.sessions.observe(
+            pair.key, md,
+            runner_a.session_stats(pair.symbol_a),
+            runner_b.session_stats(pair.symbol_b))
+        md['session'] = strip
+        md['net_change'] = (strip or {}).get('net_change')
         return md
 
     def _tender(self, pair):
@@ -545,6 +576,77 @@ class Coordinator:
     def reconcile_if_due(self):
         return self.reconciler.run()
 
+    # -- the journal ---------------------------------------------------------------
+
+    #: The prefix `executor` stamps on every order it sends. It is the
+    #: strongest ownership evidence this venue offers: there is no
+    #: magic number, and a netted position carries no marker at all.
+    OUR_TAG = 'LADDER'
+
+    def journal(self):
+        """Write what the BROKER says happened into the fills table.
+
+        `Store.record_fills` and `ArrowLeg.order_log` were both built
+        and never connected to each other, so the Fills tab and every
+        report drawn from it were permanently empty — on a system whose
+        whole cost model is charges read back from the contract note.
+
+        Both our dealing and the trader's own go in: a fill on the
+        account is a fill on the account. What is INFERRED is which is
+        which, and `record_fills` stores how each answer was reached
+        rather than presenting a guess as a fact.
+        """
+        if self.store is None:
+            return 0
+        by_symbol = {}
+        for key, pair in self.config.pairs.items():
+            by_symbol[pair.symbol_a] = (key, 'a')
+            by_symbol[pair.symbol_b] = (key, 'b')
+
+        def resolve(symbol):
+            return by_symbol.get(str(symbol or '').upper(),
+                                 by_symbol.get(symbol, (None, None)))
+
+        def ours(order_id, tag):
+            # An order id we sent is the one thing we KNOW.
+            if order_id and self.book.is_our_order_id(order_id):
+                return True, 'we sent this order id'
+            if tag and str(tag).startswith(self.OUR_TAG):
+                return True, 'our own tag on the order'
+            if tag:
+                return False, "a tag that is not ours"
+            # NOT False. On a shared account an untagged fill is the
+            # trader's own or ours from a previous run, and saying
+            # "theirs" would put our own charges in their column.
+            return None, 'nothing on the fill says whose it is'
+
+        def with_lot_size(row):
+            """The trade book has no lot size, and LOTS is the unit the
+            trader thinks in — 1 lot, not 100 units. The master has it,
+            so it is added here rather than left blank in the report."""
+            master = getattr(self.legs[name].session, 'master', None)
+            symbol = (row.get('tradingSymbol') or row.get('symbol')
+                      or row.get('TradingSymbol'))
+            size = master.lot_size(symbol) if master and symbol else None
+            # NOT 1. An unknown lot size leaves `lots` blank rather
+            # than reporting units as though they were lots.
+            return dict(row, lot_size=size) if size else row
+
+        written = 0
+        for name, leg in self.legs.items():
+            rows = leg.order_log()
+            if rows is None:
+                # UNKNOWN, NOT "no activity". A journal that recorded a
+                # failed read as a quiet day would show a clean session
+                # on the day the broker was unreachable.
+                logging.info('journal: %s could not be read — skipped, NOT '
+                             'recorded as no activity', name)
+                continue
+            written += self.store.record_fills(
+                name, [with_lot_size(row) for row in rows],
+                resolve=resolve, ours=ours)
+        return written
+
     def dark_accounts(self):
         """Legs that are not answering. NAMED, not omitted.
 
@@ -640,7 +742,14 @@ class Coordinator:
                 'ladder_locked': bool(self._ladder_locked.get(key)),
                 'short_spread': (md or {}).get('short_spread'),
                 'long_spread': (md or {}).get('long_spread'),
-                'errors': self.errors.get(key) or [],
+                # The blocking ones, plus the advisories that must be
+                # READ even though they stop nothing.
+                'errors': ((self.errors.get(key) or [])
+                           + ([(md or {}).get('hedge_ratio_note')]
+                              if (md or {}).get('hedge_ratio_note')
+                              and (md or {}).get('hedge_ratio_note')
+                              not in ((md or {}).get('guard_reasons') or ())
+                              else [])),
                 'orders': [order.to_dict()
                            for order in self.book.orders(key)],
                 'dead_orders': [

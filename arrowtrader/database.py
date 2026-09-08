@@ -247,11 +247,14 @@ class Store:
                 tag = row.get('tag')
                 is_ours, source = (ours(order_id, tag) if ours
                                    else (None, 'not attributed'))
-                symbol = row.get('symbol') or row.get('tradingSymbol')
+                symbol = _field(row, 'symbol', 'tradingSymbol',
+                                'TradingSymbol', 'tsym')
                 pair_key, leg = (resolve(symbol) if resolve
                                  else (None, None))
-                units = _number(row.get('units') or row.get('quantity'))
-                lot_size = _number(row.get('lot_size'))
+                units = _number(_field(row, 'units', 'quantity', 'Quantity',
+                                       'filledQty', 'fillshares', 'qty'))
+                lot_size = _number(_field(row, 'lot_size', 'LotSize',
+                                          'lotSize'))
                 connection.execute(
                     """INSERT OR REPLACE INTO fills
                        (trade_id, account, order_id, symbol, segment,
@@ -265,12 +268,22 @@ class Store:
                                         ?),
                                ?,?,?,?,?)""",
                     (trade_id, account, order_id, symbol,
-                     row.get('segment'), row.get('product'),
-                     row.get('side'), units,
+                     _field(row, 'segment', 'exchange', 'Exchange', 'exch'),
+                     _field(row, 'product', 'Product', 'prd', 'productType'),
+                     # THE BROKER'S OWN SPELLING. Arrow answers
+                     # `transactionType`, NEST-derived builds answer
+                     # `trantype`, and reading one exact key left the
+                     # side column of the journal blank — on a report
+                     # whose whole point is which way a trade went.
+                     _field(row, 'side', 'transactionType',
+                            'TransactionType', 'trantype', 'buyOrSell'),
+                     units,
                      (units / lot_size) if (units and lot_size) else None,
-                     _number(row.get('price') or row.get('avgPrice')),
-                     _number(row.get('charges')),
-                     _number(row.get('exchange_time')),
+                     _number(_field(row, 'avgPrice', 'averagePrice',
+                                    'price', 'Price', 'fillprice')),
+                     _number(_field(row, 'charges', 'Charges', 'brokerage')),
+                     _number(_field(row, 'exchange_time', 'exchangeTime',
+                                    'orderTime', 'fillTime', 'norentm')),
                      account, trade_id, now,
                      None if is_ours is None else int(bool(is_ours)),
                      source, tag, pair_key, leg))
@@ -350,6 +363,24 @@ class Store:
                 f'SELECT * FROM events {where} ORDER BY at DESC LIMIT ?',
                 params).fetchall()
         return [dict(row, detail=_json(row['detail'])) for row in rows]
+
+
+def _field(row, *names):
+    """First present value under any of `names`, case-blind.
+
+    The same tolerance `instruments.field` gives the master, for the
+    same reason: Arrow's own responses use TitleCase, camelCase and
+    snake_case in the same payload, and reading one exact spelling
+    leaves a column of the journal silently blank.
+    """
+    if not isinstance(row, dict):
+        return None
+    low = {str(key).lower(): value for key, value in row.items()}
+    for name in names:
+        value = low.get(str(name).lower())
+        if value not in (None, ''):
+            return value
+    return None
 
 
 def _number(value):

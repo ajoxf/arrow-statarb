@@ -326,3 +326,98 @@ class LevelSigma:
         mean = sum(self._values) / n
         variance = sum((v - mean) ** 2 for v in self._values) / (n - 1)
         return variance ** 0.5
+
+
+class SpreadSession:
+    """The ladder's H / L / O strip, for an instrument that has none.
+
+    An exchange publishes a session high, low and open for
+    GOLD05DEC25F. It publishes nothing for the difference between two
+    contracts, and the difference of the two highs is NOT the high of
+    the difference — the legs reach their extremes at different
+    moments, so subtracting them gives a range wider than anything that
+    ever traded. A ladder judged against that range is a ladder judged
+    against prices nobody made.
+
+    So the range is OURS: the highest and lowest spread this process
+    has actually observed, and the screen says `ours` rather than
+    borrowing the exchange's word for it.
+
+    The OPEN is different, and better. Both legs publish one, and the
+    open of the spread IS `open_B - beta x open_A` — one moment, both
+    legs, exactly the arithmetic the spread is. Where both legs give it
+    the open is the exchange's, `net_change` is the real change on the
+    day, and where either does not, `net_change` is None. Change since
+    this process happened to start is a different number, and printing
+    it under the same label is the kind of quiet substitution this
+    system does not make.
+    """
+
+    def __init__(self):
+        self._seen = {}
+
+    def observe(self, key, md, stats_a=None, stats_b=None):
+        """Fold one snapshot in, and return the strip for it."""
+        if not md or md.get('spread') is None:
+            return None
+        beta = float(md.get('hedge_ratio') or 1.0)
+        spread = float(md['spread'])
+        state = self._seen.get(key)
+        if state is None:
+            state = self._seen[key] = {'high': spread, 'low': spread,
+                                       'first': spread}
+        state['high'] = max(state['high'], spread)
+        state['low'] = min(state['low'], spread)
+
+        open_a = (stats_a or {}).get('open')
+        open_b = (stats_b or {}).get('open')
+        exchange_open = (float(open_b) - beta * float(open_a)
+                         if open_a not in (None, 0) and open_b not in (None, 0)
+                         else None)
+        return {
+            'open': exchange_open,
+            #: UNMEASURED IS NOT ZERO: no session open from the legs
+            #: means no change on the day, not a change of nothing.
+            'net_change': (None if exchange_open is None
+                           else spread - exchange_open),
+            'high': state['high'],
+            'low': state['low'],
+            #: Volume is per LEG and never added: one lot of the near
+            #: month and one of the far are not two lots of anything.
+            'volume_a': (stats_a or {}).get('volume'),
+            'volume_b': (stats_b or {}).get('volume'),
+            #: The range is ours, and the screen says so.
+            'ours': True,
+        }
+
+    def forget(self, key):
+        self._seen.pop(key, None)
+
+
+def feed_badge(md, max_age_sec=None):
+    """One phrase for "is this feed alive", or None.
+
+    The ladder has an indicator for it and nothing ever filled it in,
+    so a dead feed and a quiet market looked identical — which is the
+    single most expensive thing a trading screen can fail to
+    distinguish.
+
+    The pair is only as good as its WORSE leg: a spread is a
+    difference, so one frozen quote makes the whole number fictitious
+    while the other leg ticks perfectly.
+    """
+    if not md:
+        return None
+    ages = [md.get('leg_a_quote_age_sec'), md.get('leg_b_quote_age_sec')]
+    if all(age is None for age in ages):
+        # Nothing observed twice yet. NOT "stale" — on the first poll
+        # every feed looks frozen, and a red badge a second after
+        # startup is a badge nobody believes by the end of the week.
+        return 'warming up'
+    worst = max(age for age in ages if age is not None)
+    limit = float(max_age_sec or 0)
+    if limit > 0 and worst > limit:
+        return f'stale {worst:.1f}s'
+    if worst < 1.0:
+        return f'OK {worst * 1000:.0f}ms'
+    return f'OK {worst:.1f}s'

@@ -110,6 +110,18 @@ class CommandRunner:
             if handler is None:
                 return self._result(command, False, f'unknown command: {kind}')
             return self._result(command, True, None, handler(payload))
+        except KeyError as error:
+            # `str(KeyError('pair'))` is `"'pair'"` — a quoted field
+            # name and nothing else, which reached the screen as a
+            # toast reading 'pair'. Same fault as the SDK's bare
+            # `KeyError: 'redirectUrl'`, and the same fix: say what was
+            # missing and from what.
+            logging.exception('command %s is missing a field: %s',
+                              kind, error)
+            return self._result(
+                command, False,
+                f'the {kind} command arrived without {error} — this is a '
+                f'bug in the page that sent it, not something to retry')
         except Exception as error:              # never die on a command
             logging.exception('command %s failed: %s', kind, error)
             return self._result(command, False, str(error))
@@ -297,11 +309,24 @@ class CommandRunner:
         pair = self.coordinator.config.pairs.get(payload['pair'])
         if pair is None:
             return {'ok': False, 'error': 'no such pair'}
-        changed = []
+        changed, refused = [], []
         for name, value in (payload.get('fields') or {}).items():
             coerce = self.EDITABLE.get(name)
             if coerce is None:
+                # NOT SILENTLY. A field this build cannot set is a
+                # setting the operator watched turn green and which did
+                # nothing — a renamed field, a typo, a page newer than
+                # the engine. `ok: true, changed: []` said the change
+                # was made.
+                refused.append(name)
                 continue
             setattr(pair, name, coerce(value))
             changed.append(name)
-        return {'ok': True, 'changed': changed}
+        if refused and not changed:
+            return {'ok': False, 'changed': [],
+                    'error': ('this build cannot set ' + ', '.join(refused)
+                              + ' on a pair — nothing was changed')}
+        return {'ok': True, 'changed': changed,
+                'refused': refused,
+                'error': (('these fields were not applied: '
+                           + ', '.join(refused)) if refused else None)}

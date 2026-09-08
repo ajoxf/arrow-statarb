@@ -444,6 +444,39 @@ class PairConfig:
     def effective_increment(self):
         return self.increment or self.derived_increment()
 
+    def stale_hedge_ratio(self):
+        """Was this beta computed for THESE two contracts?
+
+        `hedge_ratio_for` stamps beta with the pair it was derived for,
+        and until now nothing read the stamp — it reached the screen as
+        a tooltip and no further. A calendar is re-pointed at next
+        month's contracts every few weeks, and a beta carried over from
+        the old pair silently redefines the spread: every price on the
+        ladder shifts, every level means something else, and the number
+        in the beta column looks exactly as it did yesterday.
+
+        None means the stamp is missing, which is not the same as
+        wrong: an old config predates the field. Both are reported,
+        differently.
+        """
+        if not self.hedge_ratio_for:
+            return None
+        return str(self.hedge_ratio_for) != str(self.key)
+
+    def hedge_ratio_note(self):
+        """The one sentence the screen shows about a suspect beta."""
+        stale = self.stale_hedge_ratio()
+        if stale is None:
+            return (f'beta {self.hedge_ratio:g} is not stamped with the '
+                    f'contracts it was computed for — press Read both legs '
+                    f'on this pair to derive it, or confirm it by hand.')
+        if stale:
+            return (f'beta {self.hedge_ratio:g} was computed for '
+                    f'{self.hedge_ratio_for}, NOT for {self.key}. Every '
+                    f'price on this ladder is defined by it. Press Read '
+                    f'both legs to derive it for these contracts.')
+        return None
+
     def expects_carry(self):
         """Should this pair HAVE a fair basis?
 

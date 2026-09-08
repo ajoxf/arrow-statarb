@@ -258,7 +258,18 @@
     if (result && result.ok === false) {
       return toast(result.error || 'the engine refused that');
     }
+    // A HANDLER'S OWN REFUSAL. The command ran — so the envelope says
+    // ok — and the handler inside it said no: 'no such pair', 'that
+    // order is already gone', 'nothing unclaimed on GOLD05DEC25F'.
+    // Nothing read `data.ok`, so every one of those was SILENT: the
+    // operator clicked, no toast appeared, and nothing on the screen
+    // changed either.
+    if (data.ok === false) {
+      return toast(data.error || data.reason || 'the engine refused that');
+    }
     if (data.refused) { return toast(data.reason || 'refused'); }
+    // A partial success still has to say what it could not do.
+    if (data.error) { return toast(data.error); }
     if (data.reason) { return toast(data.reason, 'ok'); }
   }
 
