@@ -5,6 +5,8 @@ what must happen when that is all there is: NOT a plausible ladder
 around a number nobody can trade at.
 """
 
+import pytest
+
 from arrowtrader import quotes
 from arrowtrader.spread import compute_spread
 
@@ -147,3 +149,85 @@ def test_a_nested_depth_block_reads_too():
 def test_a_non_dict_payload_is_none_not_an_exception():
     assert quotes.normalise_quote(None) is None
     assert quotes.normalise_quote([1, 2, 3]) is None
+
+
+# -- the stream tick is a different shape from the REST quote -----------------
+
+def _full_mode_tick():
+    """A `MarketTick` as pyarrow-client's DataStream actually builds one.
+
+    Note what is NOT here: `BestBidPrice`, `BestAskPrice`, or any other
+    scalar touch. The dataclass carries `bids` and `asks` — ten depth
+    levels, five a side, prices in PAISE — and nothing else priced.
+    """
+    return {
+        'token': 218124, 'mode': 'full', 'ltp': 12153400,
+        'open': 12100000, 'high': 12200000, 'low': 12050000,
+        'close': 12120000, 'volume': 4321, 'ltq': 2, 'oi': 900,
+        'upper_limit': 12500000, 'lower_limit': 11800000,
+        'bids': [{'price': 12153000 - 100 * n, 'quantity': 3 + n,
+                  'orders': 1} for n in range(5)],
+        'asks': [{'price': 12153500 + 100 * n, 'quantity': 2 + n,
+                  'orders': 1} for n in range(5)],
+    }
+
+
+def test_a_STREAM_tick_prices_a_touch_from_its_own_book():
+    """The bug: every streamed tick read as not executable.
+
+    Arrow's REST quote answers with BestBidPrice/BestAskPrice. Its
+    WebSocket tick has neither — only the book. Reading the scalars
+    alone gave bid None, ask None and executable False on a contract
+    whose five levels a side were right there in the same payload, so
+    the ladder drew no touch and the spread priced nothing.
+    """
+    from arrowtrader.quotes import PAISE, normalise_quote
+    tick = normalise_quote(_full_mode_tick(), scale=PAISE)
+    assert tick['bid'] == pytest.approx(121530.0)
+    assert tick['ask'] == pytest.approx(121535.0)
+    assert tick['executable'] is True
+    assert tick['bid_size'] == 3
+    assert tick['ask_size'] == 2
+
+
+def test_a_SCALAR_best_price_still_WINS_over_the_book():
+    """The control. Where the broker states the touch, that is the
+    touch — the book is only consulted when it does not."""
+    from arrowtrader.quotes import PAISE, normalise_quote
+    payload = dict(_full_mode_tick())
+    payload['BestBidPrice'] = 12100000
+    payload['BestAskPrice'] = 12160000
+    tick = normalise_quote(payload, scale=PAISE)
+    assert tick['bid'] == pytest.approx(121000.0)
+    assert tick['ask'] == pytest.approx(121600.0)
+
+
+def test_ONE_SIDE_of_the_book_prices_ONLY_THAT_SIDE():
+    """A MISSING SIDE STAYS MISSING.
+
+    Reading the touch off the book is not the forbidden backfill —
+    that is filling an absent side from `last`, which invents a price
+    nobody is showing. Each side is read from its OWN levels, and a
+    side with none stays None however loudly the other side quotes.
+    """
+    from arrowtrader.quotes import PAISE, normalise_quote
+    payload = dict(_full_mode_tick())
+    payload['asks'] = []
+    tick = normalise_quote(payload, scale=PAISE)
+    assert tick['bid'] == pytest.approx(121530.0)
+    assert tick['ask'] is None
+    assert tick['executable'] is False
+    # ...and never from the last trade, which is sitting right there.
+    assert tick['last'] == pytest.approx(121534.0)
+
+
+def test_an_LTP_mode_tick_is_STILL_not_executable():
+    """The degraded feed, unchanged. A tick with a last trade and no
+    book cannot price an order, and the ladder must say so rather than
+    draw a touch at the last print."""
+    from arrowtrader.quotes import PAISE, normalise_quote
+    tick = normalise_quote({'token': 218124, 'mode': 'ltp',
+                            'ltp': 12153400}, scale=PAISE)
+    assert tick['last'] == pytest.approx(121534.0)
+    assert tick['bid'] is None and tick['ask'] is None
+    assert tick['executable'] is False

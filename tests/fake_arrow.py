@@ -66,9 +66,19 @@ class QuoteMode(enum.Enum):
 
 
 class DataMode(enum.Enum):
-    LTP = 'LTP'
-    QUOTE = 'QUOTE'
-    DEPTH = 'DEPTH'
+    """pyarrow-client 1.8.0's streaming modes, exactly.
+
+    THERE IS NO `DEPTH`. This fake invented one, and the broker asked
+    for it first — so every test streamed in a mode the live SDK does
+    not have, and the mode production would actually get was the one
+    nothing exercised. FULL is the only mode whose packet carries the
+    book: ltp=13 bytes, ltpc=17, quote=93, full=249.
+    """
+
+    LTP = 'ltp'
+    LTPC = 'ltpc'
+    QUOTE = 'quote'
+    FULL = 'full'
 
 
 #: MCX contracts, with the two shapes that matter: a calendar (GOLD
@@ -257,10 +267,17 @@ class FakeArrowClient:
 
     # -- orders -----------------------------------------------------------
 
-    def place_order(self, exchange=None, symbol=None, quantity=None,
-                    product=None, order_type=None, variety=None,
-                    transaction_type=None, price=None, validity=None,
-                    mpp=False, **extra):
+    #: pyarrow-client 1.8.0's OWN signature, argument for argument.
+    #:
+    #: `disclosed_quantity` has no default there, and `remarks` is the
+    #: only free-text field. A fake that took **kwargs for everything
+    #: accepted a call the real SDK refuses with a TypeError before it
+    #: reaches the wire — which is what "no orders placed" looked like.
+    def place_order(self, exchange, symbol, quantity, disclosed_quantity,
+                    product, order_type, variety, transaction_type, price,
+                    validity, remarks=None, mpp=False, trigger_price=None):
+        extra = {'remarks': remarks, 'trigger_price': trigger_price,
+                 'disclosed_quantity': disclosed_quantity}
         if not self.logged_in:
             raise Rejected('Invalid session token')
         if self.reject_next:
@@ -313,7 +330,12 @@ class FakeArrowClient:
             'avgPrice': fill_price or 0.0,
             'tag': extra.get('tag') or extra.get('remarks'),
         }
-        self.placed.append(dict(self.orders[order_id], mpp=mpp))
+        # The order as the SDK was CALLED, not only as the book holds
+        # it: a test about the wire has to be able to see the wire.
+        self.placed.append(dict(self.orders[order_id], mpp=mpp,
+                                disclosed_quantity=disclosed_quantity,
+                                remarks=remarks,
+                                trigger_price=trigger_price))
         if not resting:
             self._book(symbol, self.orders[order_id]['product'],
                        int(quantity) if buying else -int(quantity),

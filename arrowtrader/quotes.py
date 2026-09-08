@@ -79,6 +79,24 @@ def normalise_quote(raw, scale=RUPEES, clock=time_mod.time):
                         'lastTradedPrice', 'last_traded_price'), scale)
     stamp = field(raw, 'ExchFeedTime', 'feedTime', 'timestamp', 'time', 'ft')
     depth = normalise_depth(raw, scale=scale)
+    # THE STREAM CARRIES NO SCALAR BEST BID OR ASK. Arrow's REST quote
+    # answers with `BestBidPrice`/`BestAskPrice`; its WebSocket tick is
+    # a `MarketTick`, and that dataclass has `bids` and `asks` — ten
+    # depth levels, five a side — and no best-price field at all. Read
+    # only the scalars and every streamed tick comes back with bid
+    # None, ask None and `executable` False: the ladder draws no touch,
+    # for a contract whose book is right there in the same payload.
+    #
+    # The top of the book IS the best bid and the best ask. This is not
+    # the forbidden backfill — that is filling a MISSING SIDE from
+    # `last`, which invents a price nobody is showing. Each side here is
+    # read from its OWN side of the book, and a side with no levels
+    # stays None.
+    if depth:
+        if bid is None:
+            bid = _best_of(depth, 'bid')
+        if ask is None:
+            ask = _best_of(depth, 'ask')
     return {
         # A MISSING SIDE STAYS MISSING. Never backfilled from `last`.
         'bid': bid,
@@ -101,6 +119,19 @@ def normalise_quote(raw, scale=RUPEES, clock=time_mod.time):
         #: touch from, however recent it is.
         'executable': bid is not None and ask is not None,
     }
+
+
+def _best_of(depth, side):
+    """The touch on one side of a normalised book, or None.
+
+    `normalise_depth` has already sorted: bids descend, asks ascend, so
+    the first level of a side is its best. Each side is read from
+    itself — a book with bids and no asks yields a bid and no ask.
+    """
+    for level in depth:
+        if level['type'] == side:
+            return level['price']
+    return None
 
 
 def _best_ask_size(depth):

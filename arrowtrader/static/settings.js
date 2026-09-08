@@ -507,7 +507,8 @@
   }
 
   function legPickerHtml(leg, draft) {
-    var picker = local.picker[leg] || {};
+    var picker = local.picker[leg] || (local.picker[leg] = {});
+    if (!picker.segment) { picker.segment = defaultSegment(); }
     var html = '<div class="pair-leg" data-leg="' + leg + '">' +
       '<div class="leg-head leg-' + leg + '">Leg ' + leg.toUpperCase() +
       '</div>';
@@ -580,12 +581,48 @@
     return html;
   }
 
+  //: The segment a new leg starts on, in preference order.
+  //:
+  //: MCX first, because MCX is the product. Anything but a deliberate
+  //: choice here is decided by whatever the server happened to list
+  //: first — and Flask SORTS a dict's keys before writing JSON, so
+  //: `bse_cm` arrived first, the picker selected BSE cash, and a
+  //: search for CRUDEOILSEP26 correctly found nothing in the BSE cash
+  //: segment. That is the whole of "the instruments are not loading".
+  var PREFERRED_SEGMENT = 'mcx_fo';
+
+  function segmentList() {
+    var body = local.segments || {};
+    var found = body.segments || {};
+    // The server's order, not the JSON's. Keys of an object are only
+    // an accident of serialisation.
+    var order = body.order || Object.keys(found);
+    return order.filter(function (key) { return found[key]; })
+      .map(function (key) { return found[key]; });
+  }
+
+  function defaultSegment() {
+    var ready = segmentList().filter(function (row) { return row.ready; });
+    for (var i = 0; i < ready.length; i++) {
+      if (ready[i].key === PREFERRED_SEGMENT) { return PREFERRED_SEGMENT; }
+    }
+    return ready.length ? ready[0].key : PREFERRED_SEGMENT;
+  }
+
   function segmentOptions(chosen) {
-    var found = (local.segments && local.segments.segments) || {};
+    var rows = segmentList();
     var html = '';
-    Object.keys(found).forEach(function (key) {
-      if (!found[key].ready) { return; }
-      html += option(key, found[key].label, chosen);
+    rows.forEach(function (row) {
+      // A segment that is NOT ready is shown, disabled, with the
+      // reason. Hiding it made MCX simply absent from the list, which
+      // reads as "this terminal does not do MCX" rather than "this
+      // account is not enabled for it" — two different problems with
+      // two different fixes, and the page has the answer.
+      html += '<option value="' + esc(row.key) + '"' +
+        (row.ready ? '' : ' disabled') +
+        (String(chosen) === String(row.key) ? ' selected' : '') + '>' +
+        esc(row.label) + (row.ready ? '' : ' \u2014 not ready') +
+        '</option>';
     });
     return html || option('mcx_fo', 'MCX futures', chosen);
   }

@@ -295,9 +295,21 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         table = segments.SegmentTable()
         if built is None:
             return jsonify({'ok': False, 'error': error,
-                            'segments': {}}), 200
-        return jsonify({'ok': True, 'segments': segments.available_segments(
-            table, built.master.exch_segs, built.sdk_exchanges())})
+                            'segments': {},
+                            'order': [segment.key for segment in table]}), 200
+        found = segments.available_segments(
+            table, built.master.exch_segs, built.sdk_exchanges())
+        return jsonify({
+            'ok': True,
+            'segments': found,
+            # THE ORDER IS DATA. Flask sorts a dict's keys before it
+            # writes JSON, so the segment table's own order — MCX
+            # first, because MCX is the product — arrives at the
+            # browser as bse_cm, bse_fo, mcx_fo, nse_cm, nse_fo. The
+            # picker defaulted to the first one it was handed and the
+            # operator searched BSE cash for a commodity contract.
+            'order': [segment.key for segment in table],
+        })
 
     @app.get('/api/find')
     def api_find():

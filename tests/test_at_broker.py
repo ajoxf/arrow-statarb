@@ -205,6 +205,69 @@ def test_a_broker_with_NO_such_route_still_connects(arrow_sdk, monkeypatch):
     assert '/mcx' not in built.master_sources
 
 
+def test_an_order_carries_DISCLOSED_QUANTITY(session):
+    """It is a REQUIRED argument with no default in the SDK.
+
+    Leaving it out is a TypeError raised inside `place_order` before
+    the call reaches the wire — so every order failed, and what the
+    operator saw where the broker's words belong was
+    `place_order() missing 1 required positional argument`. Zero means
+    the whole order is visible, which is what a spread leg wants: an
+    iceberg leg fills slower than the leg it hedges, and a hedge that
+    fills at two different speeds is not a hedge.
+    """
+    session.send_market_order('GOLD05DEC25F', 'BUY', 100)
+    sent = session._client.placed[-1]
+    assert sent['disclosed_quantity'] == 0
+
+
+def test_the_tag_field_is_read_from_the_SIGNATURE_not_guessed_at(session):
+    """Trying each spelling and catching TypeError looks equivalent and
+    is not: a MISSING REQUIRED argument raises the same TypeError as an
+    unknown keyword. The loop swallowed a real signature error once per
+    candidate name and reported the last one — which is how a missing
+    `disclosed_quantity` surfaced as a tag problem."""
+    session.send_market_order('GOLD05DEC25F', 'BUY', 100, comment='AT-1')
+    sent = session._client.placed[-1]
+    # `remarks` is what pyarrow-client 1.8.0 actually takes.
+    assert sent['remarks'] == 'AT-1'
+
+
+def test_a_build_with_NO_tag_field_still_places_the_order(arrow_sdk,
+                                                          monkeypatch):
+    """The control. A tag scopes our own PENDING orders for the sweep;
+    it is not worth failing an order over."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+
+    def untagged(self, exchange, symbol, quantity, disclosed_quantity,
+                 product, order_type, variety, transaction_type, price,
+                 validity, mpp=False):
+        self.placed.append({'symbol': symbol, 'quantity': quantity})
+        return 'ORDER-NO-TAG'
+
+    monkeypatch.setattr(F.FakeArrowClient, 'place_order', untagged)
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    result = built.send_market_order('GOLD05DEC25F', 'BUY', 100,
+                                     comment='AT-1')
+    assert built._client.placed[-1]['symbol'] == 'GOLD05DEC25F'
+    assert result.ticket == 'ORDER-NO-TAG'
+
+
+def test_the_feed_is_asked_for_FULL_because_that_is_where_the_BOOK_is(session):
+    """The SDK's modes are ltp (13 bytes), ltpc (17), quote (93) and
+    full (249). The five levels a side live in the last 140 bytes of
+    the full packet ALONE — QUOTE carries total buy and sell quantity
+    and no prices, so a ladder built on it has no touch at all.
+
+    There is no DEPTH mode. The test fake invented one and the broker
+    asked for it first, so every test streamed in a mode the live SDK
+    does not have.
+    """
+    assert session._data_mode() is F.DataMode.FULL
+
+
 def test_a_six_digit_totp_is_refused_with_the_actual_fix(arrow_sdk):
     """The seed, not the code. It is the mistake everybody makes."""
     from arrowtrader.broker import ArrowSession

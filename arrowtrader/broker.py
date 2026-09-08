@@ -58,6 +58,11 @@ MARKET_RESOLVE_SEC = 5.0
 FILL_POLL_SEC = 0.2
 
 
+#: "Not asked yet", which is not None — None is a real answer meaning
+#: this build takes no tag at all.
+_UNASKED = object()
+
+
 #: Keys that must never reach a log line or the screen. `_readable`
 #: strips them from a response body before that body is quoted back.
 #: Compared with `-` and `_` stripped, so `api_secret`, `api-secret`
@@ -195,6 +200,8 @@ class ArrowSession:
         #: fill.
         self.order_scale = order_scale
         self._client = None
+        #: Which tag parameter this SDK build takes, asked once.
+        self._tag_name = _UNASKED
         self._streams = None
         self._stream_lock = threading.RLock()
         self._stream_ticks = {}
@@ -677,10 +684,18 @@ class ArrowSession:
             return True
 
     def _data_mode(self):
-        """DEPTH or QUOTE where the build has them; LTP only as a last
-        resort, which is a degraded feed and says so on the screen."""
+        """FULL, because FULL is the only mode that carries the book.
+
+        The SDK's four modes are ltp (13 bytes), ltpc (17), quote (93)
+        and full (249), and the five levels a side live in the last
+        140 bytes of the full packet alone. QUOTE has total buy and
+        sell quantity and NO PRICES — a ladder built on it has no
+        touch. The rest are listed as fallbacks for a build that
+        renames them, and every one below FULL is a degraded feed that
+        says so on the screen.
+        """
         mode = getattr(arrow, 'DataMode', None)
-        for name in ('DEPTH', 'FULL', 'QUOTE', 'LTP'):
+        for name in ('FULL', 'DEPTH', 'QUOTE', 'LTPC', 'LTP'):
             found = getattr(mode, name, None)
             if found is not None:
                 return found
@@ -790,6 +805,14 @@ class ArrowSession:
             'symbol': contract.trading_symbol,
             # UNITS. Never lots. `sizing.units` made this number.
             'quantity': int(units),
+            # REQUIRED, and it has no default in the SDK: leaving it
+            # out is a TypeError before the call reaches the wire, and
+            # every order fails with a Python error where the broker's
+            # words should be. Zero means the whole order is visible,
+            # which is what a spread leg wants — an iceberg leg fills
+            # slower than the leg it is hedging, and a hedge that fills
+            # at two different speeds is not a hedge.
+            'disclosed_quantity': 0,
             'product': self._enum('ProductType', 'NRML' if product.upper()
                                   == 'NRML' else product.upper()),
             'order_type': self._enum('OrderType',
@@ -815,20 +838,47 @@ class ArrowSession:
                 f'{side} {units} {contract.trading_symbol}')
         return str(order_id), None
 
+    #: The SDK's free-text field, in the order builds have spelled it.
+    TAG_FIELDS = ('remarks', 'tag', 'order_tag', 'user_remarks')
+
+    def _tag_field(self):
+        """Which tag parameter THIS build takes, asked once, from the
+        signature — never discovered by calling and catching.
+
+        Trying each name in turn and catching `TypeError` looks
+        equivalent and is not: a missing REQUIRED argument raises the
+        same `TypeError` as an unknown keyword, so the loop swallowed a
+        real signature error four times over and reported the last one.
+        That is how a missing `disclosed_quantity` — required, with no
+        default — surfaced as a tag problem.
+        """
+        if self._tag_name is not _UNASKED:
+            return self._tag_name
+        self._tag_name = None
+        try:
+            import inspect
+            takes = inspect.signature(self._client.place_order).parameters
+        except (TypeError, ValueError):                 # noqa: BLE001
+            return None
+        if any(p.kind is p.VAR_KEYWORD for p in takes.values()):
+            self._tag_name = self.TAG_FIELDS[0]
+            return self._tag_name
+        for name in self.TAG_FIELDS:
+            if name in takes:
+                self._tag_name = name
+                break
+        return self._tag_name
+
     def _call_place(self, request, tag):
         """Send it, with a tag where the build accepts one.
 
         A tag scopes OUR OWN ORDERS so a sweep never cancels the
         trader's. It does not scope positions — nothing can, on a
-        netting account. Builds that reject the kwarg are retried
-        without it rather than failing the order.
+        netting account.
         """
-        if tag:
-            for name in ('tag', 'order_tag', 'remarks', 'user_remarks'):
-                try:
-                    return self._client.place_order(**request, **{name: tag})
-                except TypeError:
-                    continue
+        name = self._tag_field() if tag else None
+        if name:
+            return self._client.place_order(**request, **{name: tag})
         return self._client.place_order(**request)
 
     def _enum(self, name, value):

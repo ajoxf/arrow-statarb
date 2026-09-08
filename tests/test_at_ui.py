@@ -570,3 +570,55 @@ def test_an_EMPTY_dropdown_says_WHICH_of_the_four_reasons_it_is(panels):
     after = placeholder()
     assert after != before, 'the dropdown says the same thing either way'
     assert 'ZZQQNOTHING' in after, after
+
+
+def test_a_new_leg_starts_on_MCX_and_not_on_whatever_SORTS_first(panels):
+    """The bug: the operator typed a commodity contract into a leg that
+    was set to BSE cash, and found nothing.
+
+    Nobody chose BSE cash. Flask sorts a dict's keys before writing
+    JSON, so the segment table's own order — MCX first, because MCX is
+    the product — reached the browser as bse_cm, bse_fo, mcx_fo,
+    nse_cm, nse_fo. The picker selected the first entry it was handed.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+    for leg in ('a', 'b'):
+        assert tab.input_value(
+            f'.pair-leg[data-leg="{leg}"] .p-segment') == 'mcx_fo'
+
+
+def test_a_segment_that_is_NOT_ready_is_SHOWN_disabled_not_hidden(panels):
+    """Two different problems, two different fixes.
+
+    A segment that is simply absent from the dropdown reads as "this
+    terminal does not do MCX". A segment listed and disabled reads as
+    "this account is not enabled for it" — which is the true one, and
+    the Segments table above says which of the two facts is missing.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+    rows = tab.eval_on_selector_all(
+        '.pair-leg[data-leg="a"] .p-segment option',
+        'nodes => nodes.map(n => ({v: n.value, off: n.disabled, '
+        't: n.textContent}))')
+    keys = [row['v'] for row in rows]
+    assert 'bse_cm' in keys, 'an unavailable segment vanished from the list'
+    # THE ORDER IS THE SERVER'S, not the JSON's. Flask sorts a dict's
+    # keys, so reading them back off the object gives bse_cm first;
+    # `/api/segments` sends the table's own order alongside, and MCX is
+    # first in it because MCX is the product.
+    assert keys[0] == 'mcx_fo', (
+        f'the segments are in the JSON\'s alphabetical order, not the '
+        f'table\'s: {keys}')
+    off = [row for row in rows if row['off']]
+    assert off, 'nothing was disabled — every segment claims to be ready'
+    assert all('not ready' in row['t'] for row in off)
+    # ...and a disabled one is never the default.
+    assert tab.input_value('.pair-leg[data-leg="a"] .p-segment') == 'mcx_fo'
