@@ -659,3 +659,73 @@ def test_a_HANDLER_refusal_reaches_the_screen(panels):
 
     # The control: an ordinary success does not put a refusal on screen.
     assert outcome({'ok': True, 'data': {'ok': True}}) == []
+
+
+def test_PICKING_a_contract_reads_its_specs_and_shows_NO_refusal(panels):
+    """"Unable to select the Leg A or Leg B", from a live screen.
+
+    Two faults met there. `Read both legs from the instrument master`
+    pressed before anything was chosen answers `leg A has no symbol` —
+    correct, and it was then rendered as a red block under each leg and
+    LEFT there while the operator searched, which reads as "this leg is
+    broken" rather than "press the button again". And the specs the
+    block would have carried are READ from the master, so choosing a
+    contract is the moment to read them, not a second button press.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+
+    def problems():
+        return tab.eval_on_selector_all(
+            '.pair-form .spec-problem', 'nodes => nodes.map(n => n.textContent)')
+
+    # Nothing chosen: the form is blank, not refusing.
+    assert problems() == []
+
+    # Press the button with nothing picked — it says so, in a toast...
+    tab.click('.btn.derive-pair')
+    tab.wait_for_timeout(600)
+    # ...and NOT as a red block under a leg the operator has not reached.
+    assert problems() == [], (
+        'a refusal about a leg with no contract was rendered under it')
+
+    # Now pick one, and its specs arrive without a second press.
+    box = '.pair-leg[data-leg="a"] .p-search'
+    tab.click(box)
+    tab.type(box, 'GOLD', delay=30)
+    tab.wait_for_timeout(900)
+    value = tab.eval_on_selector_all(
+        '.pair-leg[data-leg="a"] .p-symbol option',
+        'nodes => nodes.map(n => n.value).filter(Boolean)')
+    assert value, 'nothing to select'
+    tab.select_option('.pair-leg[data-leg="a"] .p-symbol', value[0])
+    tab.wait_for_timeout(900)
+
+    spec = tab.eval_on_selector_all(
+        '.pair-leg[data-leg="a"] table.spec td',
+        'nodes => nodes.map(n => n.textContent)')
+    assert spec, 'choosing a contract read no specs from the master'
+    assert any('100' in cell for cell in spec), spec       # the lot size
+    # ...and leg B, still empty, is still not accused of anything.
+    assert tab.eval_on_selector_all(
+        '.pair-leg[data-leg="b"] .spec-problem',
+        'nodes => nodes.map(n => n.textContent)') == []
+
+
+def test_the_SEGMENTS_table_counts_the_CONTRACTS_it_found(panels):
+    """The Contracts column was read from a key nothing wrote, so it
+    was an em dash on every row — including the ready ones, where it is
+    the fastest confirmation there is that the master really did arrive
+    for the segment being asked about."""
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    cells = tab.eval_on_selector_all(
+        '.segments-table tbody tr td:nth-child(4)',
+        'nodes => nodes.map(n => n.textContent.trim())')
+    assert cells, 'no segments table'
+    assert any(cell and cell[0].isdigit() for cell in cells), (
+        f'every Contracts cell is empty: {cells}')

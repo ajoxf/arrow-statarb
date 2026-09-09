@@ -467,12 +467,19 @@
     html += '</div>';
 
     html += '<div class="session-actions">' +
-      '<button class="btn primary derive-pair">Read both legs from the ' +
-      'instrument master</button>' +
+      '<button class="btn primary derive-pair">Re-read both legs from ' +
+      'the instrument master</button>' +
       '<span class="hint">Nothing below is applied until you Save.</span>' +
       '</div>';
 
-    if (local.derived) { html += derivedHtml(local.derived); }
+    // THE DERIVED TABLE IS ABOUT THE PAIR, so it waits for both
+    // contracts. Rendered earlier it carries the endpoint's honest
+    // report that a leg has no symbol — true, and not a fault: it is a
+    // step not yet taken, and printing it in red under a half-filled
+    // form says the opposite.
+    if (local.derived && draft.symbol_a && draft.symbol_b) {
+      html += derivedHtml(local.derived);
+    }
 
     html += '<div class="field-row">';
     html += '<label class="sfield"><span>Lots A per Qty</span>' +
@@ -524,8 +531,12 @@
       contractOptions(picker, draft['symbol_' + leg]) +
       '</select></label>';
 
-    var spec = (local.derived && local.derived.legs &&
-                local.derived.legs[leg]) || null;
+    // ONLY ONCE THIS LEG HAS A CONTRACT. Deriving with one leg chosen
+    // reports `leg B has no symbol` for the other, and that sentence
+    // rendered in red under a leg nobody had reached yet reads as a
+    // fault rather than as a step not taken.
+    var spec = (draft['symbol_' + leg] && local.derived &&
+                local.derived.legs && local.derived.legs[leg]) || null;
     if (spec && spec.found) {
       html += '<table class="spec"><tbody>' +
         specRow('Lot size', spec.lot_size, 'units/lot') +
@@ -690,7 +701,14 @@
     }
     if (target.classList.contains('p-symbol')) {
       var leg = target.closest('.pair-leg').dataset.leg;
+      forgetDerived(leg);
       local.draft['symbol_' + leg] = target.value;
+      // The specs are READ from the master, so choosing a contract is
+      // the moment to read them — not a second button press. Pressing
+      // Read both legs before choosing anything is what put `leg A has
+      // no symbol` on the screen in the first place.
+      if (target.value) { derivePair(); }
+      render(true);
     }
   }
 
@@ -711,6 +729,18 @@
     }, SEARCH_DEBOUNCE_MS);
   }
 
+  //: Drop what was derived for ONE leg, keeping the other's.
+  function forgetDerived(leg) {
+    if (!local.derived) { return; }
+    local.draft['symbol_' + leg] = null;
+    if (local.derived.legs) { delete local.derived.legs[leg]; }
+    // Every number below the legs — beta, the increment, k — was
+    // computed from BOTH. One leg changing invalidates all of it.
+    local.derived.increment = null;
+    local.derived.hedge_ratio = null;
+    local.derived.ok = false;
+  }
+
   function panelValue(selector) {
     var found = document.querySelector('.window.settings ' + selector);
     if (!found) { return undefined; }
@@ -726,6 +756,13 @@
       segment: segment, query: query, contracts: [], busy: !!query,
       error: null, at: Date.now()
     });
+    // A DERIVE REPORT DESCRIBES THE CONTRACTS IT WAS RUN ON. Changing
+    // the search or the segment abandons those, so the report — `leg A
+    // has no symbol`, a missing lot size, a refusal — stops being
+    // about anything on the screen. It used to sit there in red under
+    // a leg the operator was in the middle of filling in, which reads
+    // as "this leg is broken" rather than "press the button again".
+    forgetDerived(leg);
     if (!query) { return paintContracts(leg); }
     paintContracts(leg);
     get('/api/find?q=' + encodeURIComponent(query) + '&segment=' +

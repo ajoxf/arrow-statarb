@@ -1,5 +1,12 @@
-# Arrow broker SDK
-pyarrow-client
+# Arrow broker SDK.
+#
+# 1.7.0 AT MINIMUM, and the reason is one enum value: MCXFO. Every
+# release before it carries MCX and only MCX, which is the value for
+# permission checks and the instrument download — NOT the one an
+# order, a quote or a margin request carries. On an older build MCX
+# futures cannot be addressed at all, and the Exchanges page says so
+# rather than sending a quote to a value that answers with no book.
+pyarrow-client>=1.7.0
 
 # TOTP / auth
 pyotp

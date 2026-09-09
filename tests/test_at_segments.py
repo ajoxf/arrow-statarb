@@ -59,7 +59,9 @@ def test_a_segment_the_SDK_cannot_address_is_a_different_fault():
     report = available_segments(table, ['MCXFO'], ['NSE', 'NFO'])
     assert report['mcx_fo']['ready'] is False
     assert report['mcx_fo']['in_master'] is True
-    assert 'Upgrade the SDK' in report['mcx_fo']['note']
+    # The VERSION, not just 'upgrade': on the one segment this
+    # system exists for, the answer is a single release number.
+    assert '1.7.0' in report['mcx_fo']['note']
 
 
 def test_an_unreadable_sdk_enum_is_UNKNOWN_not_a_failure():

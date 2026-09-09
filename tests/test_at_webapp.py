@@ -223,7 +223,9 @@ def test_the_segments_endpoint_separates_the_two_MCX_failures(client):
     mcx = body['segments']['mcx_fo']
     assert mcx['in_master'] is True          # the fake master has MCXFO
     assert mcx['in_sdk'] is False            # ...and the fake SDK does not
-    assert 'Upgrade the SDK' in mcx['note']
+    # The VERSION, not just 'upgrade': on the one segment this
+    # system exists for, the answer is a single release number.
+    assert '1.7.0' in mcx['note']
     assert body['segments']['nse_fo']['ready'] is True
 
 

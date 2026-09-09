@@ -162,7 +162,18 @@ class SegmentTable:
                 for key, segment in self._by_key.items()}
 
 
-def available_segments(table, master_exch_segs, sdk_exchanges=None):
+#: The pyarrow-client release that first carried `MCXFO` in its
+#: `Exchange` enum. Every release before it has `MCX` and only `MCX`,
+#: which is the value for permission checks and the instrument
+#: download — NOT the one an order, a quote or a margin request
+#: carries. On such a build MCX cannot be addressed at all, and saying
+#: "upgrade the SDK" without the number leaves the operator to find
+#: that out by trying versions.
+MCXFO_SINCE = '1.7.0'
+
+
+def available_segments(table, master_exch_segs, sdk_exchanges=None,
+                       contract_counts=None):
     """Which segments are ACTUALLY usable, and why each other one is not.
 
     Two independent facts have to line up before a segment can be
@@ -180,16 +191,26 @@ def available_segments(table, master_exch_segs, sdk_exchanges=None):
     `sdk_exchanges` is None when it could not be read. Unmeasured is
     not zero: the enum check is then reported as unknown rather than as
     a failure.
+
+    `contract_counts` is `{ExchSeg: rows}` from the master. The page
+    has a Contracts column and it was read from a key nothing wrote, so
+    it showed an em dash on every row — including the ready ones, where
+    it is the fastest confirmation there is that the master really did
+    arrive.
     """
     seen = {str(value or '').strip().upper()
             for value in (master_exch_segs or ())}
     known = (None if sdk_exchanges is None
              else {str(value or '').strip().upper()
                    for value in sdk_exchanges})
+    counts = {str(key or '').strip().upper(): value
+              for key, value in (contract_counts or {}).items()}
     out = {}
     for segment in table:
         in_master = bool(seen & set(segment.spellings()))
         in_sdk = None if known is None else segment.exchange in known
+        found = sum(counts[name] for name in segment.spellings()
+                    if name in counts) if counts else None
         if in_master and in_sdk is not False:
             note = f'{segment.label} is ready'
         elif not in_master:
@@ -198,9 +219,27 @@ def available_segments(table, master_exch_segs, sdk_exchanges=None):
                     f'account may not be entitled to {segment.label}. Ask '
                     f'Arrow to enable the segment.')
         else:
+            # NAME WHAT THIS BUILD DOES HAVE. "Upgrade the SDK" leaves
+            # the operator to work out which version and why — and on
+            # the one segment this system exists for, the answer is a
+            # single release number.
+            near = sorted(name for name in (known or ())
+                          if name in segment.spellings()
+                          and name != segment.exchange)
             note = (f"the SDK's Exchange enum has no {segment.exchange} "
                     f"value — this build of pyarrow-client cannot address "
-                    f"{segment.label} at all. Upgrade the SDK.")
+                    f"{segment.label} at all.")
+            if near:
+                note += (f" It has {', '.join(near)}, which is the value for "
+                         f"permission checks and the instrument download and "
+                         f"NOT the one an order, a quote or a margin request "
+                         f"carries.")
+            if segment.exchange == 'MCXFO':
+                note += (f" MCXFO arrived in pyarrow-client {MCXFO_SINCE}: "
+                         f"pip install -U 'pyarrow-client>={MCXFO_SINCE}' "
+                         f"and restart.")
+            else:
+                note += ' Upgrade pyarrow-client.'
         out[segment.key] = {
             'key': segment.key,
             'label': segment.label,
@@ -209,6 +248,9 @@ def available_segments(table, master_exch_segs, sdk_exchanges=None):
             'in_master': in_master,
             #: None = could not be read. NOT False.
             'in_sdk': in_sdk,
+            #: How many contracts the master carries for it. None where
+            #: the master was not counted — NOT zero.
+            'contracts': found,
             'ready': bool(in_master and in_sdk is not False),
             'note': note,
         }

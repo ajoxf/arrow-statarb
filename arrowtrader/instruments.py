@@ -279,6 +279,11 @@ class Master:
             for key, value in (tick_sizes or {}).items()}
         self.rows = 0
         self.exch_segs = set()
+        #: {ExchSeg: rows}. The Exchanges page has a Contracts column,
+        #: and "MCXFO: 1,842" is the fastest confirmation there is that
+        #: the master really did arrive for the segment being asked
+        #: about.
+        self.exch_seg_counts = {}
         self._by_symbol = {}
         self._underlyings = {}
         self._contracts = {}
@@ -299,6 +304,8 @@ class Master:
                 continue
             self.rows += 1
             self.exch_segs.add(contract.exch_seg)
+            self.exch_seg_counts[contract.exch_seg] = \
+                self.exch_seg_counts.get(contract.exch_seg, 0) + 1
             # FIRST WINS on a duplicate trading symbol. The master has
             # been seen to carry a symbol twice across segments; taking
             # the last would silently re-point a live pair's leg.

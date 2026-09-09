@@ -298,7 +298,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'segments': {},
                             'order': [segment.key for segment in table]}), 200
         found = segments.available_segments(
-            table, built.master.exch_segs, built.sdk_exchanges())
+            table, built.master.exch_segs, built.sdk_exchanges(),
+            contract_counts=getattr(built.master, 'exch_seg_counts', None))
         return jsonify({
             'ok': True,
             'segments': found,
