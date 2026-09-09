@@ -729,3 +729,38 @@ def test_the_SEGMENTS_table_counts_the_CONTRACTS_it_found(panels):
     assert cells, 'no segments table'
     assert any(cell and cell[0].isdigit() for cell in cells), (
         f'every Contracts cell is empty: {cells}')
+
+
+def test_a_SECRET_survives_the_page_redrawing_underneath_it(panels):
+    """A password is typed slowly, into a page that redraws three times
+    a second.
+
+    `ArrowSettings.render()` is called from the status poll and FORCED
+    a redraw of all six sections, caret or no caret. The only reason
+    that had not already eaten a half-typed password is that `redraw`
+    compares the HTML first and usually finds it unchanged — so the
+    bug was invisible until something in the section actually changed,
+    at which point the field being typed into is replaced between two
+    keystrokes and the operator is simply unable to enter a password.
+
+    So this types slowly AND changes the section's content underneath.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.f-password')
+    for index, char in enumerate('Secret123'):
+        tab.keyboard.type(char)
+        # Move the ground under the field: exactly what a Connect
+        # answering, or a secret saving, does to this section.
+        tab.evaluate(
+            """(n) => {
+              const s = window.ArrowSettings.state;
+              s.account = Object.assign({}, s.account, {app_id: 'APP' + n});
+              window.ArrowSettings.render();
+            }""", index)
+        tab.wait_for_timeout(60)
+    assert tab.input_value('.f-password') == 'Secret123', (
+        'the page redrew over the field being typed into')
+    assert tab.evaluate(
+        "() => document.activeElement.classList.contains('f-password')")

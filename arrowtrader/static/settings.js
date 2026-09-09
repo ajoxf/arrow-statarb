@@ -945,6 +945,22 @@
     });
   }
 
-  window.ArrowSettings = {render: function () { node(); render(true); },
-                          refresh: refresh, state: local};
+  window.ArrowSettings = {
+    //: Called from app.js on EVERY status poll — three times a second
+    //: — so it must NOT force. `render(true)` rewrites all six
+    //: sections whether or not the operator has a caret in one of
+    //: them, and the only reason that has not eaten a half-typed
+    //: password already is that `redraw` compares the HTML first and
+    //: usually finds it unchanged. The moment anything in the section
+    //: does change — a secret saved, a connection answered — the
+    //: field being typed into is replaced mid-keystroke.
+    //:
+    //: Creating the panel forces once, which is right: there is
+    //: nothing to interrupt on a panel that does not exist yet.
+    render: function () {
+      var existed = !!document.querySelector('.window.settings');
+      node();
+      render(!existed);
+    },
+    refresh: refresh, state: local};
 })();
