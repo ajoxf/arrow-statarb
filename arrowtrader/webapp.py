@@ -94,12 +94,40 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 pass
         return max(stamps) if stamps else int(time.time())
 
+    def build_stamp():
+        """WHICH BUILD IS ON THE SCREEN, in a form a screenshot carries.
+
+        "Have you pulled?" has cost several rounds of this project, and
+        it is not answerable from a screenshot of a page that does not
+        say. The git short SHA answers it exactly; where git is not
+        available (a zip, a packaged install) the asset timestamp still
+        distinguishes one build from another.
+        """
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        head = os.path.join(here, '.git', 'HEAD')
+        try:
+            with open(head, encoding='utf-8') as handle:
+                ref = handle.read().strip()
+            if ref.startswith('ref: '):
+                with open(os.path.join(here, '.git', ref[5:]),
+                          encoding='utf-8') as handle:
+                    ref = handle.read().strip()
+            if ref:
+                return ref[:7]
+        except OSError:
+            pass
+        # NOT "unknown". The asset stamp is a real answer, just a
+        # coarser one, and it still tells two builds apart.
+        return time.strftime('%Y-%m-%d %H:%M',
+                             time.localtime(asset_version()))
+
     # -- the screen ---------------------------------------------------------
 
     @app.get('/')
     def index():
         response = app.make_response(
-            render_template('index.html', asset_version=asset_version()))
+            render_template('index.html', asset_version=asset_version(),
+                            build=build_stamp()))
         # The PAGE is never cached: it carries the stamp that tells the
         # browser whether its cached CSS and JS are current.
         response.headers['Cache-Control'] = 'no-store'

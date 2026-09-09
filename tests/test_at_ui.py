@@ -805,3 +805,22 @@ def test_the_picker_offers_FUTURES_and_the_KIND_is_on_the_screen(panels):
     options = listed()
     assert options, 'asking for options listed nothing'
     assert not any(sym.endswith('F') for sym in options), options
+
+
+def test_the_page_SAYS_WHICH_BUILD_DREW_IT(panels):
+    """"Have you pulled?" is not answerable from a screenshot of a page
+    that does not say which code drew it, and that question has cost
+    several rounds of this project — twice over a screen that showed
+    the previous commit's wording while the files on disk were current,
+    because the PROCESS had not been restarted.
+
+    The stamp is the git short SHA where git is there, and the asset
+    timestamp where it is not: not "unknown", which answers nothing,
+    but a coarser real answer that still tells two builds apart.
+    """
+    tab, _errors, _responses = panels
+    stamp = tab.eval_on_selector('#build-stamp', 'n => n.textContent.trim()')
+    assert stamp, 'the page does not say which build drew it'
+    assert stamp.lower() != 'unknown'
+    # A SHA, or a timestamp. Either way it distinguishes builds.
+    assert len(stamp) >= 7
