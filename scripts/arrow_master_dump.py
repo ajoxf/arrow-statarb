@@ -31,6 +31,10 @@ def main(argv=None):
     parser.add_argument('--env', default='.env')
     parser.add_argument('--rows', type=int, default=8,
                         help='how many raw rows to print in full')
+    parser.add_argument('--probe', metavar='SYMBOL',
+                        help='ask Arrow for a QUOTE on this symbol under '
+                             'every Exchange value the SDK has, and report '
+                             'which one answers with a book. Read-only.')
     args = parser.parse_args(argv)
 
     from arrowtrader.broker import ArrowSession
@@ -109,8 +113,64 @@ def main(argv=None):
               .replace('\n', '\n   '))
     if not matches:
         print('   (nothing matched — try a shorter search, e.g. CRUDE)')
+    if args.probe:
+        probe(session, args.probe)
     session.shutdown()
     return 0
+
+
+def probe(session, symbol):
+    """Which `Exchange` value does this contract actually quote under?
+
+    THIS IS A MEASUREMENT, NOT A GUESS. The master says
+    `Exchange: NSE, Segment: CO, ExchSeg: NSECO`, and none of those
+    three is necessarily the value an order carries — MCX turned out to
+    need `MCXFO` where the master said `MCX`. The SDK's enum is short,
+    the call is read-only, and asking is strictly better than reasoning
+    about it.
+
+    A value that answers with a BID AND AN ASK is the one to use. One
+    that answers with nothing is not refused — it is simply wrong, and
+    that is the shape of failure that reads on a ladder as a contract
+    which is not trading.
+    """
+    import pyarrow_client as arrow
+    from arrowtrader import quotes
+
+    contract = session.master.contract(symbol)
+    if contract is None:
+        print(f'\n{symbol} is not in the master')
+        return
+    print(f'\nprobing {symbol} ({contract.exch_seg}) for the Exchange value '
+          f'it quotes under:')
+    mode = session._quote_mode()
+    for name in sorted(e.name for e in arrow.Exchange):
+        value = getattr(arrow.Exchange, name)
+        try:
+            raw = session._client.get_quotes(mode, [(symbol, value)])
+        except Exception as error:                      # noqa: BLE001
+            print(f'   {name:<8} refused: {str(error)[:90]}')
+            continue
+        row = raw[0] if isinstance(raw, list) and raw else raw
+        tick = quotes.normalise_quote(row, scale=session.quote_scale) \
+            if isinstance(row, dict) else None
+        if tick and tick.get('executable'):
+            print(f'   {name:<8} ANSWERED: bid {tick["bid"]} ask '
+                  f'{tick["ask"]} <-- USE THIS ONE')
+            key = session.segments.key_for_exch_seg(contract.exch_seg)
+            if key and session.segments.exchange_for(key) != value.value:
+                print(f'\n   Put this in config.json under "settings" and '
+                      f'restart — no code change:\n')
+                print('   "SEGMENTS_EXTRA": {"%s": {"exch_seg": "%s", '
+                      '"exchange": "%s", "label": "%s", '
+                      '"kinds": ["future", "option"]}}'
+                      % (key, contract.exch_seg, value.value,
+                         session.segments.get(key).label))
+        elif tick and tick.get('last') is not None:
+            print(f'   {name:<8} answered a last trade ({tick["last"]}) and '
+                  f'no book')
+        else:
+            print(f'   {name:<8} nothing')
 
 
 if __name__ == '__main__':

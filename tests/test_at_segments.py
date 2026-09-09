@@ -148,3 +148,19 @@ def test_a_segment_the_SDK_cannot_address_is_VISIBLE_but_not_ready():
     assert row['in_sdk'] is False
     assert row['ready'] is False
     assert 'NSECO' in row['note']
+
+
+def test_a_segments_ORDER_SIDE_VALUE_can_be_corrected_from_CONFIG():
+    """The order-side exchange for NSE commodity is a guess, and the
+    probe measures it. Whatever it comes back with has to be
+    applicable WITHOUT a code change — a value learnt from a live
+    account at 14:40 is no use if it needs a release."""
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable({'nse_co': {'exch_seg': 'NSECO', 'exchange': 'NSE',
+                                     'label': 'NSE commodity',
+                                     'kinds': ['future', 'option']}})
+    assert table.exchange_for('nse_co') == 'NSE'
+    assert table.exch_seg_for('nse_co') == 'NSECO'
+    assert table.key_for_exch_seg('NSECO') == 'nse_co'
+    # ...and the built-ins it did not name are untouched.
+    assert table.exchange_for('mcx_fo') == 'MCXFO'
