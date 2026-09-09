@@ -318,16 +318,32 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         built, error = setup.session()
         if built is None:
             return jsonify({'ok': False, 'error': error, 'symbols': []}), 200
-        found = built.find_symbols(request.args.get('q', ''),
+        query = request.args.get('q', '')
+        segment = request.args.get('segment')
+        # FUTURES BY DEFAULT. A spread ladder is two futures; MCX lists
+        # thousands of options against a handful of them, and an
+        # unfiltered search for "crude" is all calls and puts.
+        kind = request.args.get('kind') or 'future'
+        found = built.find_symbols(query,
                                    limit=int(request.args.get('limit', 40)),
-                                   segment=request.args.get('segment'),
-                                   # FUTURES BY DEFAULT. A spread ladder
-                                   # is two futures; MCX lists thousands
-                                   # of options against a handful of
-                                   # them, and an unfiltered search for
-                                   # "crude" is all calls and puts.
-                                   kind=request.args.get('kind') or 'future')
-        return jsonify({'ok': True, 'symbols': found or []})
+                                   segment=segment, kind=kind)
+        payload = {'ok': True, 'symbols': found or [], 'kind': kind}
+        if not found and query:
+            # AN EMPTY LIST HAS TO SAY WHAT IT DID FIND. "No future
+            # matches crudeoil" is true and unactionable when the
+            # master holds 240 crude OPTIONS: the operator cannot tell
+            # a misspelling from a filter from an entitlement, and all
+            # three look like this.
+            others = {}
+            for other in ('future', 'option', 'cash'):
+                if other == kind:
+                    continue
+                rows = built.find_symbols(query, limit=1000, segment=segment,
+                                          kind=other)
+                if rows:
+                    others[other] = len(rows)
+            payload['other_kinds'] = others
+        return jsonify(payload)
 
     @app.get('/api/contract/<path:symbol>')
     def api_contract(symbol):

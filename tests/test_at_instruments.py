@@ -302,3 +302,58 @@ def test_a_FUTURE_is_never_dropped_by_the_search_limit():
     for limit in (1, 2, 5, 40):
         found = _master().search('CRUDEOIL', segment='mcx_fo', limit=limit)
         assert found[0].trading_symbol == 'CRUDEOIL17SEP26F'
+
+
+MONTHS = ('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+          'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC')
+
+
+def test_EVERY_MONTH_of_the_year_classifies_as_a_FUTURE():
+    """The regression this test exists for, and it was mine.
+
+    Reading "an option letter followed by digits at the end of the
+    symbol" finds the P of SEP and the C of DEC and OCT.
+    `CRUDEOIL17SEP26` ends `P26`, so every September future whose
+    symbol stops at the expiry was read as a call — three months out of
+    twelve, silently, on the exchange this terminal exists for. What
+    the operator saw was `no future in the master matches "crudeoil"`.
+
+    The expiry is parsed explicitly now, so a month's own letters can
+    never be mistaken for an option type.
+    """
+    from arrowtrader.instruments import classify
+    for month in MONTHS:
+        for symbol in (f'CRUDEOIL17{month}26', f'CRUDEOIL17{month}26F',
+                       f'GOLDM05{month}25', f'GOLDM05{month}25F'):
+            assert classify('MCXFO', '', symbol) == 'future', symbol
+
+
+def test_EVERY_MONTH_still_tells_an_OPTION_apart():
+    """The control. Parsing the expiry must not blind it to a strike
+    sitting right after that expiry."""
+    from arrowtrader.instruments import classify
+    for month in MONTHS:
+        for symbol in (f'CRUDEOIL17{month}26C3400',
+                       f'CRUDEOIL17{month}26P3400',
+                       f'GOLD05{month}25CE120000'):
+            assert classify('MCXFO', '', symbol) == 'option', symbol
+
+
+def test_a_STRIKE_says_option_even_where_the_symbol_cannot_be_parsed():
+    """The strongest signal after the type field: a future has no
+    strike. It decides on a symbol shape this build has never seen."""
+    from arrowtrader.instruments import classify
+    assert classify('MCXFO', '', 'SOMETHINGODD', strike=8950) == 'option'
+    assert classify('MCXFO', '', 'SOMETHINGODD', strike=0) == 'future'
+    assert classify('MCXFO', '', 'SOMETHINGODD', strike=None) == 'future'
+
+
+def test_a_symbol_this_build_cannot_parse_says_NOTHING_either_way():
+    """UNMEASURED IS NOT ZERO, applied to a shape. An unrecognised
+    symbol is not evidence of a future — it is no evidence at all, and
+    the fields decide."""
+    from arrowtrader.instruments import option_from_symbol
+    assert option_from_symbol('CRUDEOIL17SEP26') is False
+    assert option_from_symbol('CRUDEOIL17SEP26C3400') is True
+    assert option_from_symbol('WHAT-IS-THIS') is None
+    assert option_from_symbol('') is None

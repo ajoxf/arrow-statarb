@@ -232,14 +232,46 @@ class Contract:
 #: leave the field empty altogether.
 _OPTION_TYPES = ('CE', 'PE', 'C', 'P', 'CALL', 'PUT')
 
-#: An MCX option's trading symbol ends with the option letter and its
-#: STRIKE — `CRUDEOILM17SEP26C8950`, `GOLD05DEC25P120000`. A future
-#: ends with `F` and no digits — `GOLD05DEC25F`. The distinction is in
-#: the symbol whether or not the master fills the field in.
-_OPTION_SYMBOL = re.compile(r'[CP]\d+$')
+#: A contract symbol, taken apart: underlying, expiry, and what comes
+#: AFTER the expiry — `F` for a future, or the option letter and its
+#: strike. `CRUDEOILM17SEP26C8950`, `GOLD05DEC25F`, `SILVER05MAR26`.
+#:
+#: THE EXPIRY IS MATCHED EXPLICITLY, and that is the whole point of
+#: this pattern rather than a simpler one. Looking for an option letter
+#: followed by digits at the END of the symbol finds the P of SEP and
+#: the C of DEC and OCT: `CRUDEOIL17SEP26` ends `P26`, so every
+#: September future whose symbol stops at the expiry was read as a
+#: call. Three months out of twelve, silently, on the exchange this
+#: terminal exists for.
+_SYMBOL = re.compile(
+    r'^(?P<underlying>[A-Z&\-]+?)'
+    r'(?P<day>\d{1,2})?'
+    r'(?P<month>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)'
+    r'(?P<year>\d{2,4})'
+    r'(?P<tail>.*)$')
+
+#: What an option's tail looks like: the type letter and the strike.
+_OPTION_TAIL = re.compile(r'^(CE|PE|C|P)\d')
 
 
-def classify(exch_seg, option_type, trading_symbol=None):
+def option_from_symbol(trading_symbol):
+    """Is this symbol an option, judged from its own shape?
+
+    True, False, or **None where the shape says nothing** — an
+    unrecognised symbol is not evidence of a future.
+    """
+    found = _SYMBOL.match(str(trading_symbol or '').upper())
+    if not found:
+        return None
+    tail = found.group('tail')
+    if not tail or tail == 'F':
+        return False
+    if _OPTION_TAIL.match(tail):
+        return True
+    return None
+
+
+def classify(exch_seg, option_type, trading_symbol=None, strike=None):
     """cash / option / future.
 
     THE FIELD IS NOT ALWAYS FILLED IN. `OptionType` is documented as
@@ -249,15 +281,21 @@ def classify(exch_seg, option_type, trading_symbol=None):
     `CRUDEOILM17SEP26C8950`, a call, as though it were the September
     contract, and a spread built on it is not the spread anybody meant.
 
-    So the symbol is read as well, and it decides when the field does
-    not: an option ends with its type letter and its strike, a future
-    ends with `F`.
+    So three things are asked, strongest first: the type field, then
+    the STRIKE (an option has one and a future does not), then the
+    symbol's own shape. Nothing here guesses from a partial match: a
+    symbol this build cannot parse leaves the answer to the fields.
     """
     if str(exch_seg or '').upper().endswith('CM'):
         return 'cash'
     if str(option_type or '').strip().upper() in _OPTION_TYPES:
         return 'option'
-    if trading_symbol and _OPTION_SYMBOL.search(str(trading_symbol).upper()):
+    try:
+        if strike is not None and float(strike) > 0:
+            return 'option'
+    except (TypeError, ValueError):
+        pass
+    if option_from_symbol(trading_symbol) is True:
         return 'option'
     return 'future'
 
@@ -361,15 +399,16 @@ class Master:
                       else derive_underlying(trading_symbol))
         segment = (self.segments.key_for_exch_seg(exch_seg)
                    if self.segments is not None else None)
+        strike = _positive_float(field(row, 'StrikePrice', 'strike'))
         return Contract(
             trading_symbol,
             underlying=underlying,
             exch_seg=exch_seg,
             segment=segment,
-            kind=classify(exch_seg, option_type, trading_symbol),
+            kind=classify(exch_seg, option_type, trading_symbol, strike),
             option_type=(str(option_type).strip().upper()
                          if option_type else None),
-            strike=_positive_float(field(row, 'StrikePrice', 'strike')),
+            strike=strike,
             expiry=parse_expiry(field(row, 'Expiry', 'expiry',
                                       'expiry_date') or trading_symbol),
             # UNKNOWN IS None. Never 1.

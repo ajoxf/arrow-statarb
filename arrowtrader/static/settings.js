@@ -662,15 +662,30 @@
         picker.error ? picker.error
           : picker.busy ? 'searching\u2026'
           : !picker.query ? 'type a name above to list contracts'
-          : 'no ' + (picker.kind === 'option' ? 'option'
-              : picker.kind === 'cash' ? 'cash instrument' : 'future') +
-            ' in the master matches "' + picker.query + '"'
+          : emptyReason(picker)
       ) + '</option>';
     }
     return contracts.map(function (row) {
       return option(row.trading_symbol,
                     row.trading_symbol + '  ' + (row.expiry || ''), chosen);
     }).join('');
+  }
+
+  //: What an empty contract list MEANS. Three different things look
+  //: identical without this: a misspelling, a filter, and an account
+  //: that is not entitled to the segment.
+  function emptyReason(picker) {
+    var noun = picker.kind === 'option' ? 'option'
+      : picker.kind === 'cash' ? 'cash instrument' : 'future';
+    var line = 'no ' + noun + ' matches "' + picker.query + '"';
+    var others = picker.others || {};
+    var names = Object.keys(others);
+    if (names.length) {
+      line += ' — but ' + names.map(function (name) {
+        return others[name] + ' ' + name + (others[name] === 1 ? '' : 's');
+      }).join(' and ') + ' do. Change Kind above.';
+    }
+    return line;
   }
 
   function option(value, label, chosen) {
@@ -794,6 +809,7 @@
       // The BROKER'S OWN WORDS, in the dropdown where the contracts
       // would have been — not only in a toast that clears itself.
       mine.error = body.ok ? null : (body.error || 'the search failed');
+      mine.others = body.other_kinds || null;
       if (mine.error) { UI.toast(mine.error); }
       paintContracts(leg);
     });

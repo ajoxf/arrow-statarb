@@ -534,3 +534,29 @@ def test_a_setting_this_build_CANNOT_APPLY_is_refused_not_ignored(paths,
         'pair': 'K', 'fields': {'rows': 12, 'nope': 1}}})
     assert mixed['data']['changed'] == ['rows']
     assert 'nope' in mixed['data']['error']
+
+
+def test_an_EMPTY_search_says_what_it_DID_find(client):
+    """`no future in the master matches "crudeoil"` — true, and
+    unactionable, when the master holds 240 crude OPTIONS.
+
+    A misspelling, a filter and an account not entitled to a segment
+    all look exactly like this, and the operator cannot tell which
+    from the sentence. So the answer carries what the other kinds
+    hold.
+    """
+    body = client.get('/api/find?q=GOLD&segment=mcx_fo&kind=cash').get_json()
+    assert body['ok'] is True
+    assert body['symbols'] == []
+    assert body['other_kinds']['future'] == 3
+    assert body['other_kinds']['option'] == 2
+
+
+def test_a_search_that_matches_NOTHING_AT_ALL_says_that_too(client):
+    """The control. Where no kind holds anything, the answer is empty
+    rather than a list of zeroes — an empty search is a misspelling or
+    an entitlement, and it must not read as a filter problem."""
+    body = client.get(
+        '/api/find?q=ZZQQNOTHING&segment=mcx_fo').get_json()
+    assert body['symbols'] == []
+    assert body['other_kinds'] == {}
