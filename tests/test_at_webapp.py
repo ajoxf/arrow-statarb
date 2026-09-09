@@ -36,9 +36,10 @@ class FakeSession:
         from tests.fake_arrow import MASTER
         return Master(MASTER, segments=SegmentTable())
 
-    def find_symbols(self, pattern, limit=40, segment=None):
+    def find_symbols(self, pattern, limit=40, segment=None, kind=None):
         return [contract.to_dict() for contract
-                in self.master.search(pattern, segment=segment, limit=limit)]
+                in self.master.search(pattern, segment=segment, kind=kind,
+                                      limit=limit)]
 
     def symbol_report(self, symbol):
         return self.master.report(symbol)
@@ -179,7 +180,7 @@ def test_connecting_works_without_the_engine(client):
     the contracts are right and these are the tools for that."""
     body = client.post('/api/connect').get_json()
     assert body['ok'] is True
-    assert body['master_rows'] == 5
+    assert body['master_rows'] == 7
 
 
 def test_a_refusal_carries_the_reason_not_check_the_log(client, paths,
@@ -210,8 +211,32 @@ def test_a_broker_refusal_is_passed_through_verbatim(paths, monkeypatch):
 def test_the_picker_works_without_the_engine(client):
     body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
     assert body['ok'] is True
+    # FUTURES BY DEFAULT. The master also holds GOLD calls and puts,
+    # and a spread ladder is two futures.
     assert {row['trading_symbol'] for row in body['symbols']} == {
         'GOLD05DEC25F', 'GOLD05FEB26F', 'GOLDM05DEC25F'}
+
+
+def test_the_picker_defaults_to_FUTURES_and_says_so_by_omission(client):
+    """MCX lists thousands of options against a handful of futures on
+    one underlying. Unfiltered, a search for the underlying came back
+    all calls and puts — which is what was on the screen: two options
+    in the dropdown and no futures at all."""
+    body = client.get('/api/find?q=GOLD&segment=mcx_fo').get_json()
+    kinds = {row['kind'] for row in body['symbols']}
+    assert kinds == {'future'}
+
+
+def test_the_picker_will_still_show_OPTIONS_when_asked(client):
+    """The control. Defaulting to futures is not pretending the options
+    are not there."""
+    body = client.get(
+        '/api/find?q=GOLD&segment=mcx_fo&kind=option').get_json()
+    assert body['ok'] is True
+    assert body['symbols'], 'asking for options returned none'
+    assert {row['kind'] for row in body['symbols']} == {'option'}
+    assert {row['trading_symbol'] for row in body['symbols']} == {
+        'GOLD05DEC25C120000', 'GOLD05DEC25P118000'}
 
 
 # -- blocker 3.1 lives on an endpoint ---------------------------------------------

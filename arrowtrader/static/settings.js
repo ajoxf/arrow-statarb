@@ -526,6 +526,17 @@
     html += '<label class="sfield"><span>Search</span>' +
       '<input class="p-search" placeholder="GOLD, SILVER, CRUDEOIL…" ' +
       'value="' + esc(picker.query) + '"></label>';
+    // FUTURES BY DEFAULT, and SHOWN so it is not a hidden filter. MCX
+    // lists thousands of options against a handful of futures on one
+    // underlying, so an unfiltered search for "crude" comes back all
+    // calls and puts — and a spread ladder is two FUTURES.
+    var kind = picker.kind || 'future';
+    html += '<label class="sfield"><span>Kind</span>' +
+      '<select class="p-kind">' +
+      option('future', 'Futures', kind) +
+      option('option', 'Options', kind) +
+      option('cash', 'Cash', kind) +
+      '</select></label>';
     html += '<label class="sfield"><span>Contract <i>oldest expiry first</i>' +
       '</span><select class="p-symbol mono">' +
       contractOptions(picker, draft['symbol_' + leg]) +
@@ -651,7 +662,9 @@
         picker.error ? picker.error
           : picker.busy ? 'searching\u2026'
           : !picker.query ? 'type a name above to list contracts'
-          : 'no contract in the master matches "' + picker.query + '"'
+          : 'no ' + (picker.kind === 'option' ? 'option'
+              : picker.kind === 'cash' ? 'cash instrument' : 'future') +
+            ' in the master matches "' + picker.query + '"'
       ) + '</option>';
     }
     return contracts.map(function (row) {
@@ -696,7 +709,8 @@
 
   function onChange(event) {
     var target = event.target;
-    if (target.classList.contains('p-segment')) {
+    if (target.classList.contains('p-segment') ||
+        target.classList.contains('p-kind')) {
       return searchLeg(target.closest('.pair-leg').dataset.leg);
     }
     if (target.classList.contains('p-symbol')) {
@@ -752,9 +766,11 @@
     if (!box) { return; }
     var segment = box.querySelector('.p-segment').value;
     var query = box.querySelector('.p-search').value;
+    var kindBox = box.querySelector('.p-kind');
+    var kind = (kindBox && kindBox.value) || 'future';
     var mine = (local.picker[leg] = {
-      segment: segment, query: query, contracts: [], busy: !!query,
-      error: null, at: Date.now()
+      segment: segment, query: query, kind: kind, contracts: [],
+      busy: !!query, error: null, at: Date.now()
     });
     // A DERIVE REPORT DESCRIBES THE CONTRACTS IT WAS RUN ON. Changing
     // the search or the segment abandons those, so the report — `leg A
@@ -766,7 +782,8 @@
     if (!query) { return paintContracts(leg); }
     paintContracts(leg);
     get('/api/find?q=' + encodeURIComponent(query) + '&segment=' +
-        encodeURIComponent(segment)).then(function (result) {
+        encodeURIComponent(segment) + '&kind=' +
+        encodeURIComponent(kind)).then(function (result) {
       // A slower earlier search must not overwrite a later one — the
       // operator would be looking at the contracts for a prefix they
       // have already finished typing past.

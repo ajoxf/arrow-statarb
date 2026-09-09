@@ -52,7 +52,7 @@ def test_the_master_is_loaded_BEFORE_the_session_is_usable(session):
     orders meanwhile, which means an order can be sized from a lot size
     that has not arrived. Here, no master means no session."""
     assert session.connected is True
-    assert session.master.rows == 5
+    assert session.master.rows == 7
     assert session.master.lot_size('GOLD05DEC25F') == 100
 
 
@@ -170,7 +170,7 @@ def test_MCX_is_fetched_from_its_OWN_route_when_all_does_not_carry_it(
     assert built.initialize() is True
     assert 'MCXFO' in built.master.exch_segs
     assert built.master.lot_size('GOLD05DEC25F') == 100
-    assert built.master_sources['/mcx'] == 4
+    assert built.master_sources['/mcx'] == 6
 
 
 def test_the_extra_route_is_NOT_asked_for_when_all_already_has_it(
@@ -186,7 +186,7 @@ def test_the_extra_route_is_NOT_asked_for_when_all_already_has_it(
     built = ArrowSession(F.Account(), SegmentTable())
     assert built.initialize() is True
     assert asked == []
-    assert built.master_sources == {'/all': 5}
+    assert built.master_sources == {'/all': 7}
 
 
 def test_a_broker_with_NO_such_route_still_connects(arrow_sdk, monkeypatch):

@@ -99,6 +99,15 @@ MASTER = [
      'TradingSymbol': 'SILVER05MAR26F', 'OptionType': '',
      'Expiry': '05-Mar-2026', 'LotSize': '30', 'Token': '218127',
      'TickSize': '1', 'FreezeQty': '600'},
+    # MCX OPTIONS, carrying NO OptionType — which is how the master
+    # actually lists them and how they came to be classified as
+    # futures. Two of them is enough to prove the picker filters.
+    {'ExchSeg': 'MCXFO', 'Symbol': 'GOLD', 'TradingSymbol': 'GOLD05DEC25C120000',
+     'OptionType': '', 'Expiry': '05-Dec-2025', 'StrikePrice': '120000',
+     'LotSize': '100', 'Token': '218130', 'TickSize': '1'},
+    {'ExchSeg': 'MCXFO', 'Symbol': 'GOLD', 'TradingSymbol': 'GOLD05DEC25P118000',
+     'OptionType': '', 'Expiry': '05-Dec-2025', 'StrikePrice': '118000',
+     'LotSize': '100', 'Token': '218131', 'TickSize': '1'},
     {'ExchSeg': 'NSEFO', 'Symbol': 'NIFTY', 'TradingSymbol': 'NIFTY30JUN26F',
      'OptionType': '', 'Expiry': '30-Jun-2026', 'LotSize': '75',
      'Token': '111', 'TickSize': '0.05'},

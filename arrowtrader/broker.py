@@ -518,12 +518,12 @@ class ArrowSession:
             'segment': contract.segment,
         }
 
-    def find_symbols(self, pattern, limit=40, segment=None):
+    def find_symbols(self, pattern, limit=40, segment=None, kind=None):
         if self.master is None:
             return None
         return [contract.to_dict()
                 for contract in self.master.search(pattern, segment=segment,
-                                                   limit=limit)]
+                                                   kind=kind, limit=limit)]
 
     def symbol_report(self, symbol):
         if self.master is None:

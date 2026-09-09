@@ -203,3 +203,102 @@ def test_a_missing_contract_is_reported_not_defaulted(master):
     report = master.report('GOLD05JAN99F')
     assert report['found'] is False
     assert 'instrument master' in report['error']
+
+
+# -- futures, on a master that is mostly options ------------------------------
+
+def _mcx_crude():
+    """An MCX underlying as the master actually lists it: a couple of
+    futures and a wall of strikes around them.
+
+    Two details are deliberate and both are load-bearing.
+
+    The options carry NO OptionType, which is how the master lists them
+    and how they came to be classified as futures.
+
+    And THE FUTURES COME LAST. Nothing promises the master groups an
+    underlying's futures before its chain, and a search that stops
+    collecting partway through only finds them if it happens to reach
+    them — a fixture that puts them first proves the search works on a
+    master shaped conveniently, which is not the one that shipped.
+    """
+    rows = []
+    for strike in range(3000, 9000, 50):
+        for letter in 'CP':
+            rows.append({
+                'ExchSeg': 'MCXFO', 'Symbol': 'CRUDEOIL',
+                'TradingSymbol': f'CRUDEOIL17SEP26{letter}{strike}',
+                'OptionType': '', 'Expiry': '17-Sep-2026',
+                'StrikePrice': str(strike), 'LotSize': '100',
+                'Token': str(10000 + strike), 'TickSize': '1'})
+    rows += [
+        {'ExchSeg': 'MCXFO', 'Symbol': 'CRUDEOIL',
+         'TradingSymbol': 'CRUDEOIL17SEP26F', 'OptionType': '',
+         'Expiry': '17-Sep-2026', 'LotSize': '100', 'Token': '1',
+         'TickSize': '1'},
+        {'ExchSeg': 'MCXFO', 'Symbol': 'CRUDEOIL',
+         'TradingSymbol': 'CRUDEOIL19OCT26F', 'OptionType': '',
+         'Expiry': '19-Oct-2026', 'LotSize': '100', 'Token': '2',
+         'TickSize': '1'},
+    ]
+    return rows
+
+
+def _master():
+    from arrowtrader.instruments import Master
+    from arrowtrader.segments import SegmentTable
+    return Master(_mcx_crude(), segments=SegmentTable())
+
+
+def test_an_option_with_NO_option_type_field_is_still_an_OPTION():
+    """`OptionType` is documented as CE/PE with empty meaning a future,
+    and MCX has been seen to leave it empty on options. Classified from
+    that field alone, `CRUDEOIL17SEP26C8950` — a call — was a FUTURE,
+    and a picker filtered to futures offered it as the September
+    contract. A spread built on it is not the spread anybody meant."""
+    master = _master()
+    assert master.contract('CRUDEOIL17SEP26C8950').kind == 'option'
+    assert master.contract('CRUDEOIL17SEP26P3400').kind == 'option'
+    # The control: a future is still a future.
+    assert master.contract('CRUDEOIL17SEP26F').kind == 'future'
+    assert master.contract('CRUDEOIL19OCT26F').kind == 'future'
+
+
+def test_a_search_for_the_UNDERLYING_finds_the_FUTURES_first():
+    """The bug on the screen: two calls in the dropdown and no futures
+    at all.
+
+    Two faults met. The search stopped collecting at `limit * 4` and
+    sorted what it had — on 240 options and 2 futures in insertion
+    order, the futures never reached the sort. And with the options
+    misclassified, no filter could have excluded them either.
+    """
+    found = _master().search('CRUDEOIL', segment='mcx_fo', limit=10)
+    assert found[0].trading_symbol == 'CRUDEOIL17SEP26F'
+    assert found[1].trading_symbol == 'CRUDEOIL19OCT26F'
+
+
+def test_asking_for_FUTURES_returns_only_futures():
+    found = _master().search('CRUDEOIL', segment='mcx_fo', kind='future',
+                             limit=50)
+    assert [c.trading_symbol for c in found] == ['CRUDEOIL17SEP26F',
+                                                 'CRUDEOIL19OCT26F']
+
+
+def test_asking_for_OPTIONS_still_gets_them():
+    """The control. Filtering to futures by default is not the same as
+    pretending the options are not there."""
+    found = _master().search('CRUDEOIL', segment='mcx_fo', kind='option',
+                             limit=5)
+    assert found
+    assert all(c.kind == 'option' for c in found)
+    # Oldest expiry first, then by strike: a chain reads up.
+    strikes = [c.strike for c in found]
+    assert strikes == sorted(strikes)
+
+
+def test_a_FUTURE_is_never_dropped_by_the_search_limit():
+    """The limit trims the tail. It must not trim the head."""
+    for limit in (1, 2, 5, 40):
+        found = _master().search('CRUDEOIL', segment='mcx_fo', limit=limit)
+        assert found[0].trading_symbol == 'CRUDEOIL17SEP26F'

@@ -123,7 +123,7 @@ def test_a_FRESH_INSTALL_walks_all_the_way_to_a_priced_ladder(fresh):
     # -- 3. Connect ---------------------------------------------------------
     live = client.post('/api/connect').get_json()
     assert live['ok'] is True, live.get('error')
-    assert live['master_rows'] == 5
+    assert live['master_rows'] == 7
     assert 'MCXFO' in live['segments']
 
     # -- 4. the segments page, with a real session behind it ---------------

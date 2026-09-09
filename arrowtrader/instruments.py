@@ -227,11 +227,37 @@ class Contract:
         return f'<Contract {self.trading_symbol} lot={self.lot_size}>'
 
 
-def classify(exch_seg, option_type):
-    """cash / option / future, from the two fields that decide it."""
+#: Every spelling an option type has been seen in. NSE and BSE answer
+#: `CE` / `PE`; MCX has been seen to answer the single letter, and to
+#: leave the field empty altogether.
+_OPTION_TYPES = ('CE', 'PE', 'C', 'P', 'CALL', 'PUT')
+
+#: An MCX option's trading symbol ends with the option letter and its
+#: STRIKE — `CRUDEOILM17SEP26C8950`, `GOLD05DEC25P120000`. A future
+#: ends with `F` and no digits — `GOLD05DEC25F`. The distinction is in
+#: the symbol whether or not the master fills the field in.
+_OPTION_SYMBOL = re.compile(r'[CP]\d+$')
+
+
+def classify(exch_seg, option_type, trading_symbol=None):
+    """cash / option / future.
+
+    THE FIELD IS NOT ALWAYS FILLED IN. `OptionType` is documented as
+    `CE` / `PE` with empty meaning a future, and on MCX rows it has
+    been seen empty on options — which classified an option AS A
+    FUTURE. A picker filtered to futures then offers
+    `CRUDEOILM17SEP26C8950`, a call, as though it were the September
+    contract, and a spread built on it is not the spread anybody meant.
+
+    So the symbol is read as well, and it decides when the field does
+    not: an option ends with its type letter and its strike, a future
+    ends with `F`.
+    """
     if str(exch_seg or '').upper().endswith('CM'):
         return 'cash'
-    if str(option_type or '').upper() in ('CE', 'PE'):
+    if str(option_type or '').strip().upper() in _OPTION_TYPES:
+        return 'option'
+    if trading_symbol and _OPTION_SYMBOL.search(str(trading_symbol).upper()):
         return 'option'
     return 'future'
 
@@ -340,7 +366,7 @@ class Master:
             underlying=underlying,
             exch_seg=exch_seg,
             segment=segment,
-            kind=classify(exch_seg, option_type),
+            kind=classify(exch_seg, option_type, trading_symbol),
             option_type=(str(option_type).strip().upper()
                          if option_type else None),
             strike=_positive_float(field(row, 'StrikePrice', 'strike')),
@@ -411,6 +437,18 @@ class Master:
         The operator does not know how a broker spells an instrument
         (`GOLD`, `GOLDM`, `GOLDGUINEA`, `GOLDPETAL` are four different
         contracts), so they search rather than guess.
+
+        EVERY match is collected before sorting. It used to stop at
+        `limit * 4` and sort what it had, which on a crowded underlying
+        is not the same list at all: MCX lists a few futures against
+        thousands of options on CRUDEOIL, so the first 160 rows in
+        insertion order were all options and the futures — the only
+        thing this terminal trades — never reached the sort, let alone
+        the dropdown.
+
+        With no `kind` asked for, FUTURES COME FIRST. A spread ladder
+        is two futures; an option is a deliberate choice and it is not
+        the one a search for "crude" is making.
         """
         needle = str(needle or '').strip().upper()
         found = []
@@ -423,9 +461,9 @@ class Master:
                     and needle not in (contract.underlying or ''):
                 continue
             found.append(contract)
-            if len(found) >= limit * 4:
-                break
-        found.sort(key=_chronological)
+        rank = {'future': 0, 'cash': 1, 'option': 2}
+        found.sort(key=lambda contract: (rank.get(contract.kind, 3),)
+                   + _chronological(contract))
         return found[:limit]
 
     def next_contracts(self, trading_symbol, count=2):

@@ -764,3 +764,44 @@ def test_a_SECRET_survives_the_page_redrawing_underneath_it(panels):
         'the page redrew over the field being typed into')
     assert tab.evaluate(
         "() => document.activeElement.classList.contains('f-password')")
+
+
+def test_the_picker_offers_FUTURES_and_the_KIND_is_on_the_screen(panels):
+    """Two calls in the dropdown and no futures at all, from a live
+    screen.
+
+    The kind filter existed in `Master.search` and neither the endpoint
+    nor the page ever passed it, so every search was unfiltered — and
+    on MCX that means thousands of strikes against a handful of
+    futures. Futures are the default now, and the filter is a control
+    the operator can see rather than a rule they have to infer from
+    what is missing.
+    """
+    tab, _errors, _responses = panels
+    tab.click('#open-settings')
+    tab.wait_for_timeout(700)
+    tab.click('.btn.new-pair')
+    tab.wait_for_timeout(400)
+
+    assert tab.input_value('.pair-leg[data-leg="a"] .p-kind') == 'future'
+
+    box = '.pair-leg[data-leg="a"] .p-search'
+    tab.click(box)
+    tab.type(box, 'GOLD', delay=30)
+    tab.wait_for_timeout(900)
+
+    def listed():
+        return tab.eval_on_selector_all(
+            '.pair-leg[data-leg="a"] .p-symbol option',
+            'nodes => nodes.map(n => n.value).filter(Boolean)')
+
+    futures = listed()
+    assert futures, 'no futures listed'
+    assert all(sym.endswith('F') for sym in futures), futures
+
+    # Switching to Options re-runs the search and shows them.
+    tab.select_option('.pair-leg[data-leg="a"] .p-kind', 'option')
+    tab.wait_for_timeout(900)
+    options = listed()
+    assert options, 'asking for options listed nothing'
+    assert not any(sym.endswith('F') for sym in options), options

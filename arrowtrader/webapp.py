@@ -320,7 +320,13 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             return jsonify({'ok': False, 'error': error, 'symbols': []}), 200
         found = built.find_symbols(request.args.get('q', ''),
                                    limit=int(request.args.get('limit', 40)),
-                                   segment=request.args.get('segment'))
+                                   segment=request.args.get('segment'),
+                                   # FUTURES BY DEFAULT. A spread ladder
+                                   # is two futures; MCX lists thousands
+                                   # of options against a handful of
+                                   # them, and an unfiltered search for
+                                   # "crude" is all calls and puts.
+                                   kind=request.args.get('kind') or 'future')
         return jsonify({'ok': True, 'symbols': found or []})
 
     @app.get('/api/contract/<path:symbol>')
