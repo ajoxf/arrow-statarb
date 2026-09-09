@@ -406,10 +406,19 @@ class ArrowSession:
     def _extra_segment_rows(self, have):
         """Rows for segments `/all` did not carry, from their own routes.
 
-        Only asked for where `/all` came back with NOTHING for that
-        segment — a master that already has the rows is never fetched
-        twice — and a route that is not there is not an error: it means
-        this account's `/all` is the whole story.
+        Asked for where `/all` came back with no FUTURES for the
+        segment — not merely no rows.
+
+        THE DIFFERENCE IS THE WHOLE POINT. Testing "did `/all` mention
+        this segment at all" is satisfied by a single option, so a
+        master carrying MCX's entire option chain and not one future
+        looks complete, `/mcx` is never asked, and the contracts this
+        terminal actually trades never arrive. What the operator sees
+        is an empty futures list on a segment the page has just called
+        ready.
+
+        A route that is not there is still not an error: it means this
+        account's `/all` is the whole story.
         """
         client, extra = self._client, []
         get = getattr(client, '_get', None)
@@ -417,8 +426,20 @@ class ArrowSession:
         if not callable(get) or routes is None:
             return extra
         root = getattr(routes, '_root_url', '') or ''
-        seen = {str(row.get('ExchSeg') or row.get('exch_seg') or '')
-                .strip().upper() for row in have}
+        seen = set()
+        for row in have:
+            exch = str(instr.field(row, 'ExchSeg', 'exch_seg', 'exchseg')
+                       or '').strip().upper()
+            if not exch:
+                continue
+            symbol = instr.field(row, 'TradingSymbol', 'trading_symbol',
+                                 'tsym')
+            kind = instr.classify(
+                exch, instr.field(row, 'OptionType', 'option_type',
+                                  'optiontype'),
+                symbol, instr.field(row, 'StrikePrice', 'strike'))
+            if kind == 'future':
+                seen.add(exch)
         for route, key in self.SEGMENT_ROUTES:
             segment = self.segments.get(key)
             if segment is None or seen & set(segment.spellings()):

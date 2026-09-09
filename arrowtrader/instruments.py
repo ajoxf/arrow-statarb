@@ -438,6 +438,10 @@ class Master:
 
     # -- reading ----------------------------------------------------------
 
+    def every(self):
+        """Every contract in the master, in the order it arrived."""
+        return list(self._by_symbol.values())
+
     def contract(self, trading_symbol):
         """The contract, or None. None is 'not in the master', which the
         caller must report as such — never as a contract with defaults."""

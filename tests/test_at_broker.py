@@ -173,6 +173,35 @@ def test_MCX_is_fetched_from_its_OWN_route_when_all_does_not_carry_it(
     assert built.master_sources['/mcx'] == 6
 
 
+def test_MCX_is_fetched_when_all_has_its_OPTIONS_but_NO_FUTURES(
+        arrow_sdk, monkeypatch):
+    """The condition that was wrong, and the case it lets through.
+
+    Asking "did `/all` mention this segment at all" is satisfied by a
+    single option. A master carrying MCX's entire option chain and not
+    one future therefore looked complete, `/mcx` was never asked, and
+    the contracts this terminal actually trades never arrived — on a
+    segment the Exchanges page had just called ready.
+    """
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    options_only = [row for row in F.MASTER
+                    if row['ExchSeg'] != 'MCXFO' or 'C1' in
+                    row['TradingSymbol'] or 'P1' in row['TradingSymbol']]
+    assert any(row['ExchSeg'] == 'MCXFO' for row in options_only), (
+        'the fixture must still mention MCXFO, or it proves nothing')
+    monkeypatch.setattr(F.FakeArrowClient, 'get_instruments',
+                        lambda self: list(options_only))
+    monkeypatch.setattr(
+        F.FakeArrowClient, 'mcx_rows',
+        [row for row in F.MASTER if row['TradingSymbol'].endswith('F')])
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    assert '/mcx' in built.master_sources, (
+        'a master with MCX options and no MCX futures looked complete')
+    assert built.master.lot_size('GOLD05DEC25F') == 100
+
+
 def test_the_extra_route_is_NOT_asked_for_when_all_already_has_it(
         arrow_sdk, monkeypatch):
     """The control. `/all` on a live account is ~223k rows and the
