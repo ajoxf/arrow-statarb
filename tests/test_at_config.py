@@ -279,3 +279,68 @@ def test_secrets_present_reports_WHETHER_never_WHAT(monkeypatch):
     assert found['ARROW_PASSWORD'] is True
     assert found['ARROW_API_SECRET'] is False
     assert 'hunter2' not in repr(found)
+
+
+# -- reading `.env` without an optional package -------------------------------
+
+def test_ENV_IS_READ_WITHOUT_python_dotenv(tmp_path, monkeypatch):
+    """Every entry point did `try: from dotenv import load_dotenv /
+    except ImportError: pass`.
+
+    Run from outside the virtualenv — where the package is not
+    installed — that skipped the file IN SILENCE, and every credential
+    came back "not set" with a `.env` sitting right there holding all
+    of them. An optional package is a fine convenience and a bad
+    dependency for reading a file we wrote ourselves.
+    """
+    from arrowtrader.config import load_env
+    path = tmp_path / '.env'
+    path.write_text(
+        '# credentials live here\n'
+        '\n'
+        'ARROW_PASSWORD="pw with spaces"\n'
+        "export ARROW_API_SECRET=sec\n"
+        'ARROW_TOTP_SECRET=""\n'
+        'NOT A LINE\n', encoding='utf-8')
+    for key in ('ARROW_PASSWORD', 'ARROW_API_SECRET', 'ARROW_TOTP_SECRET'):
+        monkeypatch.delenv(key, raising=False)
+
+    assert set(load_env(str(path))) == {'ARROW_PASSWORD', 'ARROW_API_SECRET'}
+    # The quoting `env_line` writes, undone.
+    assert os.environ['ARROW_PASSWORD'] == 'pw with spaces'
+    assert os.environ['ARROW_API_SECRET'] == 'sec'
+    # An EMPTY value is not a value. It must not mask a real one set
+    # in the shell, and it is not "read".
+    assert 'ARROW_TOTP_SECRET' not in os.environ
+
+
+def test_a_key_ALREADY_IN_THE_ENVIRONMENT_wins(tmp_path, monkeypatch):
+    """An explicit `set ARROW_PASSWORD=...` is a deliberate override
+    and a file must not quietly undo it."""
+    from arrowtrader.config import load_env
+    path = tmp_path / '.env'
+    path.write_text('ARROW_PASSWORD="from-the-file"\n', encoding='utf-8')
+    monkeypatch.setenv('ARROW_PASSWORD', 'from-the-shell')
+    assert load_env(str(path)) == []
+    assert os.environ['ARROW_PASSWORD'] == 'from-the-shell'
+
+
+def test_a_MISSING_env_file_is_not_an_error():
+    """A first run has none, and the UI writes it."""
+    from arrowtrader.config import load_env
+    assert load_env('/nowhere/at/all/.env') == []
+
+
+def test_what_write_env_value_WRITES_is_what_load_env_READS(tmp_path,
+                                                            monkeypatch):
+    """The round trip, which is the only thing that matters: the UI
+    writes a secret through one function and the engine reads it back
+    through the other, and a quoting difference between them loses a
+    password with a `#` or a space in it."""
+    from arrowtrader.config import load_env, write_env_value
+    path = str(tmp_path / '.env')
+    awkward = 'p#ss w"rd\\with everything'
+    write_env_value(path, 'ARROW_PASSWORD', awkward)
+    monkeypatch.delenv('ARROW_PASSWORD', raising=False)
+    assert load_env(path) == ['ARROW_PASSWORD']
+    assert os.environ['ARROW_PASSWORD'] == awkward

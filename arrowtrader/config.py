@@ -739,6 +739,46 @@ def secrets_present():
                         'ARROW_API_SECRET', 'ARROW_TOTP_SECRET')}
 
 
+def load_env(path='.env'):
+    """Read `.env` into the environment. Returns the keys it set.
+
+    THIS DOES NOT NEED `python-dotenv`. Every entry point used to do
+    `try: from dotenv import load_dotenv / except ImportError: pass`,
+    so running from outside the virtualenv — where the package is not
+    installed — silently skipped the file and every credential came
+    back "not set", with a `.env` sitting right there holding all of
+    them. An optional package is a fine convenience and a bad
+    dependency for reading a file we wrote ourselves.
+
+    A key already in the environment WINS. An explicit
+    `set ARROW_PASSWORD=...` in the shell is a deliberate override and
+    a file must not quietly undo it.
+    """
+    found = []
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            text = handle.read()
+    except OSError:
+        return found
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        if line.lower().startswith('export '):
+            line = line[7:].lstrip()
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip()
+        # The quoting `env_line` writes, undone.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        if not key or not value or os.environ.get(key):
+            continue
+        os.environ[key] = value
+        found.append(key)
+    return found
+
+
 _ENV_SAFE = re.compile(r'[^A-Z0-9]+')
 
 

@@ -180,12 +180,14 @@ def main(argv=None):
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s')
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(args.env)
-    except ImportError:
-        logging.info('python-dotenv is not installed; reading the '
-                     'environment as it stands')
+    # Read `.env` OURSELVES rather than through an optional package.
+    # Depending on python-dotenv meant that running from outside the
+    # virtualenv skipped the file in silence, and every credential came
+    # back "not set" with `.env` sitting right there holding all of
+    # them. A key already in the environment still wins.
+    from arrowtrader.config import load_env
+    loaded = load_env(args.env)
+    logging.info('%s: %d value(s) read', args.env, len(loaded))
 
     ensure_files(args.config, args.env)
     stop = threading.Event()

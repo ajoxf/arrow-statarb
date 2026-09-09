@@ -33,21 +33,26 @@ def main(argv=None):
                         help='how many raw rows to print in full')
     args = parser.parse_args(argv)
 
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(args.env)
-    except ImportError:
-        pass
-
-    from arrowtrader import instruments as instr
     from arrowtrader.broker import ArrowSession
-    from arrowtrader.config import TraderConfig
+    from arrowtrader.config import TraderConfig, load_env
     from arrowtrader.segments import SegmentTable
+
+    # Read `.env` OURSELVES. Depending on python-dotenv meant that
+    # running from outside the virtualenv skipped the file in silence
+    # and reported every credential missing, with `.env` sitting right
+    # there holding all of them.
+    loaded = load_env(args.env)
+    print(f'{args.env}: {len(loaded)} value(s) read'
+          if loaded else
+          f'{args.env}: nothing read from it '
+          f'({"no such file" if not os.path.exists(args.env) else "it set nothing new"})')
 
     config = TraderConfig.from_file(args.config)
     missing = config.account.missing_secrets()
     if missing:
         print('these credentials are not set:', ', '.join(missing))
+        print(f'they are read from {os.path.abspath(args.env)} — check that '
+              f'file, or pass --env with the right path')
         return 1
 
     session = ArrowSession(config.account, SegmentTable(
