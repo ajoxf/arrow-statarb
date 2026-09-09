@@ -59,8 +59,9 @@ def main(argv=None):
               f'file, or pass --env with the right path')
         return 1
 
+    from arrowtrader.broker import scales_from
     session = ArrowSession(config.account, SegmentTable(
-        config.get('SEGMENTS_EXTRA')))
+        config.get('SEGMENTS_EXTRA')), **scales_from(config.settings))
     print('connecting…')
     if not session.initialize():
         print('could not connect:', session.last_error)

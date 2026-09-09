@@ -599,8 +599,12 @@ class _Setup:
             built = self.factory(account)
         else:
             from .broker import ArrowSession
-            built = ArrowSession(account, segments.SegmentTable(
-                (raw.get('settings') or {}).get('SEGMENTS_EXTRA')))
+            from .broker import scales_from
+            built = ArrowSession(
+                account,
+                segments.SegmentTable(
+                    (raw.get('settings') or {}).get('SEGMENTS_EXTRA')),
+                **scales_from(raw.get('settings')))
         if not built.initialize():
             self._refused = (self._clock(), built.last_error)
             return None, built.last_error

@@ -334,7 +334,8 @@ def test_the_full_quote_gives_a_book_and_the_ladder_can_price_it(leg):
 def test_an_LTP_ONLY_build_produces_a_tick_that_prices_NOTHING(session):
     """The degraded case is representable and visibly degraded, rather
     than papered over by copying `last` into both sides."""
-    session.quote_scale = 1.0
+    # The scale is the SESSION'S, unchanged: REST is in paise, and a
+    # degraded feed is degraded in the same units as a good one.
     session._quote_mode = lambda: F.QuoteMode.LTP
     session.stop_stream()
     session._subscribe = lambda contract: False
@@ -670,3 +671,47 @@ def test_a_position_average_uses_the_ORDER_scale_not_the_quote_scale(session):
                                                      'price': 7500100}
     held = session.net_positions('GOLD05DEC25F')[0]
     assert held['price_open'] == 75001.0
+
+
+def test_the_REST_QUOTE_IS_IN_PAISE(session):
+    """MEASURED on a live account, and it was wrong by a factor of 100.
+
+    `--probe` on CRUDEOIL21SEP26F answered `BestBidPrice: 908800` for a
+    contract whose option strikes run 5950 to 10100. The REST quote is
+    in PAISE — and the default said rupees, which put every price on
+    every ladder a hundred times too high with each one looking
+    perfectly plausible. That is the worst shape a scale error can
+    take: nothing about the screen says it is wrong.
+    """
+    tick = session.symbol_tick('GOLD05DEC25F')
+    # The fake holds 74999 / 75001 in rupees and serves paise, as the
+    # live API does.
+    assert tick['bid'] == 74999.0
+    assert tick['ask'] == 75001.0
+    # ...and the BOOK is on the same scale as the touch. A depth level
+    # priced a hundred times off puts size at prices nobody is showing.
+    best = [level for level in tick['depth'] if level['type'] == 'bid'][0]
+    assert best['price'] == 74999.0
+
+
+def test_the_three_scales_are_SETTABLE_and_default_to_what_was_measured():
+    """Three, declared separately, because a quote, a streamed tick and
+    an order's own price come back from different endpoints and there
+    is no reason they must agree.
+
+    Quote and stream are paise, measured. ORDER IS NOT MEASURED —
+    nothing read-only can settle what scale a limit price goes out in —
+    so it stays a declaration a config line can correct rather than a
+    fact.
+    """
+    from arrowtrader.broker import scales_from
+    from arrowtrader.quotes import PAISE, RUPEES
+    assert scales_from({}) == {'quote_scale': PAISE, 'stream_scale': PAISE,
+                               'order_scale': RUPEES}
+    assert scales_from({'ORDER_SCALE': 'paise'})['order_scale'] == PAISE
+    assert scales_from({'QUOTE_SCALE': 'RUPEES'})['quote_scale'] == RUPEES
+    # A number is taken as itself, for a venue that is neither.
+    assert scales_from({'QUOTE_SCALE': 1000})['quote_scale'] == 1000.0
+    # Blank means "the default", not zero — a zero scale divides by
+    # nothing and would take the price with it.
+    assert scales_from({'QUOTE_SCALE': ''})['quote_scale'] == PAISE

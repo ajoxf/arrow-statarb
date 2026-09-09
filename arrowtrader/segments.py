@@ -109,7 +109,17 @@ BUILT_IN = (
     #: SDK's enum has no such value the segment reports not-ready and
     #: says so, which is the honest state — the contracts become
     #: visible and countable without becoming tradeable on a guess.
-    Segment('nse_co', 'NSECO', 'NSECO', 'NSE commodity',
+    #: MEASURED, not guessed. `scripts/arrow_master_dump.py --probe`
+    #: asked Arrow for a quote on CRUDEOIL21SEP26F — an NSECO row — under
+    #: every Exchange value the SDK has. `MCXFO` answered with a book;
+    #: NSE, NFO, BSE, BFO, MCX and INDEX all returned 400.
+    #:
+    #: So the master's own labelling is misleading here: it files these
+    #: contracts as `Exchange: NSE, Segment: CO, ExchSeg: NSECO`, and
+    #: they quote as MCX futures & options. That is not a contradiction
+    #: to resolve by argument — CRUDEOIL, CRUDEOILM and BRCRUDEOIL are
+    #: MCX products, and the ExchSeg is simply not the routing field.
+    Segment('nse_co', 'NSECO', 'MCXFO', 'NSE commodity',
             kinds=('future', 'option')),
     Segment('nse_cd', 'NSECD', 'NSECD', 'NSE currency',
             kinds=('future', 'option')),

@@ -108,8 +108,10 @@ def run_engine(args, stop):
     # what went wrong. What they got was a traceback in a terminal they
     # may not be looking at and no screen at all.
     try:
+        from arrowtrader.broker import scales_from
         session = ArrowSession(config.account, SegmentTable(
-            config.get('SEGMENTS_EXTRA')))
+            config.get('SEGMENTS_EXTRA')),
+            **scales_from(config.settings))
         legs = make_legs([config.account.name], session)
         store = Store(args.db)
         engine = Coordinator(config, legs, status_path=args.status,

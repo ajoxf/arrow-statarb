@@ -133,21 +133,44 @@ def test_NSE_COMMODITY_and_CURRENCY_are_segments_this_build_KNOWS():
     assert 'option' in table.get('nse_co').kinds
 
 
-def test_a_segment_the_SDK_cannot_address_is_VISIBLE_but_not_ready():
-    """The order-side value for these is a GUESS — the ExchSeg itself,
-    by the same pattern MCX turned out to follow. The page checks it
-    rather than trusting it: the contracts become visible and countable
-    without becoming tradeable on a guess."""
+def test_NSE_COMMODITY_QUOTES_UNDER_MCXFO():
+    """MEASURED, not reasoned about.
+
+    `--probe` asked Arrow for a quote on CRUDEOIL21SEP26F — an NSECO
+    row — under every Exchange value the SDK carries. MCXFO answered
+    with a book; NSE, NFO, BSE, BFO, MCX and INDEX all returned 400.
+
+    So the master's own labelling is misleading: it files these as
+    `Exchange: NSE, Segment: CO, ExchSeg: NSECO`, and they quote as MCX
+    futures and options. CRUDEOIL, CRUDEOILM and BRCRUDEOIL are MCX
+    products; the ExchSeg is simply not the routing field.
+    """
     from arrowtrader.segments import SegmentTable, available_segments
-    found = available_segments(SegmentTable(), {'NSECO'},
-                               {'NSE', 'NFO', 'MCXFO'},
+    table = SegmentTable()
+    assert table.exchange_for('nse_co') == 'MCXFO'
+    found = available_segments(table, {'NSECO'}, {'NSE', 'NFO', 'MCXFO'},
                                contract_counts={'NSECO': 25153})
     row = found['nse_co']
     assert row['in_master'] is True
     assert row['contracts'] == 25153
+    assert row['ready'] is True
+
+
+def test_a_segment_the_SDK_cannot_address_is_VISIBLE_but_not_ready():
+    """The control, on the one that is still a guess. NSE currency has
+    not been probed, so its order-side value is the ExchSeg — and the
+    page checks it rather than trusting it: the contracts are visible
+    and countable without becoming tradeable on a guess."""
+    from arrowtrader.segments import SegmentTable, available_segments
+    found = available_segments(SegmentTable(), {'NSECD'},
+                               {'NSE', 'NFO', 'MCXFO'},
+                               contract_counts={'NSECD': 14102})
+    row = found['nse_cd']
+    assert row['in_master'] is True
+    assert row['contracts'] == 14102
     assert row['in_sdk'] is False
     assert row['ready'] is False
-    assert 'NSECO' in row['note']
+    assert 'NSECD' in row['note']
 
 
 def test_a_segments_ORDER_SIDE_VALUE_can_be_corrected_from_CONFIG():

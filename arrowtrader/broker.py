@@ -58,6 +58,40 @@ MARKET_RESOLVE_SEC = 5.0
 FILL_POLL_SEC = 0.2
 
 
+def scales_from(settings):
+    """The three price scales, from config, as kwargs for `ArrowSession`.
+
+    THREE, DECLARED SEPARATELY, and that is not caution for its own
+    sake. A quote, a streamed tick and an order's own price come back
+    from different endpoints and there is no reason they must agree on
+    a scale — the REST quote turned out to be in PAISE while the
+    default said rupees, which put every ladder price a hundred times
+    too high and every one of them looking perfectly plausible.
+
+    `quote` and `stream` are paise, measured. `order` is RUPEES and is
+    NOT measured: nothing read-only can settle what scale a limit price
+    goes out in, and the way to find out is one lot, watched. Until
+    then it is a declaration a config line can correct, not a fact.
+    """
+    settings = settings or {}
+
+    def scale(name, fallback):
+        value = settings.get(name)
+        if value in (None, ''):
+            return fallback
+        if str(value).strip().upper() in ('PAISE', 'PAISA'):
+            return quotes.PAISE
+        if str(value).strip().upper() in ('RUPEES', 'RUPEE', 'INR'):
+            return quotes.RUPEES
+        return float(value)
+
+    return {
+        'quote_scale': scale('QUOTE_SCALE', quotes.PAISE),
+        'stream_scale': scale('STREAM_SCALE', quotes.PAISE),
+        'order_scale': scale('ORDER_SCALE', quotes.RUPEES),
+    }
+
+
 #: "Not asked yet", which is not None — None is a real answer meaning
 #: this build takes no tag at all.
 _UNASKED = object()
@@ -174,7 +208,7 @@ class ArrowSession:
 
     def __init__(self, account, segments, freeze_quantities=None,
                  tick_sizes=None, clock=time.time, sleep=time.sleep,
-                 quote_scale=quotes.RUPEES, stream_scale=quotes.PAISE,
+                 quote_scale=quotes.PAISE, stream_scale=quotes.PAISE,
                  order_scale=quotes.RUPEES):
         self.account = account
         self.segments = segments
@@ -187,6 +221,11 @@ class ArrowSession:
         #: WebSocket is documented as paise, REST is per build. Both
         #: are declared rather than guessed, so a wrong answer is one
         #: config line instead of a hundredfold error in the parser.
+        #: PAISE, MEASURED. `--probe` on CRUDEOIL21SEP26F answered
+        #: bid 908800 / ask 908900 on a contract whose option strikes
+        #: run 5950 to 10100 — so the REST quote is in paise and a
+        #: ladder built on it unscaled is a hundred times too high,
+        #: with every price on it perfectly plausible-looking.
         self.quote_scale = quote_scale
         self.stream_scale = stream_scale
         #: ...AND THE ORDER SIDE IS A THIRD ANSWER. An average fill

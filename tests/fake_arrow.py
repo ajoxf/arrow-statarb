@@ -261,14 +261,25 @@ class FakeArrowClient:
             row = next((r for r in self.master
                         if r['TradingSymbol'] == symbol), None)
             lot = int((row or {}).get('LotSize') or 1)
+            # PAISE, ON REST AS WELL AS ON THE STREAM. Measured:
+            # `--probe` on CRUDEOIL21SEP26F answered BestBidPrice
+            # 908800 on a contract whose option strikes run 5950 to
+            # 10100. This fake served REST in RUPEES, which is what let
+            # a rupees default look correct here and put every live
+            # ladder price a hundred times too high.
+            def paise(value):
+                return None if value is None else round(value * 100.0)
+
             if mode is QuoteMode.LTP:
                 # The DEGRADED shape: last trade, no book at all.
-                out.append({'TradingSymbol': symbol, 'Ltp': last})
+                out.append({'TradingSymbol': symbol, 'Ltp': paise(last)})
                 continue
             out.append({
                 'TradingSymbol': symbol,
-                'Ltp': last, 'BestBidPrice': bid, 'BestAskPrice': ask,
-                'Open': last, 'High': last + 20, 'Low': last - 20,
+                'Ltp': paise(last),
+                'BestBidPrice': paise(bid), 'BestAskPrice': paise(ask),
+                'Open': paise(last), 'High': paise(last + 20),
+                'Low': paise(last - 20),
                 'Volume': 4321,
                 # DEPTH IS IN UNITS, as it is on the wire — five
                 # levels a side, each a whole number of LOTS times the
@@ -277,9 +288,9 @@ class FakeArrowClient:
                 # lot, which is not a quantity MCX can show, and a
                 # ladder correctly rounding it to nothing then looks
                 # broken.
-                'Bids': [{'price': bid - n, 'quantity': (3 + n) * lot}
+                'Bids': [{'price': paise(bid - n), 'quantity': (3 + n) * lot}
                          for n in range(5)],
-                'Asks': [{'price': ask + n, 'quantity': (2 + n) * lot}
+                'Asks': [{'price': paise(ask + n), 'quantity': (2 + n) * lot}
                          for n in range(5)],
             })
         return out
