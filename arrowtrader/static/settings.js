@@ -297,7 +297,24 @@
       html += '<td>' + esc(row.ready ? 'ready' : row.note) + '</td>';
       html += '</tr>';
     });
-    return html + '</tbody></table>';
+    html += '</tbody></table>';
+    // The rows the master carried that no segment here can name. Tens
+    // of thousands of them on a live account, and until now they were
+    // a log line — which is not where anybody looks when a search
+    // comes back empty.
+    var unknown = found.unknown || {};
+    var names = Object.keys(unknown);
+    if (names.length) {
+      html += '<div class="spec-problem">The master also carries ' +
+        names.map(function (name) {
+          return '<b>' + Number(unknown[name]).toLocaleString('en-IN') +
+            '</b> ' + esc(name);
+        }).join(' and ') + ' contracts. This build has no segment for ' +
+        (names.length === 1 ? 'it' : 'them') + ', so they cannot be ' +
+        'searched or traded — every one is invisible to the picker, ' +
+        'which looks exactly like a contract that is not there.</div>';
+    }
+    return html;
   }
 
   // -- charges --------------------------------------------------------------

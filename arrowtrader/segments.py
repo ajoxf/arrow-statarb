@@ -95,6 +95,24 @@ BUILT_IN = (
     Segment('bse_fo', 'BSEFO', 'BFO', 'BSE F&O',
             kinds=('future', 'option'), aliases=('BFO',)),
     Segment('bse_cm', 'BSECM', 'BSE', 'BSE cash', kinds=('cash',)),
+    #: NSE's OWN commodity segment, and its currency one. Arrow's master
+    #: carries tens of thousands of rows on each — CRUDEOIL's whole
+    #: option chain is on NSECO — and a build that does not know a
+    #: segment gives every contract on it `segment=None`, which makes it
+    #: invisible to EVERY segment-filtered search. That is
+    #: indistinguishable, on the screen, from a contract that is not
+    #: there at all.
+    #:
+    #: The order-side value is the ExchSeg itself, by the same pattern
+    #: MCX turned out to follow (`MCXFO`, not `MCX`). It is a GUESS, and
+    #: it is one the Exchanges page checks rather than trusts: where the
+    #: SDK's enum has no such value the segment reports not-ready and
+    #: says so, which is the honest state — the contracts become
+    #: visible and countable without becoming tradeable on a guess.
+    Segment('nse_co', 'NSECO', 'NSECO', 'NSE commodity',
+            kinds=('future', 'option')),
+    Segment('nse_cd', 'NSECD', 'NSECD', 'NSE currency',
+            kinds=('future', 'option')),
 )
 
 

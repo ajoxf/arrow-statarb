@@ -74,17 +74,25 @@ def main(argv=None):
                if needle in contract.trading_symbol
                or needle in (contract.underlying or '')]
     print(f'\n{len(matches)} contracts match {needle!r}')
-    kinds = {}
+    # BY SEGMENT AS WELL AS BY KIND. A contract on a segment this build
+    # does not know has `segment=None` and is invisible to every
+    # segment-filtered search — which looks exactly like a contract
+    # that is not there.
+    breakdown = {}
     for contract in matches:
-        kinds[contract.kind] = kinds.get(contract.kind, 0) + 1
-    print('   by kind:', kinds or 'none')
+        key = (contract.exch_seg, contract.segment, contract.kind)
+        breakdown[key] = breakdown.get(key, 0) + 1
+    print('   by segment and kind:')
+    for (exch, segment, kind), count in sorted(breakdown.items()):
+        mark = '' if segment else '   <-- NO SEGMENT: INVISIBLE TO THE PICKER'
+        print(f'      {exch:<8} {str(segment):<10} {kind:<8} {count:>7,}{mark}')
 
     futures = [c for c in matches if c.kind == 'future']
     print(f'\nFUTURES ({len(futures)}):')
     for contract in futures[:20]:
-        print(f'   {contract.trading_symbol:<28} expiry={contract.expiry} '
-              f'lot={contract.lot_size} tick={contract.tick_size} '
-              f'token={contract.token}')
+        print(f'   {contract.trading_symbol:<22} {contract.exch_seg:<7} '
+              f'seg={str(contract.segment):<8} expiry={contract.expiry} '
+              f'lot={contract.lot_size} tick={contract.tick_size}')
     if not futures:
         print('   NONE — and that is the thing to explain.')
 

@@ -560,3 +560,12 @@ def test_a_search_that_matches_NOTHING_AT_ALL_says_that_too(client):
         '/api/find?q=ZZQQNOTHING&segment=mcx_fo').get_json()
     assert body['symbols'] == []
     assert body['other_kinds'] == {}
+
+
+def test_the_segments_endpoint_NAMES_what_it_could_not_group(client, paths):
+    """Tens of thousands of rows on a live account sat in segments this
+    build had no name for, and it was a LOG LINE — which is not where
+    anybody looks when a search comes back empty."""
+    body = client.get('/api/segments').get_json()
+    assert 'unknown' in body
+    assert isinstance(body['unknown'], dict)

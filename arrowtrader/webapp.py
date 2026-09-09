@@ -331,6 +331,13 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         return jsonify({
             'ok': True,
             'segments': found,
+            # SEGMENTS THE MASTER CARRIES AND THIS BUILD CANNOT NAME.
+            # Every contract on one has `segment=None` and is invisible
+            # to every segment-filtered search — which on the screen is
+            # indistinguishable from a contract that is not there. It
+            # was a log line only, and a log line is not where anybody
+            # looks when a search comes back empty.
+            'unknown': dict(built.master.unknown_exch_segs),
             # THE ORDER IS DATA. Flask sorts a dict's keys before it
             # writes JSON, so the segment table's own order — MCX
             # first, because MCX is the product — arrives at the

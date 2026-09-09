@@ -113,3 +113,38 @@ def test_a_segment_the_master_does_not_carry_names_EVERY_spelling_it_looked_for(
     note = found['mcx_fo']['note']
     assert 'MCXFO' in note and 'MCX' in note
     assert found['mcx_fo']['ready'] is False
+
+
+def test_NSE_COMMODITY_and_CURRENCY_are_segments_this_build_KNOWS():
+    """Two segments a live master turned out to carry in bulk: 25,153
+    NSECO rows and 14,102 NSECD, on one account.
+
+    CRUDEOIL's whole option chain is on NSECO. A build that does not
+    know a segment gives every contract on it `segment=None`, and a
+    None segment matches no segment filter — so the picker showed
+    nothing for CRUDEOIL under every segment it offered, which on the
+    screen is indistinguishable from a contract that is not in the
+    master at all.
+    """
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable()
+    assert table.key_for_exch_seg('NSECO') == 'nse_co'
+    assert table.key_for_exch_seg('NSECD') == 'nse_cd'
+    assert 'option' in table.get('nse_co').kinds
+
+
+def test_a_segment_the_SDK_cannot_address_is_VISIBLE_but_not_ready():
+    """The order-side value for these is a GUESS — the ExchSeg itself,
+    by the same pattern MCX turned out to follow. The page checks it
+    rather than trusting it: the contracts become visible and countable
+    without becoming tradeable on a guess."""
+    from arrowtrader.segments import SegmentTable, available_segments
+    found = available_segments(SegmentTable(), {'NSECO'},
+                               {'NSE', 'NFO', 'MCXFO'},
+                               contract_counts={'NSECO': 25153})
+    row = found['nse_co']
+    assert row['in_master'] is True
+    assert row['contracts'] == 25153
+    assert row['in_sdk'] is False
+    assert row['ready'] is False
+    assert 'NSECO' in row['note']
