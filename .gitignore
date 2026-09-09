@@ -34,3 +34,9 @@ htmlcov/
 
 # Runtime data
 data/trades.json
+
+# Arrow Trader
+arrowtrader.db
+status.json
+commands.jsonl
+results.json

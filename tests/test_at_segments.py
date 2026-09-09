@@ -1,0 +1,189 @@
+"""Segments — MCX is expressible, and what is missing is SAID."""
+
+from arrowtrader.segments import SegmentTable, available_segments
+
+
+def test_mcx_is_in_the_table_at_all():
+    """The stat-arb broker refuses MCX outright and has no entry for
+    it. Here it is data, so 'MCX first, NSE next' is one switch."""
+    table = SegmentTable()
+    segment = table.get('mcx_fo')
+    assert segment.exch_seg == 'MCXFO'
+    # MCXFO, not MCX. The SDK carries both and says which is which:
+    # `MCX` is for permission checks and the instrument download,
+    # `MCXFO` is what an order, a quote and a margin request carry. A
+    # quote sent to `MCX` is not refused — it comes back with no book,
+    # which on a ladder is indistinguishable from a contract that is
+    # not trading.
+    assert segment.exchange == 'MCXFO'
+
+
+def test_the_master_field_and_the_order_field_are_not_the_same():
+    """`ExchSeg` is MCXFO / NSEFO; the order carries MCX / NFO.
+    Conflating them sends an order to the wrong exchange."""
+    table = SegmentTable()
+    assert table.exch_seg_for('nse_fo') == 'NSEFO'
+    assert table.exchange_for('nse_fo') == 'NFO'
+
+
+def test_lookup_is_case_and_whitespace_tolerant():
+    table = SegmentTable()
+    assert table.get(' MCX_FO ').key == 'mcx_fo'
+    assert table.key_for_exch_seg('mcxfo') == 'mcx_fo'
+
+
+def test_an_unknown_segment_is_none_not_a_guess():
+    assert SegmentTable().get('ncdex') is None
+    assert SegmentTable().exchange_for('ncdex') is None
+
+
+def test_config_can_add_a_segment_without_a_code_change():
+    table = SegmentTable({'ncdex_fo': {'exch_seg': 'NCDEXFO',
+                                       'exchange': 'NCDEX',
+                                       'label': 'NCDEX futures'}})
+    assert table.exchange_for('ncdex_fo') == 'NCDEX'
+
+
+def test_a_segment_the_master_has_no_rows_for_is_named_as_such():
+    table = SegmentTable()
+    report = available_segments(table, ['NSEFO', 'NSECM'], ['NSE', 'NFO'])
+    assert report['nse_fo']['ready'] is True
+    assert report['mcx_fo']['ready'] is False
+    assert 'not be entitled' in report['mcx_fo']['note']
+
+
+def test_a_segment_the_SDK_cannot_address_is_a_different_fault():
+    """Master rows but no enum value is 'upgrade the SDK', not 'ask
+    Arrow to enable the segment'. Same symptom, different fix."""
+    table = SegmentTable()
+    report = available_segments(table, ['MCXFO'], ['NSE', 'NFO'])
+    assert report['mcx_fo']['ready'] is False
+    assert report['mcx_fo']['in_master'] is True
+    # The VERSION, not just 'upgrade': on the one segment this
+    # system exists for, the answer is a single release number.
+    assert '1.7.0' in report['mcx_fo']['note']
+
+
+def test_an_unreadable_sdk_enum_is_UNKNOWN_not_a_failure():
+    """Unmeasured is not zero: if the enum could not be read we do not
+    claim the segment is broken."""
+    report = available_segments(SegmentTable(), ['MCXFO'], None)
+    assert report['mcx_fo']['in_sdk'] is None
+    assert report['mcx_fo']['ready'] is True
+
+
+def test_a_master_spelling_MCX_still_lands_in_the_MCX_segment():
+    """The tolerance, and why it exists.
+
+    Arrow documents four `ExchSeg` values — NSECM, NSEFO, BSECM,
+    BSEFO — and documents nothing for the commodity segment. If the
+    master spells it `MCX` where this build expects `MCXFO`, nothing
+    fails loudly: every MCX row lands in `unknown_exch_segs`, the
+    picker finds no contracts, and the Exchanges page reports that the
+    account is not entitled to a segment it is perfectly entitled to.
+    """
+    from arrowtrader.segments import SegmentTable, available_segments
+    table = SegmentTable()
+    assert table.key_for_exch_seg('MCX') == 'mcx_fo'
+    assert table.key_for_exch_seg('MCXFO') == 'mcx_fo'
+    found = available_segments(table, {'MCX'}, {'MCXFO'})
+    assert found['mcx_fo']['in_master'] is True
+    assert found['mcx_fo']['ready'] is True
+
+
+def test_an_EXACT_spelling_always_outranks_another_segments_alias():
+    """The control. An alias is a tolerance; a tolerance that can beat
+    an exact match is a bug waiting for the first master that carries
+    both spellings."""
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable()
+    # `NFO` is NSE F&O's alias and nobody else's exact value...
+    assert table.key_for_exch_seg('NFO') == 'nse_fo'
+    # ...and `NSEFO`, an exact value, still resolves to itself.
+    assert table.key_for_exch_seg('NSEFO') == 'nse_fo'
+    # An unknown segment stays unknown rather than being absorbed.
+    assert table.key_for_exch_seg('CDS') is None
+
+
+def test_a_segment_the_master_does_not_carry_names_EVERY_spelling_it_looked_for():
+    """The operator has to be able to check the claim. 'No MCXFO
+    contracts' is not checkable if the code also looked for MCX."""
+    from arrowtrader.segments import SegmentTable, available_segments
+    found = available_segments(SegmentTable(), {'NSEFO'}, {'MCXFO', 'NFO'})
+    note = found['mcx_fo']['note']
+    assert 'MCXFO' in note and 'MCX' in note
+    assert found['mcx_fo']['ready'] is False
+
+
+def test_NSE_COMMODITY_and_CURRENCY_are_segments_this_build_KNOWS():
+    """Two segments a live master turned out to carry in bulk: 25,153
+    NSECO rows and 14,102 NSECD, on one account.
+
+    CRUDEOIL's whole option chain is on NSECO. A build that does not
+    know a segment gives every contract on it `segment=None`, and a
+    None segment matches no segment filter — so the picker showed
+    nothing for CRUDEOIL under every segment it offered, which on the
+    screen is indistinguishable from a contract that is not in the
+    master at all.
+    """
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable()
+    assert table.key_for_exch_seg('NSECO') == 'nse_co'
+    assert table.key_for_exch_seg('NSECD') == 'nse_cd'
+    assert 'option' in table.get('nse_co').kinds
+
+
+def test_NSE_COMMODITY_QUOTES_UNDER_MCXFO():
+    """MEASURED, not reasoned about.
+
+    `--probe` asked Arrow for a quote on CRUDEOIL21SEP26F — an NSECO
+    row — under every Exchange value the SDK carries. MCXFO answered
+    with a book; NSE, NFO, BSE, BFO, MCX and INDEX all returned 400.
+
+    So the master's own labelling is misleading: it files these as
+    `Exchange: NSE, Segment: CO, ExchSeg: NSECO`, and they quote as MCX
+    futures and options. CRUDEOIL, CRUDEOILM and BRCRUDEOIL are MCX
+    products; the ExchSeg is simply not the routing field.
+    """
+    from arrowtrader.segments import SegmentTable, available_segments
+    table = SegmentTable()
+    assert table.exchange_for('nse_co') == 'MCXFO'
+    found = available_segments(table, {'NSECO'}, {'NSE', 'NFO', 'MCXFO'},
+                               contract_counts={'NSECO': 25153})
+    row = found['nse_co']
+    assert row['in_master'] is True
+    assert row['contracts'] == 25153
+    assert row['ready'] is True
+
+
+def test_a_segment_the_SDK_cannot_address_is_VISIBLE_but_not_ready():
+    """The control, on the one that is still a guess. NSE currency has
+    not been probed, so its order-side value is the ExchSeg — and the
+    page checks it rather than trusting it: the contracts are visible
+    and countable without becoming tradeable on a guess."""
+    from arrowtrader.segments import SegmentTable, available_segments
+    found = available_segments(SegmentTable(), {'NSECD'},
+                               {'NSE', 'NFO', 'MCXFO'},
+                               contract_counts={'NSECD': 14102})
+    row = found['nse_cd']
+    assert row['in_master'] is True
+    assert row['contracts'] == 14102
+    assert row['in_sdk'] is False
+    assert row['ready'] is False
+    assert 'NSECD' in row['note']
+
+
+def test_a_segments_ORDER_SIDE_VALUE_can_be_corrected_from_CONFIG():
+    """The order-side exchange for NSE commodity is a guess, and the
+    probe measures it. Whatever it comes back with has to be
+    applicable WITHOUT a code change — a value learnt from a live
+    account at 14:40 is no use if it needs a release."""
+    from arrowtrader.segments import SegmentTable
+    table = SegmentTable({'nse_co': {'exch_seg': 'NSECO', 'exchange': 'NSE',
+                                     'label': 'NSE commodity',
+                                     'kinds': ['future', 'option']}})
+    assert table.exchange_for('nse_co') == 'NSE'
+    assert table.exch_seg_for('nse_co') == 'NSECO'
+    assert table.key_for_exch_seg('NSECO') == 'nse_co'
+    # ...and the built-ins it did not name are untouched.
+    assert table.exchange_for('mcx_fo') == 'MCXFO'
