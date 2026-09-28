@@ -140,11 +140,13 @@
                  What IS kept is the arrival rate, because a feed going
                  thin is what collapses sigma. -->
             <!-- Live spread + z, always visible in the header (no chart needed). -->
-            <div class="text-end me-4" title="Live spread = hedge_ratio×Leg A − Leg B, and its z-score">
-                <div class="fw-bold font-monospace"><span id="header-spread">&mdash;</span>
-                    <span class="ms-2" id="header-zscore" style="font-size:0.8rem;">&mdash;</span>
+            <div class="text-end me-4" title="Sell spread (Bid A − Ask B) and Buy spread (Ask A − Bid B): the prices the algo trades on.">
+                <div class="fw-bold font-monospace">
+                    <span class="price-down" id="header-sell">&mdash;</span>
+                    <span class="text-secondary mx-1">/</span>
+                    <span class="price-up" id="header-buy">&mdash;</span>
                 </div>
-                <small class="text-secondary">spread · z</small>
+                <small class="text-secondary">sell / buy spread</small>
             </div>
             <div class="text-end">
                 <div id="data-count-rate" class="fw-bold font-monospace">&mdash;</div>
@@ -338,37 +340,33 @@
             </div>
             <div class="card-body py-2">
                 <div class="row align-items-center">
-                    <div class="col-4 text-center">
-                        <div class="metric-value" style="font-size: 2rem;" id="current-zscore">0.00</div>
-                        <div class="metric-label">Z-Score</div>
+                    <div class="d-none" aria-hidden="true">
+                        <span id="current-zscore"></span><span id="spread-value"></span>
+                        <span id="spread-breakdown"></span>
+                        <span id="fair-value-row"><span id="fair-value"></span><span id="fair-gap"></span></span>
                     </div>
                     <div class="col-4 text-center">
-                        <div class="price-large" id="spread-value" style="font-size: 1.5rem;">0.00</div>
-                        <div class="metric-label">Spread (mid)</div>
-                        <div class="text-secondary mt-1" style="font-size: 0.6rem; display:none;"
-                             id="spread-breakdown"
-                             title="What the engine z-scores: the hedge ratio times Leg A minus Leg B, on the mid of each book."></div>
-                        <!-- Executable spreads off the book: the prices the orders would meet. -->
-                        <div class="d-flex justify-content-center gap-3 mt-1 font-monospace" style="font-size: 0.75rem;">
-                            <div title="SELL SPREAD = Bid Leg A − Ask Leg B (× hedge ratio on A): what you get for selling the spread — sell Leg A at its bid, buy Leg B at its ask. A SHORT entry and a LONG exit trade here.">
-                                <div class="text-secondary" style="font-size: 0.6rem;">SELL (Bid A − Ask B)</div>
-                                <span id="sell-spread-value" class="price-down">&mdash;</span>
-                                <span id="sell-spread-z" class="text-secondary" style="font-size: 0.65rem;"></span>
+                        <div id="sell-spread-tile" class="p-2 rounded" style="border: 2px solid transparent;"
+                             title="What selling the spread gets NOW: sell Leg A at its bid, buy Leg B at its ask (× hedge ratio on A). The algo SHORTS the spread when this price's z reaches +entry, and closes a LONG here.">
+                            <div class="metric-label mb-1" style="font-size:0.7rem; letter-spacing:0.04em;">
+                                <strong>SELL SPREAD</strong> <span class="text-secondary">Bid A − Ask B</span></div>
+                            <div class="font-monospace fw-bold price-down" id="sell-spread-value" style="font-size: 1.9rem; line-height:1.1;">&mdash;</div>
+                            <div class="font-monospace mt-1" style="font-size: 0.95rem;">
+                                <span id="sell-spread-z" class="text-secondary">&mdash;</span>
                             </div>
-                            <div title="BUY SPREAD = Ask Leg A − Bid Leg B (× hedge ratio on A): what buying the spread costs — buy Leg A at its ask, sell Leg B at its bid. A LONG entry and a SHORT exit trade here.">
-                                <div class="text-secondary" style="font-size: 0.6rem;">BUY (Ask A − Bid B)</div>
-                                <span id="buy-spread-value" class="price-up">&mdash;</span>
-                                <span id="buy-spread-z" class="text-secondary" style="font-size: 0.65rem;"></span>
-                            </div>
+                            <div id="sell-spread-note" class="text-secondary" style="font-size: 0.62rem;">short entry · long exit</div>
                         </div>
-                        <div class="mt-1" style="font-size: 0.6rem; display:none;" id="fair-value-row"
-                             title="Theoretical value of the spread from cost of carry. REFERENCE ONLY — the signal is the z-score on the spread and never reads this. A large gap usually means the contract month, multiplier or contract size is wrong, not that the trade is good.">
-                            <span class="text-secondary">fair</span>
-                            <span class="text-info" id="fair-value">&mdash;</span>
-                            <span class="text-secondary" id="fair-gap"></span>
-                            <span class="badge bg-secondary ms-1" style="font-size: 0.5rem;">ref only</span>
-                            <a href="/settings#pair-selection" class="ms-1 text-secondary"
-                               title="Carry rate and pair type — Settings &rarr; Pair Selection">edit</a>
+                    </div>
+                    <div class="col-4 text-center">
+                        <div id="buy-spread-tile" class="p-2 rounded" style="border: 2px solid transparent;"
+                             title="What buying the spread costs NOW: buy Leg A at its ask, sell Leg B at its bid (× hedge ratio on A). The algo goes LONG the spread when this price's z reaches −entry, and closes a SHORT here.">
+                            <div class="metric-label mb-1" style="font-size:0.7rem; letter-spacing:0.04em;">
+                                <strong>BUY SPREAD</strong> <span class="text-secondary">Ask A − Bid B</span></div>
+                            <div class="font-monospace fw-bold price-up" id="buy-spread-value" style="font-size: 1.9rem; line-height:1.1;">&mdash;</div>
+                            <div class="font-monospace mt-1" style="font-size: 0.95rem;">
+                                <span id="buy-spread-z" class="text-secondary">&mdash;</span>
+                            </div>
+                            <div id="buy-spread-note" class="text-secondary" style="font-size: 0.62rem;">long entry · short exit</div>
                         </div>
                     </div>
                     <div class="col-4 text-center">
@@ -2181,14 +2179,32 @@
 
         // Executable spreads. "—" when a side of either book is empty (the
         // feed is LTP-only, or nobody is quoting that side): never the LTP.
-        const _fmtSide = (valId, zId, v, z) => {
-            const ve = document.getElementById(valId), ze = document.getElementById(zId);
+        // The tile lights up when ITS price is past the entry threshold — the
+        // condition the algo acts on (a SHORT on the sell price, a LONG on the buy).
+        const entryZ = Number(data.entry_threshold || data.entry_zscore || 2);
+        const _fmtSide = (side, v, z, armed) => {
+            const ve = document.getElementById(side + '-spread-value');
+            const ze = document.getElementById(side + '-spread-z');
+            const tile = document.getElementById(side + '-spread-tile');
             if (ve) ve.textContent = (v != null && isFinite(v)) ? Number(v).toFixed(2) : '—';
-            if (ze) ze.textContent = (z != null && isFinite(z))
-                ? '(' + (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ)' : '';
+            if (ze) {
+                ze.textContent = (z != null && isFinite(z))
+                    ? 'z ' + (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ' : 'z —';
+                ze.className = armed ? 'fw-bold ' + (side === 'sell' ? 'price-down' : 'price-up')
+                                     : 'text-secondary';
+            }
+            if (tile) tile.style.borderColor = armed
+                ? (side === 'sell' ? 'var(--accent-red, #dc3545)' : 'var(--accent-green, #198754)')
+                : 'transparent';
         };
-        _fmtSide('sell-spread-value', 'sell-spread-z', data.sell_spread, data.z_sell);
-        _fmtSide('buy-spread-value', 'buy-spread-z', data.buy_spread, data.z_buy);
+        _fmtSide('sell', data.sell_spread, data.z_sell,
+                 data.z_sell != null && data.z_sell >= entryZ);
+        _fmtSide('buy', data.buy_spread, data.z_buy,
+                 data.z_buy != null && data.z_buy <= -entryZ);
+
+        const hS = document.getElementById('header-sell'), hB = document.getElementById('header-buy');
+        if (hS) hS.textContent = data.sell_spread != null ? Number(data.sell_spread).toFixed(2) : '—';
+        if (hB) hB.textContent = data.buy_spread != null ? Number(data.buy_spread).toFixed(2) : '—';
 
         // Mirror spread + z into the always-visible header readout.
         const hSpread = document.getElementById('header-spread');
