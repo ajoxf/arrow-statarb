@@ -548,6 +548,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                target_net=rec.get("target"))
                 except Exception:                        # noqa: BLE001 — never block a close
                     pass
+            # A MANUAL close of the algo's own position must tell the algo, or
+            # it keeps managing a position that no longer exists and later
+            # "exits" it — opening the opposite trade. The algo's own exits
+            # (source="algo") clear themselves in ArrowAutoTrader._exit.
+            if source != "algo":
+                _ap = (arrow_algo.get_state() or {}).get("position")
+                if isinstance(_ap, dict) and _ap.get("direction") == direction:
+                    arrow_algo.clear_position(f"closed manually ({source})")
             _np = float(rec.get("net_pnl", 0) or 0)
             _emoji = "🟢" if _np > 0 else ("🔴" if _np < 0 else "⚪")
             telegram.notify(
@@ -1278,6 +1286,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             edge = {}
         min_mult = edge.get("min_edge_multiple")
 
+        # get_state()["position"] is the position RECORD (a dict), not a label.
+        # The card wants LONG / SHORT / NONE; reading the dict as a label made
+        # the badge "[object Object]" and every SHORT show as LONG.
+        _pos = st.get("position") if isinstance(st.get("position"), dict) else {}
+        _dir = _pos.get("direction")
+        pos_label = ("LONG" if _dir == "LONG_SPREAD" else
+                     "SHORT" if _dir == "SHORT_SPREAD" else "NONE")
+
         signal = {
             "zscore": sig.get("zscore"), "spread": sig.get("spread"),
             # Executable spreads off the book (None where a side is empty):
@@ -1339,20 +1355,39 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "hedge_ratio": hedge_ratio,
             "entry_threshold": float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
             "trade_direction": _trade_direction(),
-            "current_position": st.get("position") or "NONE",
+            "current_position": pos_label,
         }
 
         open_trade = None
         if st.get("in_position"):
             open_trade = {
-                "position_type": ("SHORT" if st.get("position") == "SHORT_SPREAD" else "LONG"),
-                "quantity": st.get("lots"), "entry_spread": st.get("entry_spread"),
-                "entry_zscore": st.get("entry_z"), "pnl_usd": st.get("net_pnl"),
+                "position_type": pos_label,
+                "quantity": _pos.get("lots"),
+                "entry_spread": (st.get("entry_spread") if st.get("entry_spread") is not None
+                                 else _pos.get("entry_fill_spread", _pos.get("entry_spread"))),
+                "entry_zscore": _pos.get("entry_z"),
+                "entry_spot_price": _pos.get("entry_leg_a"),
+                "entry_futures_price": _pos.get("entry_leg_b"),
+                # UTC, no zone suffix: the page appends 'Z' itself.
+                "entry_time": (datetime.fromtimestamp(float(_pos["entry_time"]), timezone.utc)
+                               .replace(tzinfo=None).isoformat(timespec="seconds")
+                               if _pos.get("entry_time") else None),
+                "pnl_usd": st.get("net_pnl"),
                 "unrealized_pnl": st.get("net_pnl"),
                 "peak_net_usd": st.get("peak_pnl"), "trough_net_usd": st.get("trough_pnl"),
                 "notional_usd": st.get("notional"), "age_seconds": st.get("held_sec"),
                 "max_hold_minutes": (st.get("max_hold_sec") or 0) / 60.0,
-                "exit_target_usd": st.get("profit_target"), "exit_stop_usd": st.get("dollar_stop"),
+                # The algo reports its ₹ stop as a negative P&L level; the card
+                # wants its size. None = off.
+                "exit_target_usd": st.get("profit_target"),
+                "exit_stop_usd": (abs(float(st["dollar_stop"]))
+                                  if st.get("dollar_stop") else None),
+                # BE / TP / SL / EX as SPREAD prices on the closing side (the
+                # sell spread for a LONG, the buy spread for a SHORT), solved
+                # from the same net-P&L formula the exits fire on.
+                "spread_levels": st.get("spread_levels"),
+                "exit_gate_floor_usd": ((st.get("spread_levels") or {}).get("gate_release")
+                                        and float(cfg.get("exits.reversion_gate_inr", 0) or 0)) or None,
                 "is_open": True, "is_paper": _mode() != "live",
             }
 
@@ -1368,7 +1403,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         futures_tick = ({"bid": sig.get("bid_b"), "ask": sig.get("ask_b"), "last": px_b}
                         if px_b else None)
         return jsonify({
-            "position": st.get("position") or "NONE",
+            "position": pos_label,
             "open_trade": open_trade,
             "spot_tick": spot_tick, "futures_tick": futures_tick,
             "execution_backend": "stream" if la else "REST",
@@ -1636,10 +1671,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_engine_close_position_w3():
         st = arrow_algo.get_state() or {}
         pos = st.get("position")
-        if not st.get("in_position") or not pos:
+        if not st.get("in_position") or not isinstance(pos, dict) \
+                or pos.get("direction") not in ("LONG_SPREAD", "SHORT_SPREAD"):
             return jsonify({"success": False, "error": "No open position"})
-        direction = "LONG_SPREAD" if pos == "LONG_SPREAD" else "SHORT_SPREAD"
-        res = _spread_close(direction, int(st.get("lots", 1) or 1), source="manual")
+        # The position RECORD says what is held. Comparing the record to a
+        # string never matched, so every close was sent as a SHORT close — on
+        # a LONG that BOUGHT a second spread instead of closing it — and at
+        # 1 lot whatever the size.
+        res = _spread_close(pos["direction"], int(pos.get("lots", 1) or 1), source="manual")
         return jsonify({"success": bool(res.get("success", res.get("ok", False))), **res})
 
     @app.route("/api/engine/sync-position", methods=["POST"])

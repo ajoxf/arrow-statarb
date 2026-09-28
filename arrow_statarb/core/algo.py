@@ -310,21 +310,7 @@ class ArrowAutoTrader:
         change = ((cur_spread - entry) if pos["direction"] == "LONG_SPREAD"
                   else (entry - cur_spread))
         gross = change * lots * lot_mult
-        # Round-trip fees, EXCLUDING slippage (already embedded in the entry FILL
-        # spread). With use_segment_costs on, the per-segment Indian stack; else
-        # the legacy brokerage + STT + catch-all 'other' model. Notional off the
-        # CONTRACT leg (leg_b), the scale the spread is denominated in.
-        if bool(p.get("use_segment_costs", False)):
-            rt_fees = self._segment_round_trip_cost(p, lots, lot_mult, None, None,
-                                                    include_slippage=False)
-        else:
-            rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
-            ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
-            if ref:
-                notional = float(ref) * lots * lot_mult
-                rt_fees += _stt_round_trip_pct(p) * notional
-                rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
-        net = gross - rt_fees
+        net = gross - self._position_fees(p)
         # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
         # (losses aren't taxed) — so break-even and the profit gates account for
         # tax, not just transaction costs. Approximation: applied per-trade.
@@ -332,6 +318,66 @@ class ArrowAutoTrader:
         if cgt_pct > 0 and net > 0:
             net -= cgt_pct * net
         return net
+
+    def _position_fees(self, p: Dict) -> float:
+        """Round-trip fees (₹) of the open position, EXCLUDING slippage (already
+        embedded in the entry FILL spread). With use_segment_costs on, the
+        per-segment Indian stack; else brokerage + STT + catch-all 'other'.
+        Notional off the CONTRACT leg (leg_b), the scale the spread is in.
+        The ONE fee figure behind both the live net P&L and the BE/TP/SL
+        spread levels, so the two can never disagree."""
+        pos = self._pos or {}
+        lots = max(1, int(pos.get("lots", 1)))
+        lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+        if bool(p.get("use_segment_costs", False)):
+            return self._segment_round_trip_cost(p, lots, lot_mult, None, None,
+                                                 include_slippage=False)
+        rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
+        if ref:
+            notional = float(ref) * lots * lot_mult
+            rt_fees += _stt_round_trip_pct(p) * notional
+            rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
+        return rt_fees
+
+    def _spread_levels(self, p: Dict, profit_target: float,
+                       dollar_stop: float) -> Optional[Dict]:
+        """BE / TP / SL (and EX) of the open position as SPREAD prices — the
+        levels the closing-side spread must reach for each ₹ exit to fire.
+
+        Solved from the same net-P&L formula the exits use (_live_net_pnl):
+            net = d·(X − E)·lots·mult − fees,   d = +1 LONG, −1 SHORT
+        so  BE: net = 0 · TP: net after tax = target · SL: net = −stop.
+        X is compared against the CLOSING side: the sell spread for a LONG,
+        the buy spread for a SHORT. A level whose exit is off is None."""
+        pos = self._pos
+        if not pos:
+            return None
+        E = pos.get("entry_fill_spread")
+        if E is None:
+            E = pos.get("entry_spread")
+        oz = max(1, int(pos.get("lots", 1))) * float(p.get("lot_multiplier", 1.0) or 1.0)
+        if E is None or oz <= 0:
+            return None
+        E = float(E)
+        d = 1.0 if pos["direction"] == "LONG_SPREAD" else -1.0
+        fees = self._position_fees(p)
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        keep = (1.0 - cgt) if 0 <= cgt < 1 else 1.0
+        lvl = lambda net_gross: round(E + d * net_gross / oz, 2)
+        gate = float(p.get("reversion_gate_inr", 0) or 0)
+        return {
+            "entry": round(E, 2),
+            "break_even": lvl(fees),
+            "take_profit": lvl(fees + profit_target / keep) if profit_target > 0 else None,
+            "stop": lvl(fees - dollar_stop) if dollar_stop > 0 else None,
+            "gate_release": (lvl(fees + gate / keep)
+                             if gate > 0 and bool(p.get("reversion_require_profit", True))
+                             else None),
+            "favorable": "up" if d > 0 else "down",
+            "closing_side": "sell" if d > 0 else "buy",
+            "fees_inr": round(fees, 2),
+        }
 
     def _reversion_allowed(self, net_pnl: Optional[float], p: Dict,
                            held_sec: float = 0.0, max_hold_sec: float = 0.0) -> bool:
@@ -762,6 +808,7 @@ class ArrowAutoTrader:
             # profit_target ABOVE that. Surface both so the split is visible.
             _be_cost = self._round_trip_cost(p)   # uses the position's entry notional
             snap["break_even"] = round(_be_cost, 2) if _be_cost > 0 else None
+            snap["spread_levels"] = self._spread_levels(p, profit_target, dollar_stop)
             snap["tp_gross_target"] = (round(_be_cost + profit_target, 2)
                                        if profit_target > 0 else None)
             _pnl_txt = f"₹{net_pnl:.0f}" if net_pnl is not None else "n/a"

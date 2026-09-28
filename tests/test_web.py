@@ -771,3 +771,40 @@ def test_trade_direction_rejects_unknown_values(tmp_path):
     r = c.post("/api/settings", json={"signal": {"trade_direction": "sideways"}})
     assert r.status_code == 400
     assert c.get("/api/settings").get_json()["signal"]["trade_direction"] == "both"
+
+
+# ── dashboard Close button: the orders must CLOSE the position that is held ──
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("held,close_sides", [
+    ("LONG_SPREAD", ("sell", "buy")),     # long = bought A / sold B → sell A, buy B
+    ("SHORT_SPREAD", ("buy", "sell")),    # short = sold A / bought B → buy A, sell B
+])
+def test_dashboard_close_closes_the_held_side_at_its_size(tmp_path, held, close_sides):
+    app, broker = _app(tmp_path, mode="live")
+    algo = app.extensions["arrow"]["algo"]
+    algo._pos = {"direction": held, "lots": 2, "entry_z": 2.5, "entry_spread": 100.0,
+                 "entry_fill_spread": 100.0, "entry_time": 0.0}
+    r = app.test_client().post("/api/engine/close-position", json={}).get_json()
+    assert r["success"] is True
+    sides = [(o["symbol"], o["side"], o["quantity"]) for o in broker.orders]
+    assert sides == [("NIFTY30JUN26F", close_sides[0], 150),       # 2 lots × 75
+                     ("NIFTY28JUL26F", close_sides[1], 150)]
+    # the algo no longer thinks it holds anything, so it will not "exit" again
+    assert algo.get_state()["in_position"] is False
+
+
+def test_status_names_the_held_side_and_entry_details(tmp_path):
+    app, _broker = _app(tmp_path)
+    algo = app.extensions["arrow"]["algo"]
+    algo._pos = {"direction": "SHORT_SPREAD", "lots": 3, "entry_z": 2.7,
+                 "entry_spread": 101.0, "entry_fill_spread": 101.5,
+                 "entry_leg_a": 110.0, "entry_leg_b": 8.5, "entry_time": 1_790_000_000.0}
+    d = app.test_client().get("/api/engine/status").get_json()
+    assert d["position"] == "SHORT" and d["signal"]["current_position"] == "SHORT"
+    t = d["open_trade"]
+    assert t["position_type"] == "SHORT" and t["quantity"] == 3 and t["entry_zscore"] == 2.7
+    assert t["entry_spot_price"] == 110.0 and t["entry_futures_price"] == 8.5
+    assert t["entry_time"] == "2026-09-21T14:13:20"    # UTC; the page appends Z

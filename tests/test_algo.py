@@ -996,3 +996,45 @@ def test_both_is_the_default():
     algo, state, calls = _make()
     state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1); algo._tick()
     assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+# ── BE / TP / SL as spread prices, consistent with how the exits fire ────────
+
+import pytest
+
+
+@pytest.mark.parametrize("direction,z_sell,z_buy", [("LONG_SPREAD", -3.0, -2.6),
+                                                   ("SHORT_SPREAD", 2.6, 3.0)])
+def test_spread_levels_hit_exactly_the_rupee_exits(direction, z_sell, z_buy):
+    params = {"profit_target_inr": 1000.0, "dollar_stop_inr": 1500.0,
+              "capital_gains_pct": 10.0, "reversion_gate_inr": 200.0,
+              "lot_multiplier": 100.0, "stt_pct": 0.01}
+    algo, state, calls = _make(params)
+    state["sig"] = _book_sig(z_sell if direction == "SHORT_SPREAD" else z_buy,
+                             z_sell=z_sell, z_buy=z_buy)
+    algo._tick()
+    assert calls["execute"][0][0] == direction
+    algo._pos["entry_leg_b"] = 8500.0          # a real contract-leg price for STT
+    p = algo._params()
+    lv = algo._spread_levels(p, 1000.0, 1500.0)
+    net = lambda x: algo._live_net_pnl(x, p)
+    assert abs(net(lv["break_even"])) < 1.0
+    after_tax = net(lv["take_profit"])          # _live_net_pnl applies the tax
+    assert abs(after_tax - 1000.0) < 1.0
+    assert abs(net(lv["stop"]) + 1500.0) < 1.0
+    assert abs(net(lv["gate_release"]) - 200.0) < 1.0
+    # profit is on the right side of entry
+    if direction == "LONG_SPREAD":
+        assert lv["stop"] < lv["entry"] < lv["break_even"] < lv["take_profit"]
+        assert lv["closing_side"] == "sell" and lv["favorable"] == "up"
+    else:
+        assert lv["take_profit"] < lv["break_even"] < lv["entry"] < lv["stop"]
+        assert lv["closing_side"] == "buy" and lv["favorable"] == "down"
+
+
+def test_spread_levels_off_when_no_rupee_exit_is_set():
+    algo, state, calls = _make({"lot_multiplier": 100.0})
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1); algo._tick()
+    lv = algo._spread_levels(algo._params(), 0.0, 0.0)
+    assert lv["take_profit"] is None and lv["stop"] is None
+    assert lv["break_even"] is not None
