@@ -966,3 +966,51 @@ def test_ladder_endpoint_derives_sizes_and_marks_the_position(tmp_path):
     c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
     d = c.get("/api/ladder?increment=1").get_json()
     assert d["position"]["owner"] == "manual" and d["markers"]["break_even"] is not None
+
+
+def test_ladder_prices_the_inside_from_the_same_book_as_its_depth(tmp_path):
+    """The engine's last sample may lag the book the depth comes from; the
+    ladder's best rows must still carry sizes (one snapshot for both)."""
+    import time as _t
+    app, broker, c, algo = _lock_app(tmp_path)
+    now = _t.time()
+    depth = lambda b, a: [{"type": "bid", "price": b, "volume": 150},
+                          {"type": "ask", "price": a, "volume": 150}]
+    books = {"NIFTY30JUN26F": {"bid": 112.0, "ask": 113.0, "ts": now, "depth": depth(112.0, 113.0)},
+             "NIFTY28JUL26F": {"bid": 10.0, "ask": 11.0, "ts": now, "depth": depth(10.0, 11.0)}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push(110.5, 10.5, ts=now - 3 + i)          # stale: spread ≈ 100
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["sell_spread"] == 101.0 and d["buy_spread"] == 103.0
+    rows = {r["level"]: r for r in d["rows"]}
+    assert rows[103.0]["is_best_ask"] and rows[103.0]["ask_size"] is not None
+    assert rows[101.0]["is_best_bid"] and rows[101.0]["bid_size"] is not None
+
+
+def test_desk_page_serves_with_one_shared_algo_control(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    html = c.get("/desk").get_data(as_text=True)
+    assert html.count('id="algo-ctl"') == 1           # ONE toggle, the same as every page
+    assert "/desk-assets/ladder.css" in html and "/static/desk.js" in html
+    assert c.get("/desk-assets/ladder.css").status_code == 200
+    assert c.get("/desk-assets/../app.py").status_code == 404
+    assert c.get("/desk-assets/app.py").status_code == 404
+    assert c.get("/static/desk.js").status_code == 200
+    # embedded pages drop their navbar
+    assert 'embedded' in c.get("/settings?embed=1").get_data(as_text=True)
+
+
+def test_desk_trades_report_who_opened_and_who_closed(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    d = c.get("/api/desk/trades").get_json()
+    assert d["open"]["source"] == "manual" and d["count"] == 0
+    c.post("/api/engine/close-position", json={})
+    d = c.get("/api/desk/trades").get_json()
+    assert d["count"] == 1 and d["open"] is None
+    t = d["trips"][0]
+    assert t["entry_source"] == "manual" and t["exit_source"] == "manual"
+    assert t["exit_spread"] is not None

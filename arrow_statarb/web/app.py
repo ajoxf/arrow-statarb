@@ -1282,6 +1282,33 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                         "day_cost": untracked_ledger.day_cost(),
                         "reconcile": _reconcile_guard.last})
 
+    # ── the desk: Arrow Trader's look, this engine underneath ────────────────
+    _AT_STATIC = PROJECT_ROOT / "arrowtrader" / "static"
+
+    @app.route("/desk")
+    def desk():
+        """The trading desktop — Arrow Trader's window frame and ladder style,
+        driven entirely by THIS engine's endpoints, so every figure and every
+        rule is the same code as the dashboard."""
+        return render_template("desk.html")
+
+    @app.route("/desk-assets/<path:name>")
+    def desk_assets(name):
+        """Arrow Trader's own stylesheet, served from its folder (one source
+        for the look, not a copy that drifts)."""
+        from flask import send_from_directory
+        if name not in ("ladder.css", "favicon.svg"):
+            return ("not found", 404)
+        return send_from_directory(str(_AT_STATIC), name)
+
+    @app.route("/api/desk/trades", methods=["GET"])
+    def api_desk_trades():
+        """Completed round trips (newest first) and the open trade, each with
+        WHO opened and who closed it."""
+        rt = trade_log.round_trips()
+        return jsonify({"trips": rt.get("trips", [])[:200], "open": rt.get("open"),
+                        "total_pnl": rt.get("total_pnl"), "count": rt.get("count")})
+
     # ── pages ────────────────────────────────────────────────────────────────
     @app.route("/")
     def setup():
@@ -1743,8 +1770,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
               else float(cfg.get("execution.price_tick_size", 0.05) or 0.05))
         count = max(5, min(81, int(request.args.get("count", 25) or 25)))
         sell, buy = sig.get("sell_spread"), sig.get("buy_spread")
+        # Price the inside from the SAME snapshot as the depth, so the best
+        # rows and their sizes never disagree by a tick of timing.
+        la, lb = book.get("leg_a") or {}, book.get("leg_b") or {}
+        if da and db and None not in (la.get("bid"), la.get("ask"), lb.get("bid"), lb.get("ask")):
+            sell = k * float(la["bid"]) - float(lb["ask"])
+            buy = k * float(la["ask"]) - float(lb["bid"])
         op = _open_position_view()
-        anchor = None
+        try:
+            anchor = float(request.args["anchor"]) if request.args.get("anchor") else None
+        except (TypeError, ValueError):
+            anchor = None
         if op:
             _p = _algo_params()
             if op["owner"] == "algo":

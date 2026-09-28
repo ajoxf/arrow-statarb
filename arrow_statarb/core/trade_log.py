@@ -207,6 +207,9 @@ class TradeLog:
                                 rec["edge_pnl"] = round(paper * lots * mult, 2)
                                 rec["slippage_pnl"] = round(rec["spread_pnl"] - rec["edge_pnl"], 2)
                             # full round-trip detail for the journal
+                            # WHO opened it and who closed it (MANUAL / ALGO)
+                            rec["entry_source"] = prev.get("source") or "manual"
+                            rec["exit_source"] = source
                             rec["entry_zscore"] = prev.get("zscore")
                             rec["exit_zscore"] = zscore
                             rec["entry_leg_a"] = prev.get("leg_a_price")
