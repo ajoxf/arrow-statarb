@@ -62,3 +62,58 @@ def test_slippage_sign():
     assert sp2 == 1.0
     sp3, _ = _slippage("buy", 100.0, 99.0)
     assert sp3 == -1.0
+
+
+# ── fills & slippage: timeline, ₹, persistence ───────────────────────────────
+
+def _res(ref_a, fill_a, ref_b, fill_b, t0=1000.0):
+    return {"success": True, "elapsed_sec": 0.9, "results": [
+        {"symbol": "CRUDEOIL19OCT26F", "side": "buy", "order_type": "limit",
+         "status": "COMPLETE", "units": 2, "filled": 2,
+         "ref_price": ref_a, "avg_price": fill_a,
+         "sent_at": t0, "acked_at": t0 + 0.05, "filled_at": t0 + 0.30},
+        {"symbol": "CRUDEOIL18DEC26F", "side": "sell", "order_type": "limit",
+         "status": "COMPLETE", "units": 2, "filled": 2,
+         "ref_price": ref_b, "avg_price": fill_b,
+         "sent_at": t0 + 0.01, "acked_at": t0 + 0.06, "filled_at": t0 + 0.75},
+    ]}
+
+
+def _mcx_scale(_leg):
+    # MCX: broker lot = 1 unit, a point is worth ₹100 per lot (CRUDEOIL)
+    return {"inr_per_point": 100.0, "lot_size": 1}
+
+
+def test_fills_record_timeline_and_rupee_slippage(tmp_path):
+    log = ExecutionLog(path=tmp_path / "x.jsonl", leg_scale=_mcx_scale)
+    ev = log.record(_res(9111.0, 9112.0, 8522.0, 8520.0), "Order", "live")
+    a, b = ev["legs"]
+    assert a["slippage"] == 1.0 and a["slippage_inr"] == 200.0   # 1 pt × 2 lots × ₹100
+    assert b["slippage"] == 2.0 and b["slippage_inr"] == 400.0   # sold 2 pts lower
+    assert a["fill_ms"] == 300 and b["fill_ms"] == 740 and a["ack_ms"] == 50
+    assert ev["leg_gap_ms"] == 450 and ev["total_ms"] == 750
+    assert ev["slippage_inr"] == 600.0
+    st = log.stats()
+    # per ORDER per LOT: (200/2 + 400/2) / 2 = ₹150 — comparable with slippage_per_lot
+    assert st["avg_slippage_inr_per_lot_order"] == 150.0
+    assert st["avg_leg_gap_ms"] == 450
+
+
+def test_fills_survive_a_restart(tmp_path):
+    path = tmp_path / "x.jsonl"
+    ExecutionLog(path=path, leg_scale=_mcx_scale).record(
+        _res(9111.0, 9112.0, 8522.0, 8520.0), "Order", "live")
+    again = ExecutionLog(path=path, leg_scale=_mcx_scale)
+    assert len(again.all()) == 1
+    assert again.stats()["avg_slippage_inr_per_lot_order"] == 150.0
+
+
+def test_price_improvement_is_negative_slippage(tmp_path):
+    log = ExecutionLog(leg_scale=_mcx_scale)
+    ev = log.record(_res(9111.0, 9110.0, 8522.0, 8523.0), "Close", "live")
+    assert [l["slippage_inr"] for l in ev["legs"]] == [-200.0, -200.0]
+
+
+def test_rupees_left_blank_when_scale_unknown():
+    ev = ExecutionLog().record(_res(9111.0, 9112.0, 8522.0, 8520.0), "Order", "live")
+    assert ev["legs"][0]["slippage_inr"] is None and ev["legs"][0]["slippage"] == 1.0

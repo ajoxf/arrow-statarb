@@ -18,7 +18,8 @@ leg is rejected or lags. This executor closes that gap:
 Dependency-injected to stay testable and free of web/broker-construction logic:
 
   broker_fn()            -> the active broker (or None)
-  price_fn(seg, sym)     -> latest LTP for a leg (or None)
+  price_fn(seg, sym[, side]) -> reference price for a leg (or None): the touch
+                         for ``side`` (ask to buy / bid to sell) when known, else LTP
   params_fn()            -> execution params dict (offsets, timeouts, flags)
 
 ``clock`` / ``sleep`` are injectable so tests drive timeouts deterministically.
@@ -28,6 +29,7 @@ order this places is real.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -43,7 +45,8 @@ class LegOrder:
     __slots__ = ("segment", "symbol", "side", "units", "token",
                  "order_id", "status", "order_type", "filled", "avg_price",
                  "limit_price", "ref_price", "error", "unconfirmed", "amend_count",
-                 "recovery", "escalated")
+                 "recovery", "escalated", "prefill", "unknown_polls",
+                 "sent_at", "acked_at", "filled_at")
 
     def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = ""):
         self.segment = segment
@@ -54,7 +57,7 @@ class LegOrder:
         self.order_id: Optional[str] = None
         self.status = "NEW"
         self.order_type = ""
-        self.filled = 0
+        self.filled = 0                   # CUMULATIVE units filled across re-placements
         self.avg_price = 0.0
         self.limit_price: Optional[float] = None
         self.ref_price: Optional[float] = None   # LTP at placement (slippage baseline)
@@ -63,6 +66,15 @@ class LegOrder:
         self.amend_count = 0
         self.recovery: Optional[Dict] = None
         self.escalated = False            # limit timed out → re-sent as MARKET
+        self.prefill = 0                  # units already filled BEFORE the current order
+        self.unknown_polls = 0            # consecutive UNKNOWN status reads (transient guard)
+        # Wall-clock (epoch s) execution timeline, for the Fills table:
+        #   sent_at  — the FIRST order for this leg left for the broker
+        #   acked_at — the broker returned an order id for it
+        #   filled_at — the leg was first seen fully filled
+        self.sent_at: Optional[float] = None
+        self.acked_at: Optional[float] = None
+        self.filled_at: Optional[float] = None
 
     @property
     def working(self) -> bool:
@@ -78,7 +90,9 @@ class LegOrder:
                 "limit_price": self.limit_price, "ref_price": self.ref_price,
                 "order_type": self.order_type, "amend_count": self.amend_count,
                 "escalated": self.escalated, "unconfirmed": self.unconfirmed,
-                "error": self.error}
+                "error": self.error, "units": self.units,
+                "sent_at": self.sent_at, "acked_at": self.acked_at,
+                "filled_at": self.filled_at}
 
 
 class SpreadExecutor:
@@ -88,12 +102,16 @@ class SpreadExecutor:
         broker_fn: Callable[[], object],
         price_fn: Callable[[str, str], Optional[float]],
         params_fn: Callable[[], Dict],
+        positions_fn: Optional[Callable[[], Optional[list]]] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._broker_fn = broker_fn
         self._price_fn = price_fn
         self._params_fn = params_fn
+        # Optional cached positions source for the pre-entry flat check. Returns a
+        # list, or None when no reliable data is available (Arrow read failing).
+        self._positions_fn = positions_fn
         self._clock = clock
         self._sleep = sleep
 
@@ -110,7 +128,7 @@ class SpreadExecutor:
         start = self._clock()
 
         if verify_flat and p.get("verify_flat_before_entry", True):
-            clash = self._verify_flat(broker, legs)
+            clash = self._verify_flat(broker, legs, fail_open=bool(p.get("verify_flat_fail_open", False)))
             if clash:
                 logger.warning("{}: blocked — {}", label, clash)
                 return dict(self._fail(legs, clash), elapsed_sec=0.0)
@@ -126,6 +144,23 @@ class SpreadExecutor:
         failed = [l for l in legs if not l.complete]
 
         if not failed:
+            # Slippage budget (ENTRY only — an exit must always complete, so we
+            # never unwind it for slippage). If the realized fill slipped more
+            # than ``max_slippage_pct`` of notional vs the LTP-at-placement
+            # baseline, abort the entry and flatten both legs — better a missed
+            # trade than one that starts underwater beyond the budget. 0 = off.
+            max_slip = float(p.get("max_slippage_pct", 0) or 0)
+            if verify_flat and max_slip > 0:
+                slip_pct = self._realized_slippage_pct(legs)
+                if slip_pct is not None and slip_pct > max_slip:
+                    recovered = self._recover_orphan(broker, legs, p)
+                    msg = (f"slippage abort on {label}: realized {slip_pct:.3f}% > "
+                           f"budget {max_slip:.3f}% — entry unwound. "
+                           + ("Flattened both legs." if recovered
+                              else "UNWIND FAILED — check positions NOW."))
+                    logger.error("{}", msg)
+                    return dict(self._fail(legs, msg, recovered=recovered,
+                                           slippage_abort=True), elapsed_sec=elapsed)
             ids = ", ".join(str(l.order_id) for l in legs)
             unconf = any(l.unconfirmed for l in legs)
             tag = " (fills unconfirmed)" if unconf else ""
@@ -148,31 +183,85 @@ class SpreadExecutor:
 
     # ── placement / pricing ──────────────────────────────────────────────────
     @staticmethod
-    def _limit_price(side: str, ltp: Optional[float], offset: float) -> Optional[float]:
+    def _round_to_tick(price: float, tick: float, side: str) -> float:
+        """Snap a price to the exchange tick grid. Round a BUY limit UP and a SELL
+        limit DOWN so the order stays marketable (and away from the touch it's
+        crossing). Falls back to 2dp when no tick is known."""
+        if not tick or tick <= 0:
+            return round(price, 2)
+        steps = price / tick
+        r = math.ceil(steps - 1e-9) if side == "buy" else math.floor(steps + 1e-9)
+        return round(r * tick, 2)
+
+    def _px(self, leg: "LegOrder") -> Optional[float]:
+        """Reference price for pricing one leg's order: the TOUCH for its side
+        (ask to buy, bid to sell) when the price source can give one, else the
+        LTP. Price sources that take no side are still supported."""
+        try:
+            return self._price_fn(leg.segment, leg.symbol, leg.side)
+        except TypeError:
+            return self._price_fn(leg.segment, leg.symbol)
+
+    @staticmethod
+    def _limit_price(side: str, ltp: Optional[float], offset: float,
+                     tick: float = 0.0) -> Optional[float]:
         """A marketable limit: buy slightly above / sell slightly below LTP so it
-        fills quickly while still capping slippage at ``offset``."""
+        fills quickly while still capping slippage at ``offset``. The price is
+        snapped to the instrument tick (Arrow rejects off-tick prices)."""
         if ltp is None:
             return None
-        return round(ltp * (1 + offset), 2) if side == "buy" else round(ltp * (1 - offset), 2)
+        raw = ltp * (1 + offset) if side == "buy" else ltp * (1 - offset)
+        return SpreadExecutor._round_to_tick(raw, tick, side)
+
+    @staticmethod
+    def _tick_for(broker, leg: "LegOrder", p: Dict) -> float:
+        """Instrument tick: the broker's master value if it exposes one, else the
+        configured ``price_tick_size`` fallback (0 ⇒ plain 2dp rounding)."""
+        fn = getattr(broker, "resolve_tick_size", None)
+        if callable(fn):
+            try:
+                t = float(fn(leg.segment, leg.symbol))
+                if t > 0:
+                    return t
+            except Exception:
+                pass
+        return float(p.get("price_tick_size", 0) or 0)
 
     def _place(self, broker, leg: LegOrder, p: Dict, force_market: bool = False) -> None:
         use_limit = bool(p.get("use_limit_orders", True)) and not force_market
         order_type = "limit" if use_limit else "market"
-        # Reference price (slippage baseline) is captured on every placement.
-        ltp = self._price_fn(leg.segment, leg.symbol)
-        if ltp is not None:
+        # Order only the UNFILLED residual — re-placing the full size after a
+        # partial fill would double up that leg (naked overshoot). On the first
+        # placement filled==0, so residual == units.
+        residual = max(0, leg.units - leg.filled)
+        if residual <= 0:
+            leg.status = "COMPLETE"
+            if leg.filled_at is None:
+                leg.filled_at = time.time()
+            return
+        leg.prefill = leg.filled          # baseline so _refresh keeps fills cumulative
+        # Reference price (slippage baseline): the touch for this leg's side at
+        # the FIRST placement. A re-placement (residual, escalation to market)
+        # must not move the baseline, or the cost of chasing the fill would
+        # disappear from the slippage figure.
+        ltp = self._px(leg)
+        if ltp is not None and leg.ref_price is None:
             leg.ref_price = ltp
         price = None
         if order_type == "limit":
-            price = self._limit_price(leg.side, ltp, float(p.get("limit_offset_pct", 0.05)) / 100.0)
+            tick = self._tick_for(broker, leg, p)
+            price = self._limit_price(leg.side, ltp,
+                                      float(p.get("limit_offset_pct", 0.05)) / 100.0, tick)
             if price is None:                       # no live price → market fallback
                 order_type = "market"
                 logger.warning("Executor: no LTP for {} — placing MARKET", leg.symbol)
         if force_market:
             leg.escalated = True
 
+        if leg.sent_at is None:
+            leg.sent_at = time.time()
         res = broker.submit_order(
-            symbol=leg.symbol, side=leg.side, quantity=leg.units,
+            symbol=leg.symbol, side=leg.side, quantity=residual,
             order_type=order_type, price=price, exchange_segment=leg.segment,
             product=str(p.get("product", "NRML")), token=leg.token,
         ) or {}
@@ -185,30 +274,59 @@ class SpreadExecutor:
                          leg.side, leg.units, leg.symbol, leg.error)
         else:
             leg.order_id = str(res.get("order_id"))
+            if leg.acked_at is None:
+                leg.acked_at = time.time()
             leg.status = "PENDING"
             leg.order_type = order_type
             leg.limit_price = price
 
     # ── fill polling + amendment ─────────────────────────────────────────────
-    def _refresh(self, broker, leg: LegOrder) -> None:
+    def _refresh(self, broker, leg: LegOrder, p: Dict) -> None:
         if not leg.order_id:
             return
         st = broker.get_order_status(leg.order_id) or {}
         status = str(st.get("status", "UNKNOWN")).upper()
         if status == "UNKNOWN":
-            # Broker can't report fills — assume the accepted order is on.
-            # Orphan detection is impossible in this mode, so flag it loudly.
-            if not leg.unconfirmed:
-                logger.warning("Executor: {} has no order-status API — treating {} "
-                               "as filled (UNCONFIRMED)", broker.__class__.__name__, leg.symbol)
-            leg.status = "COMPLETE"
-            leg.unconfirmed = True
-            leg.filled = leg.units
+            # A status read can come back UNKNOWN for two very different reasons:
+            # (a) a transient glitch (API hiccup, malformed reply) on a broker
+            #     that DOES report fills, or (b) a broker with no status API.
+            # Treating (a) as a confirmed fill fabricates a position and can mark
+            # an exit "flat" when it isn't — so we keep polling through a grace
+            # window and FAIL SAFE (never assume a fill) unless explicitly told
+            # the broker has no status API (assume_fill_on_unknown).
+            leg.unknown_polls += 1
+            grace = int(p.get("unknown_status_grace_polls", 3))
+            if leg.unknown_polls <= grace:
+                leg.status = "PENDING"            # transient — keep working, poll again
+                return
+            if bool(p.get("assume_fill_on_unknown", False)):
+                if not leg.unconfirmed:
+                    logger.warning("Executor: {} status persistently UNKNOWN after {} "
+                                   "polls — assuming filled (UNCONFIRMED) per "
+                                   "assume_fill_on_unknown", leg.symbol, leg.unknown_polls)
+                leg.status = "COMPLETE"
+                leg.unconfirmed = True
+                leg.filled = leg.units
+                if leg.filled_at is None:
+                    leg.filled_at = time.time()
+            else:
+                # Fail-safe: do NOT fabricate a fill. Leave the leg working so the
+                # escalation/orphan logic handles it, and flag it loudly.
+                leg.unconfirmed = True
+                leg.status = "PENDING"
+                logger.error("Executor: {} status UNKNOWN after {} polls — NOT assuming "
+                             "a fill (fail-safe); will escalate / treat as unfilled",
+                             leg.symbol, leg.unknown_polls)
             return
+        leg.unknown_polls = 0
         leg.status = status
-        leg.filled = int(st.get("filled_qty") or 0)
+        # filled_qty is for the CURRENT order; add the pre-placement baseline so a
+        # residual re-placement reports the true cumulative fill.
+        leg.filled = leg.prefill + int(st.get("filled_qty") or 0)
         if st.get("avg_price"):
             leg.avg_price = float(st["avg_price"])
+        if leg.status == "COMPLETE" and leg.filled_at is None:
+            leg.filled_at = time.time()
 
     def _await_fills(self, broker, legs: List[LegOrder], p: Dict) -> None:
         timeout = float(p.get("fill_timeout_sec", 5.0))
@@ -223,7 +341,7 @@ class SpreadExecutor:
             if not working:
                 break
             for leg in working:
-                self._refresh(broker, leg)
+                self._refresh(broker, leg, p)
             working = [l for l in legs if l.working]
             if not working:
                 break
@@ -237,13 +355,13 @@ class SpreadExecutor:
         """Walk the resting limit further through the market to chase the fill."""
         if not leg.order_id or leg.order_type != "limit":
             return
-        ltp = self._price_fn(leg.segment, leg.symbol)
+        ltp = self._px(leg)
         if ltp is None:
             return
         leg.amend_count += 1
         offset = (float(p.get("limit_offset_pct", 0.05))
                   + float(p.get("amend_step_pct", 0.05)) * leg.amend_count) / 100.0
-        price = self._limit_price(leg.side, ltp, offset)
+        price = self._limit_price(leg.side, ltp, offset, self._tick_for(broker, leg, p))
         if price is not None and broker.amend_order(leg.order_id, price=price):
             leg.limit_price = price
             logger.info("Executor: amended {} limit → {}", leg.symbol, price)
@@ -281,15 +399,56 @@ class SpreadExecutor:
             if not still:
                 break
             for leg in still:
-                self._refresh(broker, leg)
+                self._refresh(broker, leg, p)
             if not [l for l in working if l.working]:
                 break
             self._sleep(poll)
 
+    @staticmethod
+    def _realized_slippage_pct(legs: List[LegOrder]) -> Optional[float]:
+        """Adverse fill slippage of the whole spread as a % of leg notional:
+        Σ adverse(₹) / Σ ref_notional(₹) × 100. Adverse counts only fills WORSE
+        than the LTP-at-placement baseline (a buy above / a sell below ref);
+        price improvement doesn't offset a bad leg. Returns None if no leg has
+        both a reference and an average fill price to compare."""
+        adverse = 0.0
+        notional = 0.0
+        seen = False
+        for leg in legs:
+            if not leg.ref_price or not leg.avg_price or leg.filled <= 0:
+                continue
+            seen = True
+            sign = 1.0 if leg.side == "buy" else -1.0
+            adverse += max(0.0, sign * (leg.avg_price - leg.ref_price)) * leg.filled
+            notional += leg.ref_price * leg.filled
+        if not seen or notional <= 0:
+            return None
+        return 100.0 * adverse / notional
+
     # ── orphan recovery / pre-entry verification ─────────────────────────────
+    def _confirm_fill(self, broker, order_id: str, p: Dict) -> Optional[bool]:
+        """Poll an order to confirm it actually filled. Returns True (COMPLETE),
+        False (REJECTED/CANCELLED), or None (unconfirmable within the window —
+        e.g. persistent UNKNOWN). 'Accepted' is NOT 'filled', so a recovery
+        market order must be confirmed, not assumed."""
+        timeout = max(float(p.get("fill_timeout_sec", 5.0)), 2.0)
+        poll = float(p.get("poll_interval_sec", 0.4))
+        deadline = self._clock() + timeout
+        while self._clock() < deadline:
+            st = broker.get_order_status(order_id) or {}
+            s = str(st.get("status", "UNKNOWN")).upper()
+            if s == "COMPLETE":
+                return True
+            if s in ("REJECTED", "CANCELLED"):
+                return False
+            self._sleep(poll)
+        return None
+
     def _recover_orphan(self, broker, filled: List[LegOrder], p: Dict) -> bool:
         """Flatten every leg that DID fill, with an opposing market order, so a
-        partial entry never leaves one-sided exposure."""
+        partial entry never leaves one-sided exposure. The flattening order is
+        CONFIRMED filled — an accepted-but-unfilled recovery still leaves a naked
+        leg, so an unconfirmed recovery counts as a failure (alert the human)."""
         ok = True
         for leg in filled:
             opp = "sell" if leg.side == "buy" else "buy"
@@ -301,26 +460,48 @@ class SpreadExecutor:
                     token=leg.token,
                 ) or {}
                 leg.recovery = res
-                if res.get("status") == "error" or res.get("order_id") in (None, ""):
+                oid = res.get("order_id")
+                if res.get("status") == "error" or oid in (None, ""):
                     ok = False
                     logger.error("Executor: ORPHAN recovery FAILED for {} — {}",
                                  leg.symbol, res.get("message"))
-                else:
+                    continue
+                confirmed = self._confirm_fill(broker, oid, p)
+                if confirmed is True:
                     logger.error("Executor: ORPHAN recovery — flattened {} {} via MARKET (id={})",
-                                 opp, leg.symbol, res.get("order_id"))
+                                 opp, leg.symbol, oid)
+                else:
+                    ok = False
+                    state = "UNCONFIRMED" if confirmed is None else "NOT FILLED"
+                    logger.error("Executor: ORPHAN recovery {} for {} (id={}) — naked leg may "
+                                 "remain, VERIFY POSITIONS NOW", state, leg.symbol, oid)
             except Exception as exc:            # noqa: BLE001
                 ok = False
                 logger.error("Executor: ORPHAN recovery EXCEPTION for {} — {}", leg.symbol, exc)
         return ok
 
-    def _verify_flat(self, broker, legs: List[LegOrder]) -> str:
+    def _verify_flat(self, broker, legs: List[LegOrder], fail_open: bool = False) -> str:
         """Return a reason string if either leg already has an open exchange
-        position (so we don't stack a new entry), else ``""``."""
+        position (so we don't stack a new entry), else ``""``.
+
+        Positions come from the injected cached source when available (shared with
+        the dashboard, resilient to Arrow read-timeouts). If positions cannot be
+        read at all, behaviour depends on ``fail_open``: when False (default for
+        LIVE safety) the entry is BLOCKED rather than silently proceeding."""
+        positions = None
         try:
-            positions = broker.get_positions() or []
+            if self._positions_fn is not None:
+                positions = self._positions_fn()
+            else:
+                positions = broker.get_positions()
         except Exception as exc:                # noqa: BLE001
             logger.warning("Executor: verify_flat could not read positions — {}", exc)
-            return ""                           # can't verify → don't block
+            positions = None
+        if positions is None:
+            if fail_open:
+                logger.warning("Executor: verify_flat — no position data; allowing (fail-open)")
+                return ""
+            return "verify_exchange_position: positions unavailable — entry blocked (fail-safe)"
         held = {str(pos.get("symbol", "")).upper(): int(pos.get("net_quantity", 0) or 0)
                 for pos in positions}
         clashes = [l.symbol for l in legs if held.get(l.symbol.upper(), 0) != 0]
@@ -333,12 +514,13 @@ class SpreadExecutor:
     @staticmethod
     def _ok(legs: List[LegOrder], message: str) -> Dict:
         return {"success": True, "message": message, "error": "", "dry_run": False,
-                "orphan": False, "recovered": False,
+                "orphan": False, "recovered": False, "slippage_abort": False,
                 "results": [l.view() for l in legs]}
 
     @staticmethod
     def _fail(legs: List[LegOrder], error: str, *, orphan: bool = False,
-              recovered: bool = False) -> Dict:
+              recovered: bool = False, slippage_abort: bool = False) -> Dict:
         return {"success": False, "message": "", "error": error, "dry_run": False,
                 "orphan": orphan, "recovered": recovered,
+                "slippage_abort": slippage_abort,
                 "results": [l.view() for l in legs]}

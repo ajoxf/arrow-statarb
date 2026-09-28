@@ -37,9 +37,22 @@ def test_parse_instruments_csv():
 
 def test_extract_symbol_lot_uses_trading_symbol():
     # Lot must be keyed by the tradeable symbol, not the underlying.
-    sym, ls = ArrowBroker._extract_symbol_lot(SAMPLE_MASTER[0])
+    sym, ls, _tick = ArrowBroker._extract_symbol_lot(SAMPLE_MASTER[0])
     assert sym == "NIFTY30JUN26F"
     assert ls == 75
+
+
+def test_resolve_tick_size_from_master_and_guard(arrow_broker):
+    # A plausible sub-rupee tick is trusted; an implausible (≥1) value is
+    # rejected so the caller falls back to its configured default (returns 0).
+    arrow_broker._tick_sizes = {"NIFTY30JUN26F": 0.10, "WEIRD": 5.0}
+    assert arrow_broker.resolve_tick_size("nse_fo", "NIFTY30JUN26F") == 0.10
+    assert arrow_broker.resolve_tick_size("nse_fo", "WEIRD") == 0.0
+    assert arrow_broker.resolve_tick_size("nse_fo", "UNSEEN") == 0.0
+    # base-symbol strip (FUT/expiry tokens): a tick keyed by the underlying
+    # still resolves for an expiry-coded trading symbol.
+    arrow_broker._tick_sizes = {"CRUDEOIL": 0.05}
+    assert arrow_broker.resolve_tick_size("nse_fo", "CRUDEOIL25JULFUT") == 0.05
 
 
 def test_build_index_groups_and_sorts(arrow_broker):
@@ -59,6 +72,61 @@ def test_build_index_groups_and_sorts(arrow_broker):
     assert syms == ["NIFTY30JUN26F", "NIFTY28JUL26F", "NIFTY25AUG26F"]
 
 
+def test_mcx_loads_through_index(arrow_broker):
+    # MCX commodity futures (ExchSeg MCXFO) index as futures and list/sort like
+    # any other future — this is how MCX instruments become pickable.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()
+    assert "CRUDEOIL" in arrow_broker.list_underlyings("MCXFO", "future")
+    cons = arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")
+    syms = [c["trading_symbol"] for c in cons]
+    assert syms == ["CRUDEOIL25JULFUT", "CRUDEOIL25AUGFUT"]   # chronological
+    # lot size from the MCX master row
+    for inst in SAMPLE_MASTER:
+        s, ls, _t = ArrowBroker._extract_symbol_lot(inst)
+        if s and ls:
+            arrow_broker._lot_sizes.setdefault(s, ls)
+    assert arrow_broker.resolve_lot_size("mcx_fo", "CRUDEOIL25JULFUT") == 100
+
+
+def test_get_ltp_uses_token_and_maps_back(arrow_broker):
+    # Arrow's quotes/ltp resolves the identifier as a TOKEN (a symbol string
+    # returns "invalid token not found 0"). get_ltp must send the numeric token
+    # and map the response back to OUR trading symbol.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()          # populates _sym_token
+    res = arrow_broker.get_ltp([
+        {"exchange_segment": "mcx_fo", "instrument_token": "CRUDEOIL25JULFUT"},
+    ])
+    # Token 666 was sent (not the symbol string) …
+    assert ["666"] in arrow_broker._client.quote_calls
+    # … and the price came back keyed by our symbol.
+    assert "CRUDEOIL25JULFUT" in res and res["CRUDEOIL25JULFUT"] > 0
+
+
+def test_resolve_expiry_ymd_info_only(arrow_broker):
+    # Info-only expiry readout (dashboard 'days to expiry'). From the master's
+    # Expiry field, and falling back to the expiry encoded in the symbol.
+    arrow_broker._instruments = SAMPLE_MASTER
+    arrow_broker._build_instrument_index()
+    assert arrow_broker.resolve_expiry_ymd("CRUDEOIL25JULFUT") == (2025, 7, 21)
+    assert arrow_broker.resolve_expiry_ymd("NIFTY30JUN26F") == (2026, 6, 30)
+    # Unknown symbol → None (caller shows nothing), never raises.
+    assert arrow_broker.resolve_expiry_ymd("NOSUCHSYMBOL") is None
+    # Fallback to the expiry encoded in a DDMonYY symbol when no master row.
+    arrow_broker._sym_expiry = {}
+    assert arrow_broker.resolve_expiry_ymd("NIFTY30JUN26F") == (2026, 6, 30)
+
+
+def test_mcx_whole_rupee_tick_is_trusted(arrow_broker):
+    # MCX ticks are legitimately whole-rupee (CRUDEOIL/GOLD ₹1, COTTON ₹10) —
+    # trusted for mcx_fo but still discarded (→ default) for nse_fo.
+    arrow_broker._tick_sizes = {"CRUDEOIL25JULFUT": 1.0, "COTTON25JULFUT": 10.0}
+    assert arrow_broker.resolve_tick_size("mcx_fo", "CRUDEOIL25JULFUT") == 1.0
+    assert arrow_broker.resolve_tick_size("mcx_fo", "COTTON25JULFUT") == 10.0
+    assert arrow_broker.resolve_tick_size("nse_fo", "CRUDEOIL25JULFUT") == 0.0
+
+
 def test_token_index(arrow_broker):
     arrow_broker._instruments = SAMPLE_MASTER
     arrow_broker._build_instrument_index()
@@ -69,7 +137,7 @@ def test_lot_resolution_exact_and_strip(arrow_broker):
     arrow_broker._instruments = SAMPLE_MASTER
     # Populate lot index the way _fetch_instruments does
     for inst in SAMPLE_MASTER:
-        s, ls = ArrowBroker._extract_symbol_lot(inst)
+        s, ls, _tick = ArrowBroker._extract_symbol_lot(inst)
         if s and ls:
             arrow_broker._lot_sizes.setdefault(s, ls)
 
@@ -100,3 +168,73 @@ def test_derive_underlying():
     assert ArrowBroker._derive_underlying("NIFTY30JUN26F") == "NIFTY"
     assert ArrowBroker._derive_underlying("RELIANCE-EQ") == "RELIANCE"
     assert ArrowBroker._derive_underlying("HDFCBANK30JUN26C875") == "HDFCBANK"
+
+
+# ── /mcx supplement: near-month MCX futures /all can leave out ───────────────
+
+def _crude(tsym, expiry, strike="", token="9"):
+    return {"ExchSeg": "MCXFO", "Symbol": "CRUDEOIL", "TradingSymbol": tsym,
+            "OptionType": "", "StrikePrice": strike, "Expiry": expiry,
+            "LotSize": "100", "Token": token}
+
+
+class _Routes:
+    _root_url = "https://edge.arrow.trade"
+
+
+def _with_mcx_route(broker, all_rows, mcx_rows):
+    asked = []
+
+    def _get(url, **_kw):
+        asked.append(url)
+        if mcx_rows is None:
+            raise RuntimeError("404 Not Found")
+        return mcx_rows
+
+    broker._client.get_instruments = lambda: list(all_rows)
+    broker._client._get = _get
+    broker._client._routes = _Routes()
+    return asked
+
+
+def test_mcx_route_adds_near_months_all_left_out(arrow_broker):
+    """A live /all carried CRUDEOIL from Jun-2027 on and none of the nearer
+    months; one far future made MCX look complete. /mcx is asked every time."""
+    far = _crude("CRUDEOIL21JUN27F", "21-Jun-2027", token="1")
+    near = _crude("CRUDEOIL19OCT26F", "19-Oct-2026", token="2")
+    asked = _with_mcx_route(arrow_broker, [far], [far, near])
+    arrow_broker._fetch_instruments()
+    assert asked == ["https://edge.arrow.trade/mcx"]
+    syms = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")]
+    assert syms == ["CRUDEOIL19OCT26F", "CRUDEOIL21JUN27F"]
+    # a symbol on both routes is held once
+    assert len(arrow_broker._instruments) == 2
+
+
+def test_missing_mcx_route_is_not_an_error(arrow_broker):
+    far = _crude("CRUDEOIL21JUN27F", "21-Jun-2027")
+    _with_mcx_route(arrow_broker, [far], None)
+    arrow_broker._fetch_instruments()
+    assert [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")] \
+        == ["CRUDEOIL21JUN27F"]
+
+
+def test_mcx_options_with_blank_option_type_are_not_futures(arrow_broker):
+    """MCX leaves OptionType empty on options; the strike and the symbol say
+    what they are. SEP/DEC/OCT futures must NOT be read as options."""
+    arrow_broker._instruments = [
+        _crude("CRUDEOIL17SEP26F", "17-Sep-2026"),
+        _crude("CRUDEOIL17SEP26", "17-Sep-2026"),
+        _crude("CRUDEOIL16DEC26F", "16-Dec-2026"),
+        _crude("CRUDEOILM17SEP26C8950", "17-Sep-2026", strike="8950"),
+        _crude("CRUDEOIL17SEP26P5000", "17-Sep-2026"),
+    ]
+    arrow_broker._build_instrument_index()
+    futs = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")]
+    assert futs == ["CRUDEOIL17SEP26", "CRUDEOIL17SEP26F", "CRUDEOIL16DEC26F"]
+    opts = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "option", "CRUDEOIL")]
+    assert sorted(opts) == ["CRUDEOIL17SEP26P5000", "CRUDEOILM17SEP26C8950"]

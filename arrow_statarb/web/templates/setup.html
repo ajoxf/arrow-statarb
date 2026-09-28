@@ -49,6 +49,7 @@
                         <select class="form-select form-select-sm" id="p-segment" onchange="onSegmentChange()">
                             <option value="nse_fo">NSE F&amp;O</option>
                             <option value="bse_fo">BSE F&amp;O</option>
+                            <option value="mcx_fo">MCX Commodities</option>
                             <option value="nse_cm">NSE Cash</option>
                             <option value="bse_cm">BSE Cash</option>
                         </select>
@@ -115,10 +116,66 @@
         </div>
     </div>
 </div>
+
+<!-- ── Order-Test Scenario Suite ─────────────────────────────────────────── -->
+<div class="card mt-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clipboard2-check me-2"></i>Order-Test Suite
+            <span class="text-secondary small ms-1">— 40 round trips (spot &amp; futures)</span></span>
+        <span class="badge bg-secondary" id="scenario-count">0</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-warning py-2 small mb-3">
+            Each scenario is a complete round trip at <strong>minimum lot</strong> — it opens then
+            closes, leaving nothing on the book, and rolls back a leg if its partner fails.
+            <strong>Live execution places REAL orders</strong>, so run only while the algo is stopped and flat.
+            Live run activates with the execution engine; the catalogue below is ready now.
+        </div>
+        <div class="table-responsive" style="max-height:340px;overflow:auto;">
+            <table class="table table-sm table-hover small mb-0">
+                <thead><tr><th>#</th><th>Scenario</th><th>Mode</th><th>Variant</th><th>Status</th></tr></thead>
+                <tbody id="scenario-rows"><tr><td colspan="5" class="text-secondary text-center">Loading…</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
+    // ── Order-test scenario catalogue (Phase-9 merge) ────────────────────────
+    async function loadScenarios() {
+        try {
+            const cat = await fetch('/api/scenario-catalogue').then(r => r.json());
+            document.getElementById('scenario-count').textContent = cat.length;
+            const modeBadge = m => m === 'LIMIT' ? 'bg-info text-dark' : 'bg-primary';
+            document.getElementById('scenario-rows').innerHTML = cat.map(s => `
+                <tr><td class="text-secondary">${s.id}</td>
+                    <td>${s.name}</td>
+                    <td><span class="badge ${modeBadge(s.mode)}">${s.mode}</span></td>
+                    <td class="small text-secondary">${s.variant}</td>
+                    <td><button class="btn btn-sm btn-outline-primary py-0" onclick="runScenario(${s.id})"
+                        id="scn-btn-${s.id}">Run</button>
+                        <span class="small ms-1" id="scn-res-${s.id}"></span></td></tr>`).join('');
+        } catch (e) {}
+    }
+    async function runScenario(id) {
+        const btn = document.getElementById('scn-btn-' + id);
+        const res = document.getElementById('scn-res-' + id);
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        try {
+            const r = await fetch('/api/scenario-test', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})}).then(x => x.json());
+            if (res) {
+                const cls = r.ok ? 'text-success' : (r.error ? 'text-danger' : 'text-warning');
+                res.className = 'small ms-1 ' + cls;
+                res.textContent = (r.ok ? '✓ ' : '✗ ') + (r.detail || r.error || 'no result');
+            }
+        } catch (e) { if (res) { res.className = 'small ms-1 text-danger'; res.textContent = '✗ ' + e; } }
+        if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
+    }
+    loadScenarios();
+
     let _type = 'futures';
     let _connected = false;
 

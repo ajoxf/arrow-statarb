@@ -21,6 +21,20 @@ SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
 LEG_ASSIGNMENTS_FILE = CONFIG_DIR / "leg_assignments.yaml"
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge ``override`` onto ``base`` — override wins on every leaf,
+    missing keys inherit ``base``. Used to backfill settings.yaml from the
+    template so documented defaults always apply. Non-dict overrides replace
+    wholesale (a list/scalar in settings.yaml is authoritative)."""
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 class Config:
     """Reads ``config/settings.yaml`` with dot-notation ``get`` access."""
 
@@ -45,7 +59,24 @@ class Config:
                     logger.warning("Could not seed {} from template — {}", self.path.name, exc)
         if self.path.exists():
             with open(self.path) as f:
-                self._data = yaml.safe_load(f) or {}
+                loaded = yaml.safe_load(f) or {}
+            # Backfill any keys MISSING from settings.yaml with the tracked
+            # template's documented defaults, so an old/partial settings.yaml
+            # (missing keys added in a later version) behaves as documented
+            # instead of silently falling back to code defaults. Your settings.yaml
+            # values always win. No template beside the file (e.g. a temp/test
+            # config) → no backfill, so behaviour there is unchanged.
+            example = self.path.with_name(self.path.stem + ".example" + self.path.suffix)
+            if example.exists():
+                try:
+                    with open(example) as f:
+                        base = yaml.safe_load(f) or {}
+                    self._data = _deep_merge(base, loaded)
+                except Exception as exc:               # noqa: BLE001
+                    logger.warning("Could not backfill from {} — {}", example.name, exc)
+                    self._data = loaded
+            else:
+                self._data = loaded
             logger.debug("Config loaded from {}", self.path)
         else:
             self._data = {}

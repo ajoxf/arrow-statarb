@@ -35,12 +35,16 @@ def test_limit_order_no_mpp(arrow_broker):
     assert kw["transaction_type"].value == "SELL"
 
 
-def test_mcx_is_rejected(arrow_broker):
+def test_mcx_is_accepted(arrow_broker):
+    # Arrow supports MCX from SDK 1.5.x — mcx_fo must route to the MCX exchange
+    # enum, not be rejected (the old hard-block is gone).
     res = arrow_broker.submit_order(
         symbol="CRUDEOIL25JULFUT", side="buy", quantity=100,
         order_type="market", exchange_segment="mcx_fo")
-    assert res["status"] == "error"
-    assert "MCX" in res["message"]
+    assert res["status"] == "submitted"
+    kw = arrow_broker._client.placed_orders[-1]
+    assert kw["exchange"].value == "MCX"        # mcx_fo → MCX enum
+    assert kw["mpp"] is True and kw["price"] == 0.0
 
 
 def test_unknown_segment_rejected(arrow_broker):
@@ -138,3 +142,32 @@ def test_get_funds_empty_when_not_connected():
     b = ArrowBroker(config={"app_id": "x"})
     f = b.get_funds()
     assert f["available"] is None and f["used"] is None
+
+
+def test_get_order_book_normalizes_exchange_fields(arrow_broker):
+    # Mixed field-name styles the SDK might deliver — get_order_book must map
+    # them all to the dashboard's canonical schema.
+    arrow_broker._client.order_book = [
+        {"orderTime": "13:23:59", "tradingSymbol": "NIFTY30JUN26F", "exchSeg": "NSEFO",
+         "transactionType": "SELL", "product": "NRML", "orderType": "LIMIT",
+         "quantity": "65", "filledQty": "65", "avgPrice": "24212.00",
+         "status": "COMPLETE", "orderNo": "26062401000514"},
+        {"order_time": "13:24:01", "symbol": "NIFTY28JUL26F", "exchange": "NSEFO",
+         "side": "buy", "productType": "NRML", "ordType": "MARKET",
+         "qty": 65, "filledQuantity": 0, "tradedPrice": 0,
+         "orderStatus": "REJECTED", "nestOrderNumber": "26062401000515"},
+    ]
+    book = arrow_broker.get_order_book()
+    assert len(book) == 2
+    a, b = book
+    assert a["symbol"] == "NIFTY30JUN26F" and a["side"] == "SELL"
+    assert a["qty"] == 65 and a["fill_qty"] == 65 and a["fill_price"] == 24212.0
+    assert a["status"] == "COMPLETE" and a["order_id"] == "26062401000514"
+    assert b["side"] == "BUY" and b["order_type"] == "MARKET"
+    assert b["status"] == "REJECTED" and b["order_id"] == "26062401000515"
+
+
+def test_get_order_book_empty_when_disconnected():
+    from arrow_statarb.brokers.arrow_broker import ArrowBroker
+    b = ArrowBroker(config={"app_id": "x"})
+    assert b.get_order_book() == []

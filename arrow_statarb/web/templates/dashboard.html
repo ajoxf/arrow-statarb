@@ -39,14 +39,98 @@
                     <span class="badge bg-secondary">INR</span>
                     <span class="badge bg-info text-dark"><span id="lot-a">—</span> units/lot</span></div>
                 <div class="fs-4">Price: <span id="m-leg-a" class="text-success font-monospace">0.00</span></div>
+                <div class="small text-secondary" id="dte-a" title="Days to expiry — informational only; does not affect trading"></div>
             </div>
             <div class="col-md-6">
                 <div class="fs-5">Leg B (<span class="font-monospace">{{ leg_b }}</span>)
                     <span class="badge bg-secondary">INR</span>
                     <span class="badge bg-info text-dark"><span id="lot-b">—</span> units/lot</span></div>
                 <div class="fs-4">Price: <span id="m-leg-b" class="text-success font-monospace">0.00</span></div>
+                <div class="small text-secondary" id="dte-b" title="Days to expiry — informational only; does not affect trading"></div>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- ── Pair analytics (Fair Value · Sizing · Hedge-Ratio) — display only ────── -->
+<div class="row g-3 mb-1">
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-rulers me-2"></i>Position Sizing
+                <span class="badge bg-secondary ms-1" id="pa-sizing-mode">—</span></div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Leg A</span>
+                    <span class="font-monospace"><span id="pa-la-lots">—</span> × <span id="pa-la-c">—</span> = ₹<span id="pa-la-notional">—</span></span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Leg B (hedge)</span>
+                    <span class="font-monospace"><span id="pa-lb-lots">—</span> × <span id="pa-lb-c">—</span> = ₹<span id="pa-lb-notional">—</span></span></div>
+                <hr class="my-1">
+                <div class="d-flex justify-content-between"><span class="text-secondary">₹ per point (k)</span>
+                    <span class="fw-bold font-monospace" id="pa-k">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Imbalance</span>
+                    <span class="font-monospace" id="pa-imbalance">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Min notional / leg</span>
+                    <span class="font-monospace" id="pa-min-notional">—</span></div>
+                <div class="small text-warning mt-1" id="pa-sizing-reason"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-compass me-2"></i>Fair Value
+                <span class="badge bg-secondary ms-1" id="pa-pair-type">—</span>
+                <span class="badge bg-info text-dark ms-1">reference</span></div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Live spread</span>
+                    <span class="fw-bold font-monospace" id="pa-spread">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Fair (carry)</span>
+                    <span class="font-monospace" id="pa-fair">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Gap</span>
+                    <span class="fw-bold font-monospace" id="pa-fair-gap">—</span></div>
+                <div class="small text-secondary mt-1" id="pa-fair-detail"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header py-2"><i class="bi bi-arrow-left-right me-2"></i>Live Hedge Ratio</div>
+            <div class="card-body py-2 small">
+                <div class="d-flex justify-content-between"><span class="text-secondary">Configured β</span>
+                    <span class="fw-bold font-monospace" id="pa-beta">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Dollar-neutral β (Pb/Pa)</span>
+                    <span class="font-monospace" id="pa-beta-neutral">—</span></div>
+                <div class="d-flex justify-content-between"><span class="text-secondary">Drift</span>
+                    <span class="fw-bold font-monospace" id="pa-beta-gap">—</span></div>
+                <div class="small text-secondary mt-1">A large drift means the position won't track the spread the z-score measures.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── New Engine — SHADOW (read-only preview, places NO orders) ───────────── -->
+<div class="card mb-1 border-info">
+    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-cpu me-2"></i>New Engine — Shadow
+            <span class="badge bg-info text-dark ms-1">preview · no orders</span></span>
+        <span class="badge bg-secondary" id="sh-state">warming up</span>
+    </div>
+    <div class="card-body py-2 small">
+        <div class="row g-2 align-items-center">
+            <div class="col-md-3">
+                <span class="text-secondary">Would enter:</span>
+                <span class="fw-bold" id="sh-enter">—</span>
+                <div class="small text-warning" id="sh-gate"></div>
+            </div>
+            <div class="col-md-3">
+                <span class="text-secondary">TP / Stop (₹):</span>
+                <span class="font-monospace" id="sh-tpstop">—</span>
+                <div class="small text-secondary">round-trip cost ₹<span id="sh-cost">—</span></div>
+            </div>
+            <div class="col-md-6">
+                <span class="text-secondary">Exit-ladder spread levels:</span>
+                <span class="font-monospace" id="sh-levels">—</span>
+            </div>
+        </div>
+        <div class="small text-secondary mt-1">Read-only: this is what the ported multi-asset engine would do on the live signal + your settings — it never places an order.</div>
     </div>
 </div>
 
@@ -63,6 +147,26 @@
                 <div class="metric text-success" id="t-pnl">₹0.00</div><div class="metric-label">Total P&amp;L</div></div></div></div>
             <div class="col-6 col-xl-3"><div class="card text-center h-100"><div class="card-body">
                 <div class="metric" id="t-winrate">0.0%</div><div class="metric-label">Win Rate</div></div></div></div>
+        </div>
+
+        <!-- Expectancy sheet (the book in R) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-calculator me-2"></i>Expectancy <span class="text-secondary small">(the book in R)</span></span>
+                <span id="e-verdict" class="badge bg-secondary">—</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-2 text-center small">
+                    <div class="col"><div class="metric" id="e-wr">—</div><div class="metric-label">Win Rate</div></div>
+                    <div class="col"><div class="metric" id="e-bewr">—</div><div class="metric-label">Break-even WR</div></div>
+                    <div class="col"><div class="metric" id="e-rr">—</div><div class="metric-label">Reward : Risk</div></div>
+                    <div class="col"><div class="metric" id="e-pf">—</div><div class="metric-label">Profit Factor</div></div>
+                    <div class="col"><div class="metric" id="e-evr">—</div><div class="metric-label">EV / R</div></div>
+                    <div class="col"><div class="metric" id="e-evinr">—</div><div class="metric-label">EV / trade</div></div>
+                    <div class="col"><div class="metric" id="e-edge">—</div><div class="metric-label">Edge (WR−BE)</div></div>
+                </div>
+                <div class="form-text mt-2">Chase <strong>R:R</strong>, not win rate — a book with RR 1.5 may lose 60% and still print. If Win Rate is below Break-even WR, the geometry is −EV.</div>
+            </div>
         </div>
 
         <!-- Z-Score Monitor -->
@@ -179,9 +283,11 @@
                         <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
                             <th class="ps-3">Closed</th><th>Dir</th><th class="text-end">Z in→out</th>
                             <th class="text-end">Spread in→out</th><th class="text-end">Held</th>
-                            <th>Exit</th><th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Cum</th>
+                            <th>Exit</th><th class="text-end" title="P&L the signal implied (decision spreads)">Edge</th>
+                            <th class="text-end" title="Execution cost = realized − edge (negative = adverse fills)">Slip</th>
+                            <th class="text-end">Net P&amp;L</th><th class="text-end pe-3">Cum</th>
                         </tr></thead>
-                        <tbody id="dj-body"><tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
+                        <tbody id="dj-body"><tr><td colspan="10" class="text-center text-secondary py-3">No completed trades yet</td></tr></tbody>
                     </table>
                 </div>
             </div>
@@ -209,6 +315,29 @@
                 </div>
             </div>
         </div>
+
+        <!-- Exchange Order Log (the broker's own order book — exchange source of truth) -->
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-journal-text me-2"></i>Exchange Order Log <span id="xo-broker" class="badge bg-secondary">—</span></span>
+                <span class="small">
+                    <button class="btn btn-sm btn-outline-success" onclick="downloadExchangeCSV()"><i class="bi bi-download"></i> CSV</button>
+                    <button class="btn btn-sm btn-outline-secondary ms-1" onclick="pollExchangeOrders()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                </span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm mb-0 align-middle">
+                        <thead class="sticky-top" style="background: var(--bs-body-bg);"><tr class="small text-secondary">
+                            <th class="ps-3">Time</th><th>Symbol</th><th>Side</th><th>Product</th><th>Type</th>
+                            <th class="text-end">Qty</th><th class="text-end">Fill Qty</th><th class="text-end">Fill Price</th>
+                            <th class="text-end">Fee</th><th>Status</th><th class="pe-3">Order ID</th>
+                        </tr></thead>
+                        <tbody id="xo-body"><tr><td colspan="11" class="text-center text-secondary py-3">No exchange orders</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- ════════════════ RIGHT COLUMN ════════════════ -->
@@ -228,15 +357,13 @@
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-robot me-2"></i>Algorithm Control</span>
-                <span id="algo-mode-badge" class="badge bg-warning text-dark">DRY-RUN</span>
+                <span id="algo-mode-badge" class="badge" data-mode-badge>MODE ?</span>
             </div>
             <div class="card-body">
-                <div class="form-check form-switch d-flex justify-content-between align-items-center m-0">
-                    <span><label class="form-check-label fw-bold" for="algo-toggle">Algorithm Active</label>
-                        <div class="small text-secondary">Executes trades automatically on signals</div></span>
-                    <span class="d-flex align-items-center">
-                        <input class="form-check-input me-2" type="checkbox" id="algo-toggle" role="switch">
-                        <span id="algo-status" class="text-muted">OFF</span></span>
+                <div class="d-flex justify-content-between align-items-center m-0">
+                    <span><span class="fw-bold">Algorithm</span>
+                        <div class="small text-secondary">Turn it on or off with the ALGO button in the top bar — the same control on every page.</div></span>
+                    <span id="algo-status" class="text-muted fw-bold">OFF</span>
                 </div>
                 <div class="font-monospace small mt-2" id="algo-state-line">idle</div>
                 <hr>
@@ -336,15 +463,43 @@
             </div>
         </div>
 
-        <!-- Current Position -->
+        <!-- Signal & Position -->
         <div class="card mt-3">
-            <div class="card-header"><i class="bi bi-folder me-2"></i>Current Position</div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-folder me-2"></i>Signal &amp; Position</span>
+                <span><span id="sp-regime" class="badge bg-secondary me-1" title="spread regime">—</span><span id="sp-badge" class="badge bg-secondary">FLAT</span></span>
+            </div>
             <div class="card-body">
-                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Direction:</span><strong id="pos-dir">FLAT</strong></div>
-                <div class="d-flex justify-content-between mb-1"><span class="text-secondary">Leg A:</span><span><span id="pos-a">0</span> contracts</span></div>
-                <div class="d-flex justify-content-between mb-2"><span class="text-secondary">Leg B:</span><span><span id="pos-b">0</span> contracts</span></div>
-                <hr>
-                <div class="d-flex justify-content-between"><span class="text-secondary">Unrealized P&amp;L:</span><strong id="pos-pnl" class="text-success">₹0.00</strong></div>
+                <div class="row text-center g-2 mb-1">
+                    <div class="col-4"><div class="fs-4 fw-bold" id="sp-z">—</div><div class="small text-secondary">Z-SCORE</div></div>
+                    <div class="col-4"><div class="fs-4 fw-bold" id="sp-spread">—</div><div class="small text-secondary" id="sp-legs">SPREAD</div></div>
+                    <div class="col-4"><div class="fs-5 fw-bold" id="sp-dir">FLAT</div><div class="small text-secondary">POSITION</div></div>
+                </div>
+                <!-- detail grid + P&L bar: only while in a position -->
+                <div id="sp-detail" class="d-none">
+                    <hr class="my-2">
+                    <div class="row small g-1">
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Entry Z</span><span id="sp-ez">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Leg A Entry</span><span id="sp-ela">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Entry Spread</span><span id="sp-espread">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Age</span><span id="sp-age">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Max Hold</span><span id="sp-maxhold">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Target</span><span id="sp-target" class="text-success">—</span></div>
+                        </div>
+                        <div class="col-6">
+                            <div class="d-flex justify-content-between"><span class="text-secondary">P&amp;L</span><span id="sp-pnl" class="fw-bold">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Leg B Entry</span><span id="sp-elb">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Δ Spread</span><span id="sp-dspread">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Size</span><span id="sp-size">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Remaining</span><span id="sp-remaining">—</span></div>
+                            <div class="d-flex justify-content-between"><span class="text-secondary">Stop</span><span id="sp-stop" class="text-danger">—</span></div>
+                        </div>
+                    </div>
+                    <div class="progress mt-2" style="height:8px;" title="P&L between stop (left) and target (right)">
+                        <div id="sp-bar" class="progress-bar bg-secondary" role="progressbar" style="width:50%"></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -352,11 +507,13 @@
 {% endblock %}
 
 {% block extra_js %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/static/vendor/chart.umd.min.js"></script>
 <script>
-    // Floor the price-poll interval: sub-second HTTP polling floods the dev
-    // server (each request allocates a large read buffer) and can exhaust memory.
-    const REFRESH_MS = Math.max(500, {{ display_refresh_ms }});
+    // Floor the price-poll interval. Waitress (the production server in
+    // run_arrow.py) handles sub-second polling fine; the 100 ms floor just
+    // guards against a mis-set value pinning the CPU. Set signal.display_refresh_ms
+    // to 300 (and signal.sample_interval_sec to 0.3) for 0.3 s price updates.
+    const REFRESH_MS = Math.max(100, {{ display_refresh_ms }});
     const ENTRY_Z = {{ entry_zscore }};
     const STOP_Z  = {{ stop_zscore }};
 
@@ -499,12 +656,13 @@
             const p = await fetch('/api/positions').then(r => r.json());
             _posDir = p.direction || 'FLAT';
             _inPosition = !!(p.leg_a || p.leg_b);
-            document.getElementById('pos-dir').textContent = _posDir;
-            document.getElementById('pos-a').textContent = p.leg_a || 0;
-            document.getElementById('pos-b').textContent = p.leg_b || 0;
+            // (broker-position detail now lives in the Signal & Position card,
+            // driven by /api/algo/state; these IDs may not be present.)
+            const _set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
+            _set('pos-dir', _posDir); _set('pos-a', p.leg_a || 0); _set('pos-b', p.leg_b || 0);
             const pnl = Number(p.unrealized_pnl || 0);
             const el = document.getElementById('pos-pnl');
-            el.textContent = _rs(pnl); el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : '');
+            if (el) { el.textContent = _rs(pnl); el.className = pnl > 0 ? 'text-success' : (pnl < 0 ? 'text-danger' : ''); }
         } catch (e) {}
     }
 
@@ -570,11 +728,94 @@
             const lb = i.legs && i.legs.leg_b ? i.legs.leg_b.lot_size : null;
             document.getElementById('lot-a').textContent = la || '—';
             document.getElementById('lot-b').textContent = lb || '—';
+            // Days-to-expiry — display only, never gates trading.
+            const _dte = (leg) => {
+                const n = i.legs && i.legs[leg] ? i.legs[leg].days_to_expiry : null;
+                if (n === null || n === undefined) return '';
+                if (n < 0)  return '<i class="bi bi-hourglass-bottom"></i> expired';
+                if (n === 0) return '<i class="bi bi-hourglass-bottom"></i> expires today';
+                const cls = n <= 3 ? 'text-warning' : 'text-secondary';
+                return `<span class="${cls}"><i class="bi bi-hourglass-split"></i> ${n} day${n===1?'':'s'} to expiry</span>`;
+            };
+            document.getElementById('dte-a').innerHTML = _dte('leg_a');
+            document.getElementById('dte-b').innerHTML = _dte('leg_b');
             const w = document.getElementById('lot-mismatch');
             if (i.lot_mismatch) { w.textContent = i.message; w.classList.remove('d-none'); }
             else w.classList.add('d-none');
         } catch (e) {}
     }
+
+    // ── Pair analytics: Fair Value · Sizing · Hedge-Ratio (display only) ──────
+    async function pollPairAnalytics() {
+        try {
+            const a = await fetch('/api/pair-analytics').then(r => r.json());
+            if (!a || !a.ok) return;
+            const T = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+            const n2 = (v, d=2) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+            const rup = (v) => (v === null || v === undefined) ? '—' : '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits:0});
+            // Sizing
+            const s = a.sizing || {};
+            T('pa-sizing-mode', s.mode || '—');
+            T('pa-la-lots', n2(s.leg_a_lots)); T('pa-la-c', n2(a.contract_a, 0));
+            T('pa-la-notional', s.leg_a_notional_inr != null ? Number(s.leg_a_notional_inr).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—');
+            T('pa-lb-lots', n2(s.leg_b_lots)); T('pa-lb-c', n2(a.contract_b, 0));
+            T('pa-lb-notional', s.leg_b_notional_inr != null ? Number(s.leg_b_notional_inr).toLocaleString('en-IN',{maximumFractionDigits:0}) : '—');
+            T('pa-k', n2(s.spread_units));
+            T('pa-imbalance', s.imbalance_pct != null ? n2(s.imbalance_pct,1) + '%' : '—');
+            T('pa-min-notional', rup(s.min_notional_inr));
+            T('pa-sizing-reason', s.reason || '');
+            // Fair value
+            const fv = a.fair_value || {};
+            T('pa-pair-type', a.pair_type || '—');
+            T('pa-spread', n2(a.spread, 3));
+            T('pa-fair', fv.fair_value != null ? n2(fv.fair_value, 3) : '—');
+            const gapEl = document.getElementById('pa-fair-gap');
+            if (gapEl) { gapEl.textContent = fv.fair_gap != null ? n2(fv.fair_gap, 3) : '—';
+                gapEl.className = 'fw-bold font-monospace ' + (fv.fair_gap == null ? '' : (Math.abs(fv.fair_gap) > Math.abs(a.spread || 0) * 0.5 ? 'text-warning' : 'text-success')); }
+            T('pa-fair-detail', fv.fair_detail || '');
+            // Hedge ratio
+            T('pa-beta', n2(a.hedge_ratio, 4));
+            T('pa-beta-neutral', s.dollar_neutral_beta != null ? n2(s.dollar_neutral_beta, 4) : '—');
+            const bg = document.getElementById('pa-beta-gap');
+            if (bg) { bg.textContent = s.beta_gap_pct != null ? n2(s.beta_gap_pct,1) + '%' : '—';
+                bg.className = 'fw-bold font-monospace ' + (s.beta_gap_pct == null ? '' : (Math.abs(s.beta_gap_pct) > 10 ? 'text-warning' : 'text-secondary')); }
+        } catch (e) {}
+    }
+
+    // ── New Engine shadow preview (read-only, no orders) ─────────────────────
+    async function pollEngineShadow() {
+        try {
+            const s = await fetch('/api/engine/shadow').then(r => r.json());
+            const state = document.getElementById('sh-state');
+            const n = (v, d=2) => (v == null) ? '—' : Number(v).toFixed(d);
+            if (!s.ready) {
+                state.textContent = s.reason || 'warming up'; state.className = 'badge bg-secondary';
+                document.getElementById('sh-enter').textContent = '—';
+                document.getElementById('sh-gate').textContent = '';
+                document.getElementById('sh-tpstop').textContent = '—';
+                document.getElementById('sh-levels').textContent = '—';
+                return;
+            }
+            state.textContent = `z ${n(s.z)}`; state.className = 'badge bg-info text-dark';
+            const enter = document.getElementById('sh-enter');
+            if (s.would_enter) {
+                const viable = s.viable;
+                enter.innerHTML = `<span class="badge ${s.would_enter === 'SELL_BASIS' ? 'bg-danger' : 'bg-success'}">${s.would_enter}</span>`
+                    + (viable ? '' : ' <span class="badge bg-warning text-dark">not viable (cost floor)</span>');
+                document.getElementById('sh-gate').textContent = '';
+            } else {
+                enter.innerHTML = '<span class="text-secondary">no — resting</span>';
+                document.getElementById('sh-gate').textContent = s.blocking_gate ? ('blocked: ' + s.blocking_gate) : '';
+            }
+            document.getElementById('sh-cost').textContent = n(s.rt_cost_inr, 0);
+            document.getElementById('sh-tpstop').textContent =
+                (s.tp_inr == null ? '—' : '₹' + n(s.tp_inr, 0)) + ' / ' + (s.stop_inr == null ? '—' : '₹' + n(s.stop_inr, 0));
+            const L = s.levels;
+            document.getElementById('sh-levels').textContent = L
+                ? `BE ${n(L.be, 3)} · EX ${n(L.ex, 3)} · TP ${n(L.tp, 3)} · SL ${n(L.sl, 3)}` : '—';
+        } catch (e) {}
+    }
+    pollEngineShadow(); setInterval(pollEngineShadow, 3000);
 
     // ── Position reconciliation (engine vs exchange) ─────────────────────────
     async function pollReconcile() {
@@ -608,7 +849,6 @@
             const meta = m === 'live' ? ['bg-danger', 'LIVE', 'LIVE mode — real orders are transmitted to Arrow']
                 : m === 'live_sim' ? ['bg-info text-dark', 'LIVE-SIM', 'Live-Sim — the real executor runs against a simulated broker (no real orders)']
                 : ['bg-warning text-dark', 'DRY-RUN', 'Dry-run mode — signals fire but no real orders are placed'];
-            b.className = 'badge ' + meta[0]; b.textContent = meta[1];
             document.getElementById('mode-help').textContent = meta[2];
             // Offer the two non-current modes; hide the active one.
             document.getElementById('to-live').classList.toggle('d-none', m === 'live');
@@ -676,7 +916,36 @@
     // ── Trade Journal (round-trips) ──────────────────────────────────────────
     function _arrow2(a, b, d) { const f = v => (v==null?'—':Number(v).toFixed(d)); return `${f(a)}→${f(b)}`; }
     function _held2(s) { if (s==null) return '—'; s=Math.round(s); const m=Math.floor(s/60); return m?`${m}m${s%60}s`:`${s}s`; }
-    const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark', manual:'bg-secondary' };
+    const _EXITCLS = { target:'bg-success', stop:'bg-danger', time_stop:'bg-warning text-dark',
+                       dollar_stop:'bg-danger', profit_target:'bg-success',
+                       trailing_stop:'bg-info text-dark', hard_time_stop:'bg-warning text-dark',
+                       manual:'bg-secondary' };
+    const _EXITLBL = { dollar_stop:'stop price', hard_time_stop:'hard time' };
+    async function pollExpectancy() {
+        try {
+            const e = await fetch('/api/expectancy').then(x => x.json());
+            const T = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            const num = (v, s) => v == null ? '—' : (typeof v === 'number' ? v.toFixed(s) : v);
+            T('e-wr', e.closed ? e.win_rate.toFixed(1) + '%' : '—');
+            T('e-bewr', e.breakeven_win_rate == null ? '—' : e.breakeven_win_rate.toFixed(1) + '%');
+            T('e-rr', num(e.reward_risk, 2));
+            T('e-pf', num(e.profit_factor, 2));
+            T('e-evr', num(e.expectancy_r, 3));
+            T('e-evinr', e.closed ? _rs(e.expectancy_inr) : '—');
+            T('e-edge', e.edge == null ? '—' : (e.edge > 0 ? '+' : '') + e.edge.toFixed(1) + '%');
+            const vb = document.getElementById('e-verdict');
+            if (vb) {
+                if (!e.closed) { vb.textContent = 'no trades'; vb.className = 'badge bg-secondary'; }
+                else if (e.positive) { vb.textContent = '+EV'; vb.className = 'badge bg-success'; }
+                else { vb.textContent = '−EV'; vb.className = 'badge bg-danger'; }
+            }
+            // colour EV/R and edge by sign
+            const evrEl = document.getElementById('e-evr');
+            if (evrEl) evrEl.className = 'metric ' + (e.expectancy_r > 0 ? 'text-success' : (e.expectancy_r < 0 ? 'text-danger' : ''));
+            const edgeEl = document.getElementById('e-edge');
+            if (edgeEl) edgeEl.className = 'metric ' + (e.edge > 0 ? 'text-success' : (e.edge < 0 ? 'text-danger' : ''));
+        } catch (err) { /* leave last values */ }
+    }
     async function pollJournal() {
         try {
             const j = await fetch('/api/trades/journal').then(x => x.json());
@@ -685,9 +954,11 @@
             const tot = document.getElementById('dj-total');
             tot.textContent = _rs(j.total_pnl); tot.className = Number(j.total_pnl)>0?'text-success':(Number(j.total_pnl)<0?'text-danger':'text-secondary');
             const body = document.getElementById('dj-body');
-            if (!trips.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary py-3">No completed trades yet</td></tr>'; return; }
+            if (!trips.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-secondary py-3">No completed trades yet</td></tr>'; return; }
             body.innerHTML = trips.map(x => {
                 const np = Number(x.net_pnl||0), npc = np>0?'text-success':(np<0?'text-danger':'');
+                const edge = Number(x.edge_pnl||0), edc = edge>0?'text-success':(edge<0?'text-danger':'text-secondary');
+                const slip = Number(x.slippage_pnl||0), slc = slip<0?'text-danger':(slip>0?'text-success':'text-secondary');
                 const ex = x.exit_reason || '—';
                 const src = x.source==='algo' ? '<span class="badge bg-primary ms-1" style="font-size:.7em">algo</span>'
                     : '<span class="badge bg-secondary ms-1" style="font-size:.7em">man</span>';
@@ -696,8 +967,10 @@
                     <td class="text-end font-monospace">${_arrow2(x.entry_zscore, x.exit_zscore, 2)}</td>
                     <td class="text-end font-monospace">${_arrow2(x.entry_spread, x.exit_spread, 1)}</td>
                     <td class="text-end">${_held2(x.held_sec)}</td>
-                    <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}">${ex.replace('_',' ')}</span></td>
-                    <td class="text-end fw-bold ${npc}">${_rs(np)}</td>
+                    <td><span class="badge ${_EXITCLS[ex]||'bg-secondary'}" title="${x.outcome||''}">${_EXITLBL[ex]||ex.replace('_',' ')}</span></td>
+                    <td class="text-end font-monospace ${edc}">${_rs(edge)}</td>
+                    <td class="text-end font-monospace ${slc}">${_rs(slip)}</td>
+                    <td class="text-end fw-bold ${npc}" title="${x.peak_pnl!=null?`peak ${_rs(x.peak_pnl)} (${x.peak_min??'—'}m) / trough ${_rs(x.trough_pnl)} (${x.trough_min??'—'}m)`:''}">${_rs(np)}</td>
                     <td class="text-end pe-3 font-monospace">${_rs(x.cum_pnl)}</td></tr>`;
             }).join('');
         } catch (e) {}
@@ -740,23 +1013,55 @@
         try { await fetch('/api/execution/clear', { method:'POST' }); pollExecution(); } catch (e) {}
     }
 
-    // ── Algorithm toggle + state ─────────────────────────────────────────────
-    document.getElementById('algo-toggle').addEventListener('change', async function () {
-        const enabled = this.checked;
-        const ep = enabled ? '/api/algo/start' : '/api/algo/stop';
-        const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('mt-lots').value) || 1 }) : null;
+    // ── Exchange Order Log (the broker's own order book) ─────────────────────
+    let _xoOrders = [];
+    const _XOSTCLS = { COMPLETE:'bg-success', REJECTED:'bg-danger', CANCELLED:'bg-secondary',
+                       OPEN:'bg-info text-dark', PARTIAL:'bg-warning text-dark',
+                       PENDING:'bg-warning text-dark', UNKNOWN:'bg-secondary' };
+    async function pollExchangeOrders() {
         try {
-            const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body }).then(x=>x.json());
-            if (enabled && !r.success) { this.checked=false; uiToast('Could not start algo: ' + (r.error||'unknown'), 'danger'); return; }
-            log('Algorithm ' + (enabled?'STARTED':'STOPPED'), 'log-warning');
-        } catch (e) { this.checked=false; uiToast('Algo toggle failed: ' + e, 'danger'); }
-    });
+            const r = await fetch('/api/exchange-orders').then(x => x.json());
+            _xoOrders = r.orders || [];
+            const b = document.getElementById('xo-broker');
+            if (b) b.textContent = String(r.broker || '—').toUpperCase();
+            const body = document.getElementById('xo-body');
+            if (!_xoOrders.length) {
+                body.innerHTML = `<tr><td colspan="11" class="text-center text-secondary py-3">${r.note || 'No exchange orders'}</td></tr>`;
+                return;
+            }
+            const sc = s => s === 'BUY' ? 'text-success' : (s === 'SELL' ? 'text-danger' : '');
+            body.innerHTML = _xoOrders.map(o => `<tr class="small">
+                <td class="ps-3 font-monospace">${o.time || '—'}</td>
+                <td>${o.symbol || '—'}</td>
+                <td class="${sc(o.side)}">${o.side || '—'}</td>
+                <td>${o.product || '—'}</td>
+                <td>${o.order_type || '—'}</td>
+                <td class="text-end">${o.qty ?? '—'}</td>
+                <td class="text-end">${o.fill_qty ?? '—'}</td>
+                <td class="text-end font-monospace">${o.fill_price ? Number(o.fill_price).toFixed(2) : '—'}</td>
+                <td class="text-end">${o.fee ? _rs(o.fee) : '—'}</td>
+                <td><span class="badge ${_XOSTCLS[o.status] || 'bg-secondary'}">${o.status || '—'}</span></td>
+                <td class="pe-3 font-monospace" style="font-size:.8em">${o.order_id || '—'}</td></tr>`).join('');
+        } catch (e) {}
+    }
+    function downloadExchangeCSV() {
+        if (!_xoOrders.length) { return; }
+        const cols = ['time','symbol','exchange','side','product','order_type','qty',
+                      'fill_qty','fill_price','price','fee','pnl','status','order_id'];
+        const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const csv = [cols.join(','), ..._xoOrders.map(o => cols.map(c => esc(o[c])).join(','))].join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = 'exchange_orders.csv'; a.click(); URL.revokeObjectURL(a.href);
+    }
+
+    // ── Algorithm toggle + state ─────────────────────────────────────────────
     let _lastAlgoStatus = '';
     async function pollAlgoState() {
         try {
             const s = await fetch('/api/algo/state').then(r => r.json());
-            const tog = document.getElementById('algo-toggle'), stEl = document.getElementById('algo-status');
-            tog.checked = !!s.running; stEl.textContent = s.running?'ON':'OFF';
+            const stEl = document.getElementById('algo-status');
+            stEl.textContent = s.running?'ON':'OFF';
             stEl.className = s.running?'text-success':'text-muted';
             const el = document.getElementById('algo-state-line');
             if (!s.running) { el.textContent = 'idle'; }
@@ -765,6 +1070,13 @@
                 let txt = `[${mode}] ${s.status||'—'}`;
                 if (s.zscore != null) txt += ` · z=${Number(s.zscore).toFixed(2)}`;
                 if (s.in_position && s.position) txt += ` · IN ${s.position.direction}`;
+                if (s.in_position && s.net_pnl != null) {
+                    let pl = ` · P&L ₹${Number(s.net_pnl).toFixed(0)}`;
+                    if (s.dollar_stop != null) pl += ` (stop ₹${Number(s.dollar_stop).toFixed(0)}`;
+                    if (s.profit_target != null) pl += `${s.dollar_stop!=null?' / ':' ('}tgt +₹${Number(s.profit_target).toFixed(0)}`;
+                    if (s.dollar_stop != null || s.profit_target != null) pl += ')';
+                    txt += pl;
+                }
                 if (s.last_error) txt += ` · ⚠ ${s.last_error}`;
                 el.textContent = txt;
             }
@@ -773,7 +1085,92 @@
                 if (/ENTRY|EXIT|STOP|blocked/.test(s.status))
                     log('ALGO: ' + s.status, /blocked|STOP/.test(s.status)?'log-warning':'log-trade');
             }
+            renderSigPos(s);
         } catch (e) {}
+    }
+
+    function _hms(sec) {
+        if (sec == null) return '—';
+        sec = Math.max(0, Math.round(Number(sec)));
+        const m = Math.floor(sec / 60), s = sec % 60;
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    // Populate the Signal & Position card from the live algo snapshot.
+    function renderSigPos(s) {
+        const rb = document.getElementById('sp-regime');
+        if (rb) {
+            const rs = s.regime || '—';
+            rb.textContent = rs;
+            rb.className = 'badge me-1 ' + (rs === 'TRENDING' ? 'bg-danger'
+                : (rs === 'RANGE' ? 'bg-success' : 'bg-secondary'));
+        }
+        const z = s.zscore;
+        const zEl = document.getElementById('sp-z');
+        zEl.textContent = _fmt(z, 4);
+        zEl.className = 'fs-4 fw-bold ' + (z == null ? '' : (z < 0 ? 'text-danger' : 'text-success'));
+        document.getElementById('sp-spread').textContent = _fmt(s.spread, 2);
+        document.getElementById('sp-legs').textContent =
+            (s.leg_a != null && s.leg_b != null) ? `${_fmt(s.leg_a,2)} − ${_fmt(s.leg_b,2)}` : 'SPREAD';
+
+        const pos = s.position;
+        const inPos = !!(s.in_position && pos);
+        const badge = document.getElementById('sp-badge');
+        const dir = document.getElementById('sp-dir');
+        const detail = document.getElementById('sp-detail');
+        if (!inPos) {
+            badge.textContent = 'FLAT'; badge.className = 'badge bg-secondary';
+            dir.textContent = 'FLAT'; dir.className = 'fs-5 fw-bold text-secondary';
+            detail.classList.add('d-none');
+            return;
+        }
+        const isLong = pos.direction === 'LONG_SPREAD';
+        const tag = isLong ? 'LONG' : 'SHORT';
+        badge.textContent = tag; badge.className = 'badge ' + (isLong ? 'bg-success' : 'bg-danger');
+        dir.textContent = tag; dir.className = 'fs-5 fw-bold ' + (isLong ? 'text-success' : 'text-danger');
+        detail.classList.remove('d-none');
+
+        document.getElementById('sp-ez').textContent = _fmt(pos.entry_z, 3);
+        document.getElementById('sp-ela').textContent = pos.entry_leg_a != null ? _fmt(pos.entry_leg_a, 2) : '—';
+        document.getElementById('sp-elb').textContent = pos.entry_leg_b != null ? _fmt(pos.entry_leg_b, 2) : '—';
+        document.getElementById('sp-espread').textContent = _fmt(s.entry_spread, 2);
+        document.getElementById('sp-age').textContent = _hms(s.held_sec);
+        document.getElementById('sp-maxhold').textContent = _hms(s.max_hold_sec);
+        const remEl = document.getElementById('sp-remaining');
+        if (s.max_hold_expired) { remEl.textContent = 'EXPIRED'; remEl.className = 'text-warning'; }
+        else { remEl.textContent = _hms(s.remaining_sec); remEl.className = ''; }
+        document.getElementById('sp-size').textContent = s.notional != null ? _rs(s.notional, 0) : '—';
+
+        const dEl = document.getElementById('sp-dspread');
+        if (s.delta_spread == null) { dEl.textContent = '—'; dEl.className = ''; }
+        else { const d = Number(s.delta_spread); dEl.textContent = (d>=0?'+':'') + d.toFixed(2);
+               dEl.className = d >= 0 ? 'text-success' : 'text-danger'; }
+
+        const pEl = document.getElementById('sp-pnl');
+        if (s.net_pnl == null) { pEl.textContent = '—'; pEl.className = 'fw-bold'; }
+        else { const v = Number(s.net_pnl); pEl.textContent = _rs(v, 2);
+               pEl.className = 'fw-bold ' + (v > 0 ? 'text-success' : (v < 0 ? 'text-danger' : '')); }
+
+        const tgtEl = document.getElementById('sp-target');
+        tgtEl.textContent = s.profit_target != null ? '+' + _rs(s.profit_target, 0) : 'off';
+        // 'TP = BE + %': net is post-cost, so target is ₹ above break-even.
+        if (s.profit_target != null && s.break_even != null) {
+            tgtEl.title = `break-even ₹${_rs(s.break_even, 0)} + net +₹${_rs(s.profit_target, 0)}`
+                        + (s.tp_gross_target != null ? ` = ₹${_rs(s.tp_gross_target, 0)} gross` : '');
+        } else { tgtEl.title = ''; }
+        document.getElementById('sp-stop').textContent = s.dollar_stop != null ? _rs(s.dollar_stop, 0) : 'off';
+
+        // P&L progress bar: net_pnl positioned between stop (left) and target (right).
+        const bar = document.getElementById('sp-bar');
+        const np = Number(s.net_pnl);
+        const lo = (s.dollar_stop != null) ? Number(s.dollar_stop) : -Math.max(100, Math.abs(np) * 2);
+        const hi = (s.profit_target != null) ? Number(s.profit_target) : Math.max(100, Math.abs(np) * 2);
+        if (s.net_pnl == null || hi <= lo) { bar.style.width = '0%'; }
+        else {
+            const frac = Math.min(1, Math.max(0, (np - lo) / (hi - lo)));
+            bar.style.width = (frac * 100).toFixed(0) + '%';
+            bar.className = 'progress-bar ' + (np > 0 ? 'bg-success' : (np < 0 ? 'bg-danger' : 'bg-secondary'));
+        }
     }
 
     // ── Manual Spread Trade (client-side watcher) ────────────────────────────
@@ -871,12 +1268,15 @@
     pollFunds();    setInterval(pollFunds, 3000);
     pollBroker();   setInterval(pollBroker, 3000);
     pollLegInfo();  setInterval(pollLegInfo, 5000);
+    pollPairAnalytics(); setInterval(pollPairAnalytics, 3000);
     pollReconcile(); setInterval(pollReconcile, 4000);
     pollMarkets();  setInterval(pollMarkets, 5000);
     pollMode();     setInterval(pollMode, 3000);
     pollPreflight(); setInterval(pollPreflight, 3000);
     pollJournal();  setInterval(pollJournal, 3000);
+    pollExpectancy(); setInterval(pollExpectancy, 4000);
     pollExecution(); setInterval(pollExecution, 2000);
+    pollExchangeOrders(); setInterval(pollExchangeOrders, 5000);
     pollTrades();   setInterval(pollTrades, 3000);
     pollHistory();  setInterval(pollHistory, 1000);
     pollAlgoState(); setInterval(pollAlgoState, 1000);

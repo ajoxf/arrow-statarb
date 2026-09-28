@@ -13,7 +13,7 @@ import pytest
 
 # ── Fake pyarrow_client SDK ──────────────────────────────────────────────────
 class Exchange(enum.Enum):
-    NSE = "NSE"; NFO = "NFO"; BSE = "BSE"; BFO = "BFO"
+    NSE = "NSE"; NFO = "NFO"; BSE = "BSE"; BFO = "BFO"; MCX = "MCX"; MCXFO = "MCXFO"; NCD = "NCD"; INDEX = "INDEX"
 
 
 class OrderType(enum.Enum):
@@ -92,7 +92,14 @@ class ArrowClient:
         return []
 
     def get_quotes(self, mode, pairs):
-        return []
+        # Echo an LTP per requested identifier so tests can assert the
+        # id→symbol mapping. Price is deterministic from the identifier.
+        self.quote_calls = getattr(self, "quote_calls", [])
+        self.quote_calls.append([ident for ident, _ex in pairs])
+        out = []
+        for ident, _ex in pairs:
+            out.append({"token": ident, "ltp": 100.0 + (hash(str(ident)) % 50)})
+        return out
 
     def place_order(self, **kwargs):
         self.placed_orders.append(kwargs)
@@ -154,4 +161,11 @@ SAMPLE_MASTER = [
      "OptionType": "CE", "StrikePrice": "26000", "Expiry": "30-Jun-2026", "LotSize": "75", "Token": "444"},
     {"ExchSeg": "NSECM", "Symbol": "RELIANCE", "TradingSymbol": "RELIANCE-EQ",
      "OptionType": "", "StrikePrice": "", "Expiry": "", "LotSize": "1", "Token": "555"},
+    # MCX commodity futures (ExchSeg MCXFO) — indexed as futures, tick ₹1.
+    {"ExchSeg": "MCXFO", "Symbol": "CRUDEOIL", "TradingSymbol": "CRUDEOIL25JULFUT",
+     "OptionType": "", "StrikePrice": "", "Expiry": "21-Jul-2025", "LotSize": "100",
+     "TickSize": "1", "Token": "666"},
+    {"ExchSeg": "MCXFO", "Symbol": "CRUDEOIL", "TradingSymbol": "CRUDEOIL25AUGFUT",
+     "OptionType": "", "StrikePrice": "", "Expiry": "19-Aug-2025", "LotSize": "100",
+     "TickSize": "1", "Token": "777"},
 ]

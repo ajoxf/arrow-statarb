@@ -31,11 +31,12 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 from loguru import logger
 
 from arrow_statarb.models.probability_filter import ProbabilityFilter
+from arrow_statarb.core import costs
 
 # India Standard Time (UTC+5:30) — trading-hours window is evaluated in IST.
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -53,6 +54,59 @@ def _within_trading_hours(p: Dict) -> bool:
     return start <= now <= end
 
 
+def _entry_cutoff_reached(p: Dict) -> bool:
+    """True if we are within ``no_entry_buffer_min`` minutes of the exchange
+    close — block NEW entries near the close (exits stay allowed) so we don't
+    open a position we can't manage before EOD. Applies on NSE/BSE regardless of
+    whether the optional trading-hours window is enabled."""
+    th = p.get("trading_hours") or {}
+    # Default 0 (disabled) when unset — production enables it via config
+    # (_algo_params passes trading_hours.no_entry_buffer_min, default 20).
+    buf = float(p.get("no_entry_buffer_min", th.get("no_entry_buffer_min", 0)) or 0)
+    if buf <= 0:
+        return False
+    now = datetime.now(_IST)
+    close_mod = (int(th.get("close_hour", th.get("end_hour", 15))) * 60
+                 + int(th.get("close_min", th.get("end_min", 30))))
+    now_mod = now.hour * 60 + now.minute + now.second / 60.0
+    # Minutes until the NEXT close, wrap-safe (mod 1440) so a close time that
+    # lands on the other side of midnight never inverts the comparison the way
+    # now.replace(hour=…) would. Block only inside the buffer BEFORE the close.
+    minutes_to_close = (close_mod - now_mod) % 1440
+    return minutes_to_close <= buf
+
+
+def _expiry_blocks_entry(p: Dict, sig: Dict) -> Optional[str]:
+    """Block NEW entries within ``no_entry_days_before_expiry`` days of the
+    contract's expiry — a basis position must not be held into settlement (roll
+    or flatten instead). Needs ``days_to_expiry`` on the signal (broker master);
+    off when the gate is 0 or expiry is unknown. Exits are never blocked."""
+    gate = float(p.get("no_entry_days_before_expiry", 0) or 0)
+    if gate <= 0:
+        return None
+    dte = sig.get("days_to_expiry")
+    if dte is None:
+        return None
+    if float(dte) <= gate:
+        return (f"expiry guard: {float(dte):.1f}d to expiry ≤ {gate:g}d — "
+                f"no new entries (roll or flatten)")
+    return None
+
+
+def _stt_round_trip_pct(p: Dict) -> float:
+    """Fractional STT charged over one round trip = leg_a sell + leg_b sell.
+    Per-leg rates (``stt_a_pct``/``stt_b_pct``) let a non-1:1 pair charge the
+    right tax on each instrument (e.g. ETF ≈ 0.001% + future ≈ 0.02%); both fall
+    back to the single ``stt_pct`` so a same-instrument spread keeps the original
+    2×stt_pct behaviour exactly."""
+    base = float(p.get("stt_pct", 0) or 0)
+    a = p.get("stt_a_pct")
+    b = p.get("stt_b_pct")
+    a = float(a) if a is not None else base
+    b = float(b) if b is not None else base
+    return (a + b) / 100.0
+
+
 class ArrowAutoTrader:
     def __init__(
         self,
@@ -62,11 +116,16 @@ class ArrowAutoTrader:
         execute_fn: Callable[[str, int], Dict],
         close_fn: Callable[[str, int], Dict],
         clock: Optional[Callable[[], float]] = None,
+        prices_provider: Optional[Callable[[], Tuple[Optional[float], Optional[float]]]] = None,
     ):
         self._signal = signal_provider
         self._params = params_provider
         self._execute = execute_fn
         self._close = close_fn
+        # Fresh (leg_a, leg_b) reader for the entry spread-divergence guard. Reads
+        # the live price cache at ORDER time, which is fresher than the (sampled)
+        # signal — so it catches a stale far-leg quote the z-guard can't. Optional.
+        self._prices = prices_provider
         # Injectable wall-clock — overridden by the backtester so historical
         # timestamps drive cooldown / time-stop / holding time. Defaults to live.
         self._clock = clock or time.time
@@ -77,8 +136,22 @@ class ArrowAutoTrader:
 
         self._pos: Optional[Dict] = None          # open position, or None
         self._cooldown_until = 0.0
+        # After a STOP, block same-direction re-entry until z re-enters the exit
+        # band (z-reset gate) — stops chasing a runaway trend back in. None = clear.
+        self._stop_block_dir: Optional[str] = None
+        # Regime guard: once a day is flagged TRENDING, latch a halt on new
+        # entries until the next IST day (auto-rearm). Stores the halted day index.
+        self._regime_halt_day: Optional[int] = None
+        # z-stop suppression audit: log each would-have-fired occasion exactly
+        # once per excursion so a disabled z-stop stays a scoreable experiment.
+        self._zstop_suppressed_logged = False
+        # 'BE + %' take-profit misconfig warning latch (fires once).
+        self._tp_cap_warned = False
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
+        self._exit_failures = 0                    # consecutive failed exit attempts
+        self._exit_halted = False                  # ceiling hit → stop auto-exit retries
+        self._exit_retry_at = 0.0                  # don't re-attempt an exit before this (backoff)
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
         self.running = False
         self.last_error = ""
@@ -120,13 +193,49 @@ class ArrowAutoTrader:
                 "lots": max(1, int(pos.get("lots", 1))),
                 "entry_z": -1.0 if direction == "LONG_SPREAD" else 1.0,
                 "entry_spread": pos.get("entry_spread"),
+                # the trade-log OPEN records the FILL spread, so it is the right
+                # P&L reference for a position re-adopted after a restart
+                "entry_fill_spread": pos.get("entry_spread"),
                 "entry_time": float(pos.get("ts") or self._clock()),
+                "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes (fresh)
+                "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [],
                 "dry_run": bool(pos.get("dry_run", False)),
                 "restored": True,
             }
         logger.warning("ArrowAlgo: restored open {} position ({} lot(s)) from trade log",
                        direction, self._pos["lots"])
+        return True
+
+    def clear_position(self, reason: str = "reconcile") -> bool:
+        """Force-drop the engine's belief in an open position (used by the
+        reconciler when the exchange shows FLAT but the engine thinks it is
+        in-trade). Safe — touches only in-memory state, places no orders."""
+        with self._lock:
+            if self._pos is None:
+                return False
+            direction = self._pos.get("direction")
+            self._pos = None
+            self._exit_failures = 0
+            self._exit_halted = False
+            self._exit_retry_at = 0.0
+        logger.warning("ArrowAlgo: force-cleared engine position ({}) — {}", direction, reason)
+        return True
+
+    def restore_cooldown(self, until_ts: float) -> bool:
+        """Re-arm the entry cooldown after a restart so a stop/exit right before
+        shutdown doesn't allow an immediate re-entry. ``until_ts`` is an absolute
+        epoch time (last close + cooldown_sec); ignored if already in the past."""
+        try:
+            until = float(until_ts)
+        except (TypeError, ValueError):
+            return False
+        if until <= self._clock():
+            return False
+        with self._lock:
+            self._cooldown_until = max(self._cooldown_until, until)
+        logger.info("ArrowAlgo: restored cooldown — {:.0f}s remaining",
+                    self._cooldown_until - self._clock())
         return True
 
     def get_state(self) -> Dict:
@@ -137,6 +246,9 @@ class ArrowAutoTrader:
                 "in_position": self._pos is not None,
                 "position": dict(self._pos) if self._pos else None,
                 "cooldown_s": max(0.0, round(self._cooldown_until - self._clock(), 1)),
+                "exit_failures": self._exit_failures,
+                "exit_halted": self._exit_halted,
+                "exit_retry_s": max(0.0, round(self._exit_retry_at - self._clock(), 1)),
                 "last_error": self.last_error,
             }
 
@@ -160,7 +272,7 @@ class ArrowAutoTrader:
         per lot PER LEG, one-way → ×2 legs (the filter's own ×2 covers
         entry+exit). lot_multiplier converts σ (₹/unit) to ₹ per lot."""
         return ProbabilityFilter(
-            commission_per_lot=float(p.get("brokerage_per_lot", 10.0)) * 2.0,
+            commission_per_lot=float(p.get("brokerage_per_lot", 20.0)) * 2.0,
             slippage_per_lot=float(p.get("slippage_per_lot", 5.0)) * 2.0,
             commission_basis=str(p.get("commission_basis", "per_lot")),
             lot_multiplier=float(p.get("lot_multiplier", 1.0)),
@@ -172,6 +284,319 @@ class ArrowAutoTrader:
             enabled=bool(p.get("enable_probability_filter", True)),
         )
 
+    def _live_net_pnl(self, cur_spread: Optional[float], p: Dict) -> Optional[float]:
+        """Live mark-to-market net P&L (₹) of the open position, or None when it
+        cannot be computed yet (flat, or no current price).
+
+        gross = Δspread × lots × lot_size — the spread is in ₹/unit so it must be
+        scaled by the contract's unit count. The reference is the actual ENTRY
+        FILL spread (which already embeds entry slippage); the current side is
+        the EXECUTABLE closing spread (sell_spread for a LONG, buy_spread for a
+        SHORT) when the feed carries a book, so the exit's bid/ask cost IS
+        already in the figure; on an LTP-only feed it is the last-trade spread
+        and ₹ targets need a little margin. Fees are the flat round-trip
+        brokerage (2 legs × entry+exit), matching the trade-log convention.
+        LONG profits when the spread rises; SHORT when it falls."""
+        pos = self._pos
+        if not pos or cur_spread is None:
+            return None
+        entry = pos.get("entry_fill_spread")
+        if entry is None:
+            entry = pos.get("entry_spread")
+        if entry is None:
+            return None
+        lots = max(1, int(pos.get("lots", 1)))
+        lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+        change = ((cur_spread - entry) if pos["direction"] == "LONG_SPREAD"
+                  else (entry - cur_spread))
+        gross = change * lots * lot_mult
+        net = gross - self._position_fees(p)
+        # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
+        # (losses aren't taxed) — so break-even and the profit gates account for
+        # tax, not just transaction costs. Approximation: applied per-trade.
+        cgt_pct = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        if cgt_pct > 0 and net > 0:
+            net -= cgt_pct * net
+        return net
+
+    def _position_fees(self, p: Dict) -> float:
+        """Round-trip fees (₹) of the open position, EXCLUDING slippage (already
+        embedded in the entry FILL spread). With use_segment_costs on, the
+        per-segment Indian stack; else brokerage + STT + catch-all 'other'.
+        Notional off the CONTRACT leg (leg_b), the scale the spread is in.
+        The ONE fee figure behind both the live net P&L and the BE/TP/SL
+        spread levels, so the two can never disagree."""
+        pos = self._pos or {}
+        lots = max(1, int(pos.get("lots", 1)))
+        lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+        if bool(p.get("use_segment_costs", False)):
+            return self._segment_round_trip_cost(p, lots, lot_mult, None, None,
+                                                 include_slippage=False)
+        rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
+        if ref:
+            notional = float(ref) * lots * lot_mult
+            rt_fees += _stt_round_trip_pct(p) * notional
+            rt_fees += 4.0 * (float(p.get("other_cost_pct", 0) or 0) / 100.0) * notional
+        return rt_fees
+
+    def _spread_levels(self, p: Dict, profit_target: float,
+                       dollar_stop: float) -> Optional[Dict]:
+        """BE / TP / SL (and EX) of the open position as SPREAD prices — the
+        levels the closing-side spread must reach for each ₹ exit to fire.
+
+        Solved from the same net-P&L formula the exits use (_live_net_pnl):
+            net = d·(X − E)·lots·mult − fees,   d = +1 LONG, −1 SHORT
+        so  BE: net = 0 · TP: net after tax = target · SL: net = −stop.
+        X is compared against the CLOSING side: the sell spread for a LONG,
+        the buy spread for a SHORT. A level whose exit is off is None."""
+        pos = self._pos
+        if not pos:
+            return None
+        E = pos.get("entry_fill_spread")
+        if E is None:
+            E = pos.get("entry_spread")
+        oz = max(1, int(pos.get("lots", 1))) * float(p.get("lot_multiplier", 1.0) or 1.0)
+        if E is None or oz <= 0:
+            return None
+        E = float(E)
+        d = 1.0 if pos["direction"] == "LONG_SPREAD" else -1.0
+        fees = self._position_fees(p)
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        keep = (1.0 - cgt) if 0 <= cgt < 1 else 1.0
+        lvl = lambda net_gross: round(E + d * net_gross / oz, 2)
+        gate = float(p.get("reversion_gate_inr", 0) or 0)
+        return {
+            "entry": round(E, 2),
+            "break_even": lvl(fees),
+            "take_profit": lvl(fees + profit_target / keep) if profit_target > 0 else None,
+            "stop": lvl(fees - dollar_stop) if dollar_stop > 0 else None,
+            "gate_release": (lvl(fees + gate / keep)
+                             if gate > 0 and bool(p.get("reversion_require_profit", True))
+                             else None),
+            "favorable": "up" if d > 0 else "down",
+            "closing_side": "sell" if d > 0 else "buy",
+            "fees_inr": round(fees, 2),
+        }
+
+    def _reversion_allowed(self, net_pnl: Optional[float], p: Dict,
+                           held_sec: float = 0.0, max_hold_sec: float = 0.0) -> bool:
+        """Gate the z-reversion ("target") exit on P&L — never book a losing
+        profit-take. When ``reversion_require_profit`` is on, the reversion exit
+        may fire only if net ≥ ``reversion_gate_inr`` (0 = break-even). Fail-open
+        when P&L can't be priced (net None) so a missing price never traps a
+        position.
+
+        DEADLOCK-PROOF: the gate MUST defer to max-hold — past 1× the trade's
+        max-hold the floor decays to break-even; past 2× the gate releases
+        entirely (the reversion edge is spent — take what's there). Without
+        this, gate + max-hold(needs net>0) + an out-of-reach TP jointly
+        deadlock a fully reverted trade, which then bleeds to the stop."""
+        if not bool(p.get("reversion_require_profit", False)):
+            return True
+        if max_hold_sec > 0 and held_sec >= 2.0 * max_hold_sec:
+            return True                              # gate releases entirely
+        if net_pnl is None:
+            return True                              # fail-open
+        floor = float(p.get("reversion_gate_inr", 0) or 0)
+        if max_hold_sec > 0 and held_sec >= max_hold_sec:
+            floor = 0.0                              # decay to break-even
+        return net_pnl >= floor
+
+    def _segment_round_trip_cost(self, p: Dict, lots: int, lot_m: float,
+                                 ref_a: Optional[float], ref_b: Optional[float],
+                                 include_slippage: bool) -> float:
+        """Per-segment Indian cost stack (STT/CTT + txn + GST + SEBI + stamp +
+        brokerage [+ slippage]) via ``core.costs``. Notional is per-leg: the
+        contract leg (leg_b) at its price × lots × lot_size, and leg_a hedged to
+        leg_b's exposure × k. Rates come from ``cost_rates_a``/``cost_rates_b``
+        (resolved from each leg's segment). Used only when use_segment_costs on."""
+        pos = self._pos or {}
+        brk = float(p.get("brokerage_per_lot", 20.0) or 0)
+        slip = float(p.get("slippage_per_lot", 5.0) or 0) if include_slippage else 0.0
+        rb = ref_b if ref_b is not None else (pos.get("entry_leg_b") or pos.get("entry_leg_a"))
+        ra = ref_a if ref_a is not None else (pos.get("entry_leg_a") or rb)
+        if not rb:
+            return brk * lots * 4.0 + slip * lots * 4.0        # no price → fees only
+        k = float(p.get("hedge_ratio", 1.0) or 1.0)
+        notional_b = float(rb) * lots * lot_m
+        notional_a = float(ra) * lots * lot_m * k if ra else notional_b
+        gst = float(p.get("gst_pct", costs.GST_PCT) or costs.GST_PCT)
+        return costs.round_trip_cost(p.get("cost_rates_a") or {}, notional_a,
+                                     p.get("cost_rates_b") or {}, notional_b,
+                                     brk, lots, slip, gst)
+
+    def _round_trip_cost(self, p: Dict, lots: Optional[int] = None,
+                         ref_price: Optional[float] = None,
+                         ref_b: Optional[float] = None) -> float:
+        """Estimated round-trip TRANSACTION cost in ₹: brokerage + slippage
+        (both ×2 legs ×2 in/out) + STT (2 sells × %-of-notional) + a catch-all
+        'other charges' % (exchange txn + GST + SEBI + stamp) on all four leg
+        turnovers. Excludes Capital-Gains Tax (that's a haircut on PROFIT, not a
+        transaction cost — applied in the P&L). Defaults to the open position's
+        size/entry leg price; pass ``lots``/``ref_price`` (leg_a) and ``ref_b``
+        (leg_b) for a pre-entry (prospective) estimate. With use_segment_costs on,
+        the per-segment Indian stack replaces the STT+other catch-all."""
+        pos = self._pos or {}
+        lots = int(lots if lots is not None
+                   else pos.get("lots", p.get("lots", 1)) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        if bool(p.get("use_segment_costs", False)):
+            return self._segment_round_trip_cost(p, lots, lot_m, ref_price, ref_b,
+                                                 include_slippage=True)
+        cost = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        cost += float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
+        ref = (ref_price if ref_price is not None
+               else pos.get("entry_leg_b") or pos.get("entry_leg_a"))
+        if ref:
+            notional = float(ref) * lots * lot_m
+            other_pct = float(p.get("other_cost_pct", 0) or 0) / 100.0
+            cost += _stt_round_trip_pct(p) * notional  # STT: leg_a sell + leg_b sell
+            cost += 4.0 * other_pct * notional         # other charges: all 4 leg turnovers
+        return cost
+
+    def _edge_entry_block(self, z: float, std: float, lots: int,
+                          sig: Dict, p: Dict) -> Optional[str]:
+        """The dead-day gate, evaluated BEFORE entering — "only take a trade I
+        know can be profitable after ALL costs". Checks against the prospective
+        round-trip cost (brokerage + slippage + STT + other charges at this size
+        and leg price), with the expected capture haircut by Capital-Gains Tax:
+          • edge filter — after-tax expected capture (target_fraction × |z| × σ ×
+            qty, less CGT) must be ≥ min_edge_multiple × cost;
+          • cost-floor sanity — if cost_floor_mult × cost exceeds the plausible
+            FULL reversion (|z| × σ × qty), the trade can never win: block it.
+        Returns a human-readable block reason, or None to proceed."""
+        # Half-life acceptance band: reject a reversion that is too FAST (a
+        # half-life below the floor is microstructure noise, not a tradable
+        # edge) or too SLOW (above the ceiling it won't revert inside the hold).
+        # Bounds are in seconds; the signal's half_life_sec is authoritative.
+        # Skipped when it can't be measured (half_life_sec = 0). 0 bound = off.
+        hl_sec = float(sig.get("half_life_sec", 0) or 0)
+        if hl_sec > 0:
+            hl_min = float(p.get("half_life_min_sec", 0) or 0)
+            hl_max = float(p.get("half_life_max_sec", 0) or 0)
+            if hl_min > 0 and hl_sec < hl_min:
+                return (f"half-life {hl_sec:.0f}s < min {hl_min:.0f}s — "
+                        f"reversion too fast (noise)")
+            if hl_max > 0 and hl_sec > hl_max:
+                return (f"half-life {hl_sec:.0f}s > max {hl_max:.0f}s — "
+                        f"reverts too slowly to hold")
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"),
+                                     ref_b=sig.get("leg_b"))
+        full_move = abs(z) * float(std) * lots * lot_m
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        min_mult = float(p.get("min_edge_multiple", 0) or 0)
+        if min_mult > 0:
+            # target fraction: the exit's σ-fraction if set, else a conservative
+            # 0.5 (you rarely capture the full |z|×σ move).
+            tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
+            capture = tfrac * full_move * (1.0 - cgt)         # net of tax
+            if capture < min_mult * cost:
+                return (f"edge filter: after-tax capture ₹{capture:.0f} < "
+                        f"{min_mult:g}× cost ₹{cost:.0f} — not worth it")
+        cfm = float(p.get("cost_floor_mult", 0) or 0)
+        if cfm > 0 and cfm * cost > full_move:
+            return (f"cost floor ₹{cfm * cost:.0f} exceeds plausible reversion "
+                    f"₹{full_move:.0f} — trade can never win")
+        return None
+
+    def edge_preview(self, sig: Dict) -> Dict:
+        """Standing pre-trade economics for the dashboard Filters panel — the
+        SAME round-trip cost and edge-multiple the live gate uses, but evaluated
+        at the ENTRY threshold from the current signal so the panel shows real
+        numbers before z ever reaches entry (instead of 'collecting data').
+
+        Returns round-trip cost (₹ and bps of the contract-leg notional, split
+        into fees vs slippage), the after-tax expected capture, and the edge
+        multiple vs the required minimum. ``{}`` when there is nothing to price
+        yet (no σ or leg prices)."""
+        p = self._params() or {}
+        std = float(sig.get("std") or 0)
+        la, lb = sig.get("leg_a"), sig.get("leg_b")
+        if std <= 0 or not la or not lb:
+            return {}
+        lots = int(p.get("lots", 1) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        entry_z = float(p.get("entry_zscore", 2.0) or 2.0)
+        cost = self._round_trip_cost(p, lots=lots, ref_price=la, ref_b=lb)
+        full_move = entry_z * std * lots * lot_m         # ₹ on a full entry_z→0 revert
+        cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+        tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
+        capture = tfrac * full_move * (1.0 - cgt)        # net-of-tax expected capture
+        min_mult = float(p.get("min_edge_multiple", 0) or 0)
+        edge_mult = (capture / cost) if cost > 0 else None
+        notional = abs(float(lb)) * lots * lot_m         # contract-leg (leg_b) notional
+        brokerage = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
+        slippage = float(p.get("slippage_per_lot", 5.0) or 0) * lots * 4.0
+
+        def _bps(x):
+            return round(x / notional * 10000.0, 2) if notional > 0 else None
+
+        return {
+            "round_trip_cost_inr": round(cost, 2),
+            "round_trip_cost_bps": _bps(cost),
+            "round_trip_fees_bps": _bps(brokerage),
+            "round_trip_slippage_bps": _bps(max(0.0, cost - brokerage)),
+            "expected_capture_inr": round(capture, 2),
+            "edge_multiple": (round(edge_mult, 2) if edge_mult is not None else None),
+            "min_edge_multiple": min_mult,
+            "edge_ok": (min_mult <= 0 or (edge_mult is not None and edge_mult >= min_mult)),
+            "order_mode": ("LIMIT" if bool(p.get("use_limit_orders", True)) else "MARKET"),
+            "fee_bps_per_side": _bps(brokerage / 4.0 * 2.0),   # both legs, one side
+        }
+
+    def _effective_exit_levels(self, p: Dict) -> Tuple[float, float]:
+        """Resolve the ₹ (dollar_stop, profit_target) with scale-invariant
+        precedence, so the levels survive resizing/re-vol:
+          target: σ-fraction > %-of-capital > fixed-₹, then raised to a cost floor;
+          stop:   min(target/RR, %-of-capital × capital_at_risk) — the TIGHTER
+                  binds — with fixed-₹ as the fallback.
+        Fixed-₹ fields are used only when their scale-invariant twin is unset.
+
+        TAKE PROFIT = BE + %: the returned target is compared against the LIVE
+        NET P&L (`_live_net_pnl`), which is already net of every cost — brokerage,
+        slippage, STT, other charges and CGT — so net = 0 IS break-even. A target
+        of ₹T therefore means "close once you are ₹T ABOVE break-even". The
+        `tp_capital_pct` form makes that ₹T = tp_capital_pct% × capital-at-risk,
+        i.e. exactly BE + % of capital."""
+        pos = self._pos or {}
+        lots = int(pos.get("lots", p.get("lots", 1)) or 1)
+        lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
+        car = float(p.get("capital_at_risk_inr", 0) or 0)
+        # ── target ──
+        target = float(p.get("profit_target_inr", 0) or 0)
+        sfrac = float(p.get("profit_target_sigma_frac", 0) or 0)
+        std0 = float(pos.get("entry_std", 0) or 0)
+        absz = abs(float(pos.get("entry_z", 0) or 0))
+        tp_cap = float(p.get("tp_capital_pct", 0) or 0)
+        if sfrac > 0 and std0 > 0 and absz > 0:
+            target = sfrac * absz * std0 * lots * lot_m
+        elif tp_cap > 0 and car > 0:
+            target = (tp_cap / 100.0) * car        # BE + tp_capital_pct% of capital
+        elif tp_cap > 0 and car <= 0 and not self._tp_cap_warned:
+            logger.warning("ArrowAlgo: tp_capital_pct={:.3g}% is set but "
+                           "capital_at_risk_inr is 0 — the 'BE + %' take-profit "
+                           "is INACTIVE; falling back to profit_target_inr "
+                           "(₹{:.0f}). Set capital_at_risk_inr to enable it.",
+                           tp_cap, target)
+            self._tp_cap_warned = True
+        cost_mult = float(p.get("cost_floor_mult", 0) or 0)
+        if cost_mult > 0 and target > 0:
+            target = max(target, cost_mult * self._round_trip_cost(p))
+        # ── stop ──
+        stop = float(p.get("dollar_stop_inr", 0) or 0)
+        cands = []
+        rr = float(p.get("stop_rr", 0) or 0)
+        if rr > 0 and target > 0:
+            cands.append(target / rr)
+        scap = float(p.get("stop_capital_pct", 0) or 0)
+        if scap > 0 and car > 0:
+            cands.append((scap / 100.0) * car)
+        if cands:
+            stop = min(cands)
+        return round(stop, 2), round(target, 2)
+
     def _tick(self) -> None:
         p = self._params()
         sig = self._signal() or {}
@@ -179,7 +604,8 @@ class ArrowAutoTrader:
                       "leg_a": sig.get("leg_a"), "leg_b": sig.get("leg_b"),
                       "spread": sig.get("spread"), "mean": sig.get("mean"),
                       "std": sig.get("std"), "zscore": sig.get("zscore"),
-                      "samples": sig.get("samples"), "half_life": sig.get("half_life")}
+                      "samples": sig.get("samples"), "half_life": sig.get("half_life"),
+                      "regime": sig.get("regime")}
 
         z = sig.get("zscore")
         std = sig.get("std")
@@ -195,9 +621,27 @@ class ArrowAutoTrader:
             self._set_snap(snap)
             return
 
+        # EXECUTABLE sides. With a book, selling the spread is judged on
+        # sell_spread (k·bid_A − ask_B) and buying it on buy_spread
+        # (k·ask_A − bid_B) — the prices the orders would actually meet. With
+        # no book at all (LTP-only feed) both fall back to the mid/LTP z. With a
+        # PARTIAL book the missing side is None: it cannot be traded.
+        z_mid, spread_mid = z, sig.get("spread")
+        has_book = any(sig.get(k) is not None for k in ("bid_a", "ask_a", "bid_b", "ask_b"))
+        if has_book:
+            z_sell, z_buy = sig.get("z_sell"), sig.get("z_buy")
+            sp_sell, sp_buy = sig.get("sell_spread"), sig.get("buy_spread")
+        else:
+            z_sell = z_buy = z
+            sp_sell = sp_buy = spread_mid
+        snap.update(z_sell=z_sell, z_buy=z_buy, sell_spread=sp_sell, buy_spread=sp_buy)
+
         entry_z = float(p.get("entry_zscore", sig.get("entry_zscore", 2.0)))
         exit_z  = float(p.get("exit_zscore", sig.get("exit_zscore", 0.0)))
         stop_z  = float(p.get("stop_zscore", sig.get("stop_zscore", 4.0)))
+        # Upper bound on entry |z|: an extremely deep z usually signals a regime
+        # shift, not a reversion opportunity. 0 = disabled.
+        max_entry_z = float(p.get("max_entry_zscore", 0) or 0)
         lots    = max(1, int(p.get("lots", 1)))
         half_life = float(sig.get("half_life", 0.0))
         sample_interval = float(sig.get("sample_interval_sec", 0.5))
@@ -205,10 +649,23 @@ class ArrowAutoTrader:
 
         # Confirmation ticks: require N consecutive ticks beyond the threshold
         # before an entry fires (filters out single-tick spikes).
+        # Trade direction (Settings): which side may OPEN a position.
+        #   sell_only — High → Low: only SHORT the spread (enter on the sell price)
+        #   buy_only  — Low → High: only go LONG (enter on the buy price)
+        #   both      — either
+        # It gates ENTRIES only. Exits always run, so a position can never be
+        # left without a way out by changing this setting while it is open.
+        td = str(p.get("trade_direction", "both") or "both").lower()
+        zs_entry = z_sell if td != "buy_only" else None
+        zb_entry = z_buy if td != "sell_only" else None
+        snap["trade_direction"] = td
+
+        # SHORT counts on the SELL side reaching +entry, LONG on the BUY side
+        # reaching −entry — each on the price that side can actually trade at.
         confirm = max(1, int(p.get("confirmation_ticks", 1)))
-        if z >= entry_z:
+        if zs_entry is not None and zs_entry >= entry_z:
             self._consec_above += 1; self._consec_below = 0
-        elif z <= -entry_z:
+        elif zb_entry is not None and zb_entry <= -entry_z:
             self._consec_below += 1; self._consec_above = 0
         else:
             self._consec_above = self._consec_below = 0
@@ -218,19 +675,89 @@ class ArrowAutoTrader:
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
+            if zs_entry is not None and zs_entry >= entry_z:
+                want_dir = "SHORT_SPREAD"
+            elif zb_entry is not None and zb_entry <= -entry_z:
+                want_dir = "LONG_SPREAD"
+            else:
+                want_dir = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            # The side this setting switched off is past its threshold: say so,
+            # rather than "flat — watching", so a missed trade is explained.
+            off_side = None
+            if td == "buy_only" and z_sell is not None and z_sell >= entry_z:
+                off_side = f"sell spread at z {z_sell:+.2f} — SHORT entries are off (Buy spread only)"
+            elif td == "sell_only" and z_buy is not None and z_buy <= -entry_z:
+                off_side = f"buy spread at z {z_buy:+.2f} — LONG entries are off (Sell spread only)"
+            # From here on, z / spread are the side we would TRADE on.
+            z_side = z_sell if want_dir == "SHORT_SPREAD" else z_buy
+            z = z_side if z_side is not None else z_mid
+            sp_side = sp_sell if want_dir == "SHORT_SPREAD" else sp_buy
+            # z-reset: clear a post-stop block once z has recovered toward the
+            # mean — a LONG block (entered deep-negative) clears when z ≥ −exit_z;
+            # a SHORT block when z ≤ +exit_z (robust when exit_z = 0).
+            if self._stop_block_dir == "LONG_SPREAD" and z >= -exit_z:
+                self._stop_block_dir = None
+            elif self._stop_block_dir == "SHORT_SPREAD" and z <= exit_z:
+                self._stop_block_dir = None
+            streak = int(p.get("loss_streak", 0) or 0)
+            pause_at = int(p.get("loss_streak_pause_at", 0) or 0)
+            # Regime guard: latch a day-long halt once the spread is flagged
+            # TRENDING (auto-rearm next IST day); optional trend-direction filter.
+            reg_enabled = bool(p.get("regime_enabled", False))
+            reg_state = sig.get("regime")
+            reg_slope = float((sig.get("regime_detail") or {}).get("slope", 0.0) or 0.0)
+            today = int((self._clock() + 5.5 * 3600) // 86400)
+            if self._regime_halt_day is not None and self._regime_halt_day != today:
+                self._regime_halt_day = None                     # auto-rearm next day
+            if (reg_enabled and bool(p.get("regime_halt_on_trending", True))
+                    and reg_state == "TRENDING"):
+                self._regime_halt_day = today                    # latch for the day
+            regime_halted = reg_enabled and self._regime_halt_day == today
+            trend_blocks = (reg_enabled and bool(p.get("regime_trend_direction_filter", False))
+                            and ((reg_slope > 0 and want_dir == "LONG_SPREAD")
+                                 or (reg_slope < 0 and want_dir == "SHORT_SPREAD")))
             if mdl > 0 and day_pnl <= -mdl:
                 snap["status"] = f"daily loss limit reached (₹{day_pnl:.0f} ≤ −₹{mdl:.0f}) — entries halted"
+            elif pause_at > 0 and streak >= pause_at:
+                snap["status"] = f"paused: {streak}-loss streak (≥ {pause_at}) — entries halted"
+            elif regime_halted:
+                snap["status"] = "regime TRENDING — new entries halted for the day (auto-rearm tomorrow)"
             elif now < self._cooldown_until:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
                 snap["status"] = "outside trading hours"
+            elif _entry_cutoff_reached(p):
+                buf = float(p.get("no_entry_buffer_min", 0) or 0)
+                snap["status"] = f"no new entries — within {buf:.0f} min of close"
+            elif _expiry_blocks_entry(p, sig):
+                snap["status"] = _expiry_blocks_entry(p, sig)
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short) and trend_blocks):
+                snap["status"] = (f"trend filter: {'SHORT' if reg_slope > 0 else 'LONG'}-only "
+                                  f"(S {'rising' if reg_slope > 0 else 'falling'})")
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
+                  and self._stop_block_dir == want_dir):
+                snap["status"] = (f"z-reset: blocking {want_dir.replace('_SPREAD','')} "
+                                  f"re-entry until z re-enters ±{exit_z:.1f} band (z={z:.2f})")
+            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
+                  and max_entry_z > 0 and abs(z) > max_entry_z):
+                snap["status"] = (f"blocked: |z|={abs(z):.2f} exceeds entry cap "
+                                  f"{max_entry_z:.2f} (regime-shift guard)")
             elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
-                direction = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+                direction = want_dir
+                # Loss-streak size reducer: shrink size on a losing run.
+                eff_lots = lots
+                reduce_at = int(p.get("loss_streak_reduce_at", 0) or 0)
+                if reduce_at > 0 and streak >= reduce_at:
+                    pct = float(p.get("loss_streak_reduce_pct", 0) or 0) / 100.0
+                    eff_lots = max(1, int(round(lots * (1.0 - pct))))
+                edge_msg = self._edge_entry_block(z, std, eff_lots, sig, p)
                 pf = self._build_filter(p)
-                allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=lots)
+                allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=eff_lots)
                 snap["pf_reason"] = reason
                 snap["pf_metrics"] = metrics
-                if not allow:
+                if edge_msg:
+                    snap["status"] = f"blocked: {edge_msg}"
+                elif not allow:
                     wp = metrics.get("win_probability")
                     ev = metrics.get("expected_value")
                     extra = ""
@@ -238,37 +765,264 @@ class ArrowAutoTrader:
                         extra = f" (P_win={wp*100:.0f}% EV=₹{ev:.0f})"
                     snap["status"] = f"blocked: {reason}{extra}"
                 else:
-                    snap["status"] = f"ENTRY {direction} (z={z:.2f})"
-                    self._enter(direction, lots, z, sig.get("spread", 0.0))
-            elif abs(z) >= entry_z:
+                    refused = self._enter(
+                        direction, eff_lots, z,
+                        sp_side if sp_side is not None else (spread_mid or 0.0),
+                        mid_spread=spread_mid,
+                        z_key=("z_sell" if direction == "SHORT_SPREAD" else "z_buy")
+                        if has_book else "zscore")
+                    snap["status"] = refused or f"ENTRY {direction} (z={z:.2f}, {eff_lots} lot(s))"
+            elif abs(z) >= entry_z and not off_side:
                 c = max(self._consec_above, self._consec_below)
                 snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
+            elif off_side:
+                snap["status"] = off_side
             else:
                 snap["status"] = "flat — watching"
         else:
+            # A position is closed on the OPPOSITE side it was opened on: a
+            # LONG (bought) spread is closed by SELLING it, a SHORT by BUYING
+            # it. Reversion, stops and the live P&L all read that side.
+            if self._pos["direction"] == "LONG_SPREAD":
+                z_close, sp_close = z_sell, sp_sell
+            else:
+                z_close, sp_close = z_buy, sp_buy
+            z = z_close if z_close is not None else z_mid
             entry_z_sign = self._pos["entry_z"]
             # revert through exit_z back toward the mean
             reverted = (z >= exit_z) if entry_z_sign < 0 else (z <= exit_z)
             held_sec = now - self._pos["entry_time"]
+            min_hold_sec = float(p.get("min_hold_sec", 0.0))
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
-            spread_now = sig.get("spread")
-            if abs(z) >= stop_z:
+            spread_now = sp_close if sp_close is not None else spread_mid
+
+            # ── live mark-to-market net P&L on the open position (₹) ──────────
+            net_pnl = self._live_net_pnl(spread_now, p)
+            dollar_stop, profit_target = self._effective_exit_levels(p)
+            snap["net_pnl"] = round(net_pnl, 2) if net_pnl is not None else None
+            snap["dollar_stop"] = -dollar_stop if dollar_stop > 0 else None
+            snap["profit_target"] = profit_target if profit_target > 0 else None
+            # 'TP = BE + %': net_pnl is already post-cost, so the ₹ needed to
+            # reach break-even is the round-trip cost, and the take-profit is
+            # profit_target ABOVE that. Surface both so the split is visible.
+            _be_cost = self._round_trip_cost(p)   # uses the position's entry notional
+            snap["break_even"] = round(_be_cost, 2) if _be_cost > 0 else None
+            snap["spread_levels"] = self._spread_levels(p, profit_target, dollar_stop)
+            snap["tp_gross_target"] = (round(_be_cost + profit_target, 2)
+                                       if profit_target > 0 else None)
+            _pnl_txt = f"₹{net_pnl:.0f}" if net_pnl is not None else "n/a"
+
+            # ── position detail for the Signal & Position card ───────────────
+            entry_ref = self._pos.get("entry_fill_spread")
+            if entry_ref is None:
+                entry_ref = self._pos.get("entry_spread")
+            snap["entry_spread"] = entry_ref
+            snap["held_sec"] = round(held_sec, 1)
+            snap["max_hold_sec"] = round(max_hold_sec, 1) if max_hold_sec > 0 else None
+            snap["remaining_sec"] = (round(max(0.0, max_hold_sec - held_sec), 1)
+                                     if max_hold_sec > 0 else None)
+            snap["delta_spread"] = (round(spread_now - entry_ref, 4)
+                                    if spread_now is not None and entry_ref is not None else None)
+            _lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
+            _la = sig.get("leg_a")
+            snap["notional"] = (round(self._pos["lots"] * _lot_mult * float(_la))
+                                if _la else None)
+
+            # Minimum hold: suppress the reversion/target exit until the trade has
+            # lived long enough that REAL reversion — not a single noisy tick —
+            # decides the outcome. Risk overrides (dollar stop, z-stop) are NEVER
+            # suppressed; the time-stop is a maximum so it is always beyond it.
+            hold_gated = reverted and min_hold_sec > 0 and held_sec < min_hold_sec
+
+            # ── Phase 2: peak/trough tracking, max-hold upgrade, trailing stop ──
+            # Lifecycle extremes: peak (drives the trailing stop) and trough net
+            # P&L, WITH minutes-after-entry — persisted on close so the take/hold
+            # can be tuned from the measured peak distribution, not opinion.
+            peak = float(self._pos.get("peak_pnl", 0.0) or 0.0)
+            trough = float(self._pos.get("trough_pnl", 0.0) or 0.0)
+            if net_pnl is not None:
+                if net_pnl > peak:
+                    peak = net_pnl
+                    self._pos["peak_pnl"] = peak
+                    self._pos["peak_min"] = round(held_sec / 60.0, 1)
+                if net_pnl < trough:
+                    trough = net_pnl
+                    self._pos["trough_pnl"] = trough
+                    self._pos["trough_min"] = round(held_sec / 60.0, 1)
+            snap["peak_pnl"] = round(peak, 2) if net_pnl is not None else None
+            snap["trough_pnl"] = round(trough, 2) if net_pnl is not None else None
+
+            # Max-hold (the time-stop), upgraded:
+            #  • silent when losing — but ONLY when a ₹ stop is armed to catch the
+            #    loss; without that backstop it still fires (no stuck losers);
+            #  • z-progress gate — a WINNING trade that has reverted ≥ the gate
+            #    fraction of the way is let run — but ONLY when a profit target
+            #    exists to eventually take it out (suppression waiting for a TP
+            #    that is configured off = a deadlock, learned the expensive way).
+            max_hold_due = max_hold_sec > 0 and held_sec >= max_hold_sec
+            max_hold_expired = max_hold_due
+            if max_hold_due:
+                silent = bool(p.get("max_hold_silent_when_losing", False)) and dollar_stop > 0
+                if silent and net_pnl is not None and net_pnl <= 0:
+                    max_hold_due = False
+                z_prog_min = float(p.get("max_hold_z_progress_min", 0) or 0)
+                if (max_hold_due and z_prog_min > 0 and profit_target > 0
+                        and net_pnl is not None and net_pnl > 0):
+                    entry_abs, exit_abs = abs(self._pos["entry_z"]), abs(exit_z)
+                    journey = entry_abs - exit_abs
+                    z_prog = ((entry_abs - abs(z)) / journey) if journey > 1e-9 else 1.0
+                    if z_prog >= z_prog_min:
+                        max_hold_due = False        # winning & reverting → run to target
+            snap["max_hold_expired"] = bool(max_hold_expired)
+
+            # Hard time-stop (exit-path completeness): a sideways loser — net < 0,
+            # z never reverting — has no clock once max-hold skips losers and the
+            # z-stop is demoted. Past hard_time_stop_mult × max-hold, close ANY
+            # trade regardless of P&L. 0 = off.
+            hard_mult = float(p.get("hard_time_stop_mult", 0) or 0)
+            hard_due = (hard_mult > 0 and max_hold_sec > 0
+                        and held_sec >= hard_mult * max_hold_sec)
+
+            # z-stop demotion: once a ₹ stop is armed, in-trade risk is DOLLARS
+            # only — the rolling mean/σ drift post-entry, so the z-stop's dollar
+            # meaning wanders. FAIL-SAFE: auto-re-enabled whenever NO dollar stop
+            # is armed (a trade must always have a stop). When suppressed, every
+            # would-have-fired occasion is logged so the change is scoreable.
+            z_stop_armed = bool(p.get("z_stop_exit_enabled", True)) or dollar_stop <= 0
+            if abs(z) >= stop_z and not z_stop_armed:
+                if not self._zstop_suppressed_logged:
+                    logger.warning("ArrowAlgo: z-stop SUPPRESSED — would have fired at "
+                                   "z={:.2f} (≥ {:.1f}); dollar stop governs (net {})",
+                                   z, stop_z, _pnl_txt)
+                    self._zstop_suppressed_logged = True
+            elif abs(z) < stop_z:
+                self._zstop_suppressed_logged = False
+
+            # Trailing stop: arm once the peak clears the floor (a % of the profit
+            # target, or simply 'in profit' when no target/floor is set), then
+            # fire when P&L pulls back trail_pct from the peak.
+            trail_pct = float(p.get("trailing_stop_pct", 0) or 0)
+            floor_pct = float(p.get("trailing_stop_floor_pct", 0) or 0)
+            trailing_fire = trailing_armed = False
+            if trail_pct > 0 and net_pnl is not None and peak > 0:
+                trailing_armed = (peak >= (floor_pct / 100.0) * profit_target
+                                  if floor_pct > 0 and profit_target > 0 else True)
+                if trailing_armed and net_pnl < peak * (1.0 - trail_pct / 100.0):
+                    trailing_fire = True
+            snap["trailing_armed"] = trailing_armed
+
+            # Exit priority (first match wins) — RISK BEFORE REWARD:
+            #   1 dollar stop · 2 profit target · 3 hard time-stop (unconditional)
+            #   4 max-hold (silent/gated) · 5 trailing stop · 6 z-stop (if armed)
+            #   7 z-target (min-hold gated; floor decays past 1× max-hold,
+            #     releases past 2× — deadlock-proof)
+            if dollar_stop > 0 and net_pnl is not None and net_pnl <= -dollar_stop:
+                exit_reason = "dollar_stop"
+            elif profit_target > 0 and net_pnl is not None and net_pnl >= profit_target:
+                exit_reason = "profit_target"
+            elif hard_due:
+                exit_reason = "hard_time_stop"
+            elif max_hold_due:
+                exit_reason = "time_stop"
+            elif trailing_fire:
+                exit_reason = "trailing_stop"
+            elif abs(z) >= stop_z and z_stop_armed:
+                exit_reason = "stop"
+            elif (reverted and not hold_gated
+                  and self._reversion_allowed(net_pnl, p, held_sec, max_hold_sec)):
+                exit_reason = "target"
+            else:
+                exit_reason = None
+
+            if exit_reason and self._exit_halted:
+                # Ceiling reached — stop hammering the broker; demand attention.
+                snap["status"] = (f"EXIT HALTED ({exit_reason}, z={z:.2f}) — "
+                                  f"{self._exit_failures} consecutive failures; "
+                                  f"close manually")
+            elif exit_reason and now < self._exit_retry_at:
+                # Backoff window after a failed exit — wait before re-attempting.
+                wait = self._exit_retry_at - now
+                snap["status"] = (f"exit retry in {wait:.0f}s (backoff after "
+                                  f"{self._exit_failures} failure(s); {exit_reason}, z={z:.2f})")
+            elif exit_reason == "dollar_stop":
+                snap["status"] = f"STOP PRICE (net {_pnl_txt} ≤ −₹{dollar_stop:.0f})"
+                self._exit("dollar_stop", z, spread_now)
+            elif exit_reason == "profit_target":
+                snap["status"] = f"PROFIT TARGET (net {_pnl_txt} ≥ ₹{profit_target:.0f})"
+                self._exit("profit_target", z, spread_now)
+            elif exit_reason == "hard_time_stop":
+                snap["status"] = (f"HARD TIME-STOP ({held_sec:.0f}s ≥ "
+                                  f"{hard_mult:g}× max-hold, net {_pnl_txt}, ANY P&L)")
+                self._exit("hard_time_stop", z, spread_now)
+            elif exit_reason == "time_stop":
+                snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s, net {_pnl_txt})"
+                self._exit("time_stop", z, spread_now)
+            elif exit_reason == "trailing_stop":
+                snap["status"] = f"TRAILING STOP (net {_pnl_txt}, peak ₹{peak:.0f})"
+                self._exit("trailing_stop", z, spread_now)
+            elif exit_reason == "stop":
                 snap["status"] = f"STOP (z={z:.2f})"
                 self._exit("stop", z, spread_now)
-            elif reverted:
+            elif exit_reason == "target":
                 snap["status"] = f"EXIT target (z={z:.2f})"
                 self._exit("target", z, spread_now)
-            elif max_hold_sec > 0 and held_sec >= max_hold_sec:
-                snap["status"] = f"TIME-STOP ({held_sec:.0f}s ≥ {max_hold_sec:.0f}s)"
-                self._exit("time_stop", z, spread_now)
+            elif hold_gated:
+                snap["status"] = (f"min-hold {held_sec:.0f}s/{min_hold_sec:.0f}s — "
+                                  f"reverted but holding (z={z:.2f}, net {_pnl_txt})")
             else:
-                snap["status"] = f"holding {self._pos['direction']} (z={z:.2f})"
+                _extra = " · max-hold EXPIRED (gated)" if max_hold_expired else ""
+                snap["status"] = (f"holding {self._pos['direction']} "
+                                  f"(z={z:.2f}, net {_pnl_txt}){_extra}")
 
         self._set_snap(snap)
 
     # ── actions (reuse the proven Arrow order path) ──────────────────────────
-    def _enter(self, direction: str, lots: int, z: float, spread: float) -> None:
+    def _enter(self, direction: str, lots: int, z: float, spread: float,
+               mid_spread: Optional[float] = None, z_key: str = "zscore") -> Optional[str]:
+        # Stale-signal guard: re-sample the live signal at the moment of entry
+        # and refuse if the fill-time z has diverged from the DECISION z beyond
+        # a configurable threshold (so a live entry can't fire on a signal that
+        # has already snapped back). 0/absent ⇒ disabled. Returns a status string
+        # when the entry is refused (for the snapshot), else None.
+        p = self._params()
+        max_div = float(p.get("max_entry_z_divergence", 0) or 0)
+        if max_div > 0:
+            fill_z = (self._signal() or {}).get(z_key)
+            if fill_z is None or abs(float(fill_z) - z) > max_div:
+                shown = "n/a" if fill_z is None else f"{float(fill_z):.2f}"
+                msg = (f"stale signal: decision z={z:.2f} vs fill z={shown} "
+                       f"(Δ>{max_div:.2f}) — entry refused")
+                self._consec_above = self._consec_below = 0
+                self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
+                logger.warning("ArrowAlgo: {}", msg)
+                return msg
+
+        # Fresh-price spread guard: the z-guard above compares signal-to-signal,
+        # so it can't see a STALE far-leg quote (a phantom z). Here we read the
+        # live leg prices at ORDER time (fresher than the sampled signal) and
+        # refuse if the real, executable spread has diverged from the DECISION
+        # spread by more than the threshold (in spread points). 0/absent ⇒ off.
+        max_sdiv = float(p.get("max_entry_spread_divergence", 0) or 0)
+        if max_sdiv > 0 and self._prices is not None:
+            try:
+                la, lb = self._prices()
+            except Exception:
+                la = lb = None
+            k = float(p.get("hedge_ratio", 1.0) or 1.0)
+            live_spread = (k * float(la) - float(lb)) if (la is not None and lb is not None) else None
+            # Compare like with like: the live MID spread against the decision
+            # MID spread (the decision's executable spread sits half a book away).
+            ref = mid_spread if mid_spread is not None else spread
+            if live_spread is None or abs(live_spread - ref) > max_sdiv:
+                shown = "n/a" if live_spread is None else f"{live_spread:.1f}"
+                msg = (f"stale signal: decision spread={ref:.1f} vs live={shown} "
+                       f"(Δ>{max_sdiv:.1f}) — entry refused")
+                self._consec_above = self._consec_below = 0
+                self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
+                logger.warning("ArrowAlgo: {}", msg)
+                return msg
+
         # Pass the algo's DECISION z/spread (and source) so the journal records
         # the exact signal it acted on, not a re-sampled value at order time.
         try:
@@ -277,15 +1031,38 @@ class ArrowAutoTrader:
         except TypeError:                        # execute_fn without the kwargs (tests)
             res = self._execute(direction, lots) or {}
         if res.get("success"):
+            # entry_fill_spread = the ACTUAL executed spread (avg fills), used for
+            # live ₹ P&L; falls back to the decision spread when the execute path
+            # can't report fills (dry-run stubs / tests).
+            fill = res.get("fill_spread")
             self._pos = {
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
+                "entry_std": (self._signal() or {}).get("std"),   # σ frozen at entry
+                "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
+                "entry_leg_a": res.get("leg_a_fill"),
+                "entry_leg_b": res.get("leg_b_fill"),
                 "entry_time": self._clock(),
+                "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes
+                "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }
             self._consec_above = self._consec_below = 0
+            self._exit_failures = 0                 # fresh position → clean exit slate
+            self._exit_halted = False
+            self._exit_retry_at = 0.0
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
+            # Print the RESOLVED exit geometry at entry, not the configs — a
+            # cost floor or %-form can silently move a level at this size.
+            try:
+                stop_lv, tgt_lv = self._effective_exit_levels(p)
+                logger.info("ArrowAlgo: entry geometry (resolved) — stop ₹{:.0f} / "
+                            "target ₹{:.0f} (fill spread {}, σ={}, cost ₹{:.0f})",
+                            stop_lv, tgt_lv, self._pos.get("entry_fill_spread"),
+                            self._pos.get("entry_std"), self._round_trip_cost(p))
+            except Exception:                        # noqa: BLE001 — log-only path
+                pass
         else:
             self.last_error = f"entry failed: {res.get('error')}"
             logger.error("ArrowAlgo: ENTER failed — {}", res.get("error"))
@@ -296,18 +1073,62 @@ class ArrowAutoTrader:
         kw = {"source": "algo", "reason": reason, "z": round(z, 4)}
         if spread is not None:
             kw["spread"] = round(spread, 4)
+        # Lifecycle extremes travel with the close so the journal persists
+        # "Peak/Trough ₹X (Ym) / ₹Z (Wm)" — the data that tunes take/hold.
+        life = {"peak_pnl": self._pos.get("peak_pnl"),
+                "trough_pnl": self._pos.get("trough_pnl"),
+                "peak_min": self._pos.get("peak_min"),
+                "trough_min": self._pos.get("trough_min")}
         try:
-            res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
-        except TypeError:                       # close_fn without the extra kwargs (tests)
-            res = self._close(self._pos["direction"], self._pos["lots"]) or {}
+            res = self._close(self._pos["direction"], self._pos["lots"], **kw, **life) or {}
+        except TypeError:                       # close_fn without the lifecycle kwargs
+            try:
+                res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
+            except TypeError:                   # close_fn without any extras (tests)
+                res = self._close(self._pos["direction"], self._pos["lots"]) or {}
         if res.get("success"):
-            logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, self._pos["direction"], z, res.get("message"))
+            closed_dir = self._pos["direction"]
+            logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))
             self._pos = None
-            cooldown = float(self._params().get("cooldown", 300))
+            self._exit_failures = 0
+            self._exit_halted = False
+            self._exit_retry_at = 0.0
+            p = self._params()
+            cooldown = float(p.get("cooldown", 300))
+            # A STOP earns a longer cooldown and (optionally) arms the z-reset
+            # gate so we don't re-enter the same direction into a runaway move.
+            if reason in ("stop", "dollar_stop"):
+                cooldown = max(cooldown, float(p.get("stop_cooldown", 0) or 0))
+                if bool(p.get("z_reset_after_stop", False)):
+                    self._stop_block_dir = closed_dir
             self._cooldown_until = self._clock() + cooldown
         else:
-            self.last_error = f"exit failed: {res.get('error')}"
-            logger.error("ArrowAlgo: EXIT failed — {} (position still open!)", res.get("error"))
+            # Track consecutive failures; after the ceiling, halt auto-exit retries
+            # so we alert the human instead of cancel-spamming the broker forever.
+            self._exit_failures += 1
+            p = self._params()
+            ceiling = int(p.get("max_exit_failures", 0) or 0)
+            if ceiling > 0 and self._exit_failures >= ceiling:
+                self._exit_halted = True
+            # Exponential backoff before the next attempt: base × 2^(n-1), capped.
+            base = float(p.get("exit_retry_backoff", 0) or 0)
+            delay = 0.0
+            if base > 0 and not self._exit_halted:
+                cap = float(p.get("exit_retry_backoff_max", 60) or 60)
+                delay = min(base * (2 ** (self._exit_failures - 1)), cap)
+                self._exit_retry_at = self._clock() + delay
+            self.last_error = f"exit failed (x{self._exit_failures}): {res.get('error')}"
+            if self._exit_halted:
+                plan = "HALTING auto-exit — manual intervention required"
+            elif delay > 0:
+                plan = f"retry in {delay:.0f}s (backoff; position still open)"
+            else:
+                plan = "will retry next tick (position still open)"
+            logger.error(
+                "ArrowAlgo: EXIT FAILED — reason={} attempt={} ceiling={} orphan={} "
+                "recovered={} err={} → {}",
+                reason, self._exit_failures, ceiling or "∞",
+                res.get("orphan"), res.get("recovered"), res.get("error"), plan)
 
     def _set_snap(self, snap: Dict) -> None:
         with self._lock:

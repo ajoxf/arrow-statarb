@@ -33,13 +33,19 @@ class Backtester:
         *,
         signal_params: Optional[Dict] = None,
         strategy_params: Optional[Dict] = None,
-        lot_size: int = 75,
-        brokerage_per_lot: float = 10.0,
+        lot_size: int = 65,
+        brokerage_per_lot: float = 20.0,
         slippage_per_lot: float = 5.0,
         lots: int = 1,
         capital: Optional[float] = None,
+        hedge_ratio: float = 1.0,
+        stt_pct: float = 0.0,
+        other_cost_pct: float = 0.0,
+        capital_gains_pct: float = 0.0,
+        stt_a_pct: Optional[float] = None,
+        stt_b_pct: Optional[float] = None,
     ):
-        self.signal_params = signal_params or {}
+        self.signal_params = dict(signal_params or {})
         self.strategy_params = dict(strategy_params or {})
         self.strategy_params.setdefault("lots", lots)
         self.lot_size = int(lot_size)
@@ -47,6 +53,16 @@ class Backtester:
         self.slippage_per_lot = float(slippage_per_lot)
         self.lots = int(lots)
         self.capital = capital
+        # Non-1:1 pairs: scale leg_a by k so the settled spread matches the signal.
+        self.hedge_ratio = float(hedge_ratio)
+        self.signal_params.setdefault("hedge_ratio", self.hedge_ratio)
+        # Indian costs applied at settlement (STT/CTT + other charges + CGT), so
+        # the backtest P&L reflects real net, not just brokerage. 0 = off.
+        self.stt_pct = float(stt_pct)
+        self.other_cost_pct = float(other_cost_pct)
+        self.capital_gains_pct = float(capital_gains_pct)
+        self.stt_a_pct = stt_a_pct
+        self.stt_b_pct = stt_b_pct
 
     # ── fills (slippage applied adversely, per leg, in ₹/unit) ────────────────
     def _fill(self, direction: str, a: float, b: float, opening: bool) -> Tuple[float, float]:
@@ -75,19 +91,25 @@ class Backtester:
             if opening:
                 entry_ts["t"] = st["ts"]
             elif entry_ts["t"] is not None:
-                holds.append(st["ts"] - entry_ts["t"])   # historical holding time
+                holds.append(st["ts"] - entry_ts["t"])
                 entry_ts["t"] = None
+            # Settle on the hedge-scaled spread (k×a − b) so the P&L matches the
+            # z the algo traded, and apply the Indian cost stack on close.
             tlog.record(action=action, direction=direction, lots=lots,
-                        spread=round(a_fill - b_fill, 4), dry_run=True, status="BACKTEST",
+                        spread=round(self.hedge_ratio * a_fill - b_fill, 4),
+                        dry_run=True, status="BACKTEST",
                         source="algo", lot_size=self.lot_size, zscore=z,
                         leg_a_price=a_fill, leg_b_price=b_fill, name="backtest",
-                        exit_reason=reason)
+                        exit_reason=reason,
+                        stt_pct=self.stt_pct, other_cost_pct=self.other_cost_pct,
+                        capital_gains_pct=self.capital_gains_pct,
+                        stt_a_pct=self.stt_a_pct, stt_b_pct=self.stt_b_pct)
 
-        def execute_fn(direction, lots, source=None, z=None, spread=None):
+        def execute_fn(direction, lots, source=None, z=None, spread=None, **_):
             _record("OPEN", direction, lots, opening=True, z=z)
             return {"success": True, "dry_run": True, "results": []}
 
-        def close_fn(direction, lots, source=None, reason=None, z=None, spread=None):
+        def close_fn(direction, lots, source=None, reason=None, z=None, spread=None, **_):
             _record("CLOSE", direction, lots, opening=False, z=z, reason=reason or "")
             return {"success": True, "results": []}
 
@@ -101,24 +123,21 @@ class Backtester:
             eng.push(a, b, ts=ts)
             algo._tick()
 
-        # Force-close any still-open position at the final bar so P&L isn't left open.
-        if algo._pos is not None:
+        if algo._pos is not None:        # force-close any open position at the last bar
             pos = algo._pos
-            sig = eng.get_signal()
-            close_fn(pos["direction"], pos["lots"], reason="end", z=sig.get("zscore"))
+            close_fn(pos["direction"], pos["lots"], reason="end",
+                     z=eng.get_signal().get("zscore"))
 
         return self._metrics(tlog, bars, holds)
 
     # ── metrics ───────────────────────────────────────────────────────────────
     def _metrics(self, tlog: TradeLog, bars: List[Bar], holds: List[float]) -> Dict:
-        trips = tlog.round_trips()["trips"]          # newest first
-        trips = list(reversed(trips))                # chronological
+        trips = list(reversed(tlog.round_trips()["trips"]))   # chronological
         pnls = [float(t.get("net_pnl", 0) or 0) for t in trips]
         n = len(trips)
         wins = sum(1 for p in pnls if p > 0)
         total = round(sum(pnls), 2)
 
-        # equity curve + max drawdown
         equity, cum, peak, max_dd = [], 0.0, 0.0, 0.0
         for p in pnls:
             cum += p
@@ -126,19 +145,28 @@ class Backtester:
             peak = max(peak, cum)
             max_dd = max(max_dd, peak - cum)
 
-        # exit-reason mix
         reasons: Dict[str, int] = {}
         for t in trips:
-            reasons[t.get("exit_reason") or "—"] = reasons.get(t.get("exit_reason") or "—", 0) + 1
+            k = t.get("exit_reason") or "—"
+            reasons[k] = reasons.get(k, 0) + 1
 
         span_days = max((bars[-1][0] - bars[0][0]) / 86400.0, 1e-9)
         avg_notional = (sum(0.5 * (b[1] + b[2]) for b in bars) / len(bars)) * self.lot_size * self.lots
 
+        # Dead-market check (reference §12's hardest truth): fraction of trades
+        # whose GROSS move was below the round-trip cost. High ⇒ trading toll-
+        # sized wiggles that just donate the toll — a selection/regime problem,
+        # not a tuning one.
+        below = 0
+        for t in trips:
+            gross = abs(float(t.get("spread_pnl", 0) or 0))
+            cost = float(t.get("spread_pnl", 0) or 0) - float(t.get("net_pnl", 0) or 0)
+            if gross < cost:
+                below += 1
+
         out = {
-            "bars": len(bars),
-            "span_days": round(span_days, 2),
-            "trades": n,
-            "wins": wins,
+            "bars": len(bars), "span_days": round(span_days, 2),
+            "trades": n, "wins": wins,
             "win_rate_pct": round(100.0 * wins / n, 1) if n else 0.0,
             "total_pnl": total,
             "avg_pnl_per_trade": round(total / n, 2) if n else 0.0,
@@ -150,8 +178,11 @@ class Backtester:
             "exit_reasons": reasons,
             "avg_notional": round(avg_notional, 2),
             "equity_curve": equity,
-            # return measures (capital-relative when capital is supplied)
             "return_on_notional_pct": round(100.0 * total / avg_notional, 3) if avg_notional else None,
+            "below_cost_trades": below,
+            "below_cost_pct": round(100.0 * below / n, 1) if n else 0.0,
+            # the book on one sheet, in R (win rate, R:R, PF, break-even WR, EV/R)
+            "expectancy": tlog.expectancy(),
         }
         if self.capital:
             roi = 100.0 * total / self.capital
@@ -171,9 +202,8 @@ def _std(xs: List[float]) -> float:
 def synthetic_ou(n: int = 5000, *, base_a: float = 24000.0, spread_mean: float = -85.0,
                  theta: float = 0.02, sigma: float = 1.5, dt_sec: float = 0.5,
                  start_ts: float = 0.0, seed: Optional[int] = None) -> List[Bar]:
-    """Generate mean-reverting (Ornstein-Uhlenbeck) spread bars for sanity-testing
-    the harness. NOT real data — for plumbing checks and demos only. Leg A is a
-    gentle random walk; leg B = A − spread, where the spread mean-reverts."""
+    """Mean-reverting (Ornstein-Uhlenbeck) spread bars for sanity-testing the
+    harness. NOT real data — for plumbing checks and demos only."""
     rng = random.Random(seed)
     bars: List[Bar] = []
     a = base_a

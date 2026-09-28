@@ -36,6 +36,7 @@ class MockBroker:
         self.fill_after = {}           # symbol -> polls before COMPLETE (default 0)
         self.never_fill = set()        # stays OPEN forever…
         self.fill_on_market = set()    # …unless re-placed as a market order
+        self.partial_fill = {}         # symbol -> units filled on a resting limit
         # recorders
         self.submits = []
         self.amends = []
@@ -67,6 +68,8 @@ class MockBroker:
         elif sym in self.never_fill:
             if o["order_type"] == "market" and sym in self.fill_on_market:
                 o.update(status="COMPLETE", filled=o["units"], avg=o["price"] or 100.0)
+            elif sym in self.partial_fill and o["order_type"] != "market":
+                o.update(status="PARTIAL", filled=self.partial_fill[sym], avg=o["price"] or 100.0)
             else:
                 o["status"] = "OPEN"
         elif self.poll_counts[order_id] > self.fill_after.get(sym, 0):
@@ -115,6 +118,35 @@ def _executor(broker, params=None, price=100.0):
     )
 
 
+# ── tick rounding: limit prices must land on the exchange tick grid ──────────
+def test_limit_prices_snapped_to_tick():
+    """A buy rounds UP and a sell rounds DOWN to the broker's tick, so Arrow
+    never rejects an off-tick price (the live 'multiple of 0.10' rejection)."""
+    class TickBroker(MockBroker):
+        def resolve_tick_size(self, seg, sym):
+            return 0.10
+
+    b = TickBroker()
+    # LTP 23950 → buy limit 23950×1.0005=23961.975 → up to 23962.00 (×0.10 ok);
+    # sell 23950×0.9995=23938.025 → down to 23938.00.
+    _executor(b, price=23950.0).execute(_legs())
+    for s in b.submits:
+        cents = round(s["price"] * 100)
+        assert cents % 10 == 0, f"{s['side']} price {s['price']} not a 0.10 multiple"
+    buy = next(s for s in b.submits if s["side"] == "buy")
+    sell = next(s for s in b.submits if s["side"] == "sell")
+    assert buy["price"] >= 23950.0 and sell["price"] <= 23950.0
+
+
+def test_tick_falls_back_to_config_when_broker_has_no_tick():
+    """No resolve_tick_size on the broker → use params price_tick_size."""
+    b = MockBroker()                         # no resolve_tick_size
+    p = dict(PARAMS, price_tick_size=0.10)
+    _executor(b, p, price=23950.0).execute(_legs())
+    for s in b.submits:
+        assert round(s["price"] * 100) % 10 == 0
+
+
 # ── happy path: both legs as limits, both fill ───────────────────────────────
 def test_both_legs_fill_as_limit():
     b = MockBroker()
@@ -134,6 +166,39 @@ def test_market_mode_when_limits_disabled():
     res = _executor(b, p).execute(_legs())
     assert res["success"] is True
     assert {s["order_type"] for s in b.submits} == {"market"}
+
+
+# ── max_slippage_pct: entry-only slippage budget ─────────────────────────────
+def test_slippage_over_budget_unwinds_entry():
+    # 1% limit offset → both legs fill ~1% off the LTP baseline → 1% > 0.5%
+    # budget on an ENTRY (verify_flat=True) → unwind both legs, report abort.
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=1.0, max_slippage_pct=0.5)
+    res = _executor(b, p).execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert res["slippage_abort"] is True
+    assert res["recovered"] is True
+    # both legs flattened → an opposing MARKET order was sent for each
+    flat = [s for s in b.submits if s["order_type"] == "market"]
+    assert {s["side"] for s in flat} == {"buy", "sell"}
+
+
+def test_slippage_within_budget_allows_entry():
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=0.05, max_slippage_pct=0.5)   # ~0.05% ≪ 0.5%
+    res = _executor(b, p).execute(_legs(), verify_flat=True)
+    assert res["success"] is True
+    assert res.get("slippage_abort") is False
+
+
+def test_slippage_budget_never_unwinds_an_exit():
+    # Same 1% slippage, but verify_flat=False (an EXIT) → must NOT unwind; an
+    # exit always completes even if it slipped past the budget.
+    b = MockBroker()
+    p = dict(PARAMS, limit_offset_pct=1.0, max_slippage_pct=0.5)
+    res = _executor(b, p).execute(_legs(), verify_flat=False)
+    assert res["success"] is True
+    assert res.get("slippage_abort") is False
 
 
 # ── amendment: a slow limit gets re-priced toward the market ─────────────────
@@ -198,12 +263,38 @@ def test_verify_flat_allows_when_flat():
     assert res["success"] is True
 
 
-# ── degraded mode: broker with no order-status API ───────────────────────────
-def test_unknown_status_treated_as_filled_unconfirmed():
+# ── transient UNKNOWN status must NOT be assumed a fill (fail-safe default) ────
+def test_unknown_status_fails_safe_not_phantom_fill():
     b = MockBroker(status_unknown=True)
     res = _executor(b).execute(_legs())
+    # default: a persistent/transient UNKNOWN never fabricates a fill → no
+    # phantom "filled" success; the trade fails safe instead.
+    assert res["success"] is False
+    assert all(not r["status"] == "COMPLETE" for r in res["results"])
+
+
+# ── opt-in legacy mode: a broker with NO status API may assume the fill ───────
+def test_assume_fill_on_unknown_opt_in():
+    b = MockBroker(status_unknown=True)
+    p = dict(PARAMS, assume_fill_on_unknown=True, unknown_status_grace_polls=1)
+    res = _executor(b, p).execute(_legs())
     assert res["success"] is True
     assert all(r["unconfirmed"] for r in res["results"])
+
+
+# ── partial fill on a limit must NOT be doubled on market escalation ──────────
+def test_partial_fill_escalation_orders_only_residual():
+    b = MockBroker()
+    # AAA partially fills (30 of 75) on the limit, then needs escalation.
+    b.never_fill = {"AAA"}
+    b.fill_on_market = {"AAA"}
+    b.partial_fill = {"AAA": 30}              # limit fills 30, rests
+    b.fill_after = {"BBB": 0}
+    res = _executor(b).execute(_legs())
+    assert res["success"] is True
+    # the escalation market order for AAA must be for the RESIDUAL 45, not 75
+    aaa_market = [s for s in b.submits if s["symbol"] == "AAA" and s["order_type"] == "market"]
+    assert aaa_market and aaa_market[-1]["quantity"] == 45
 
 
 def test_no_broker_fails_cleanly():
@@ -212,3 +303,74 @@ def test_no_broker_fails_cleanly():
     res = ex.execute(_legs())
     assert res["success"] is False
     assert "broker" in res["error"].lower()
+
+
+# ── verify_flat fail-safe when positions can't be read (Arrow timeout) ────────
+def test_verify_flat_fail_closed_blocks_when_positions_unavailable():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS, verify_flat_fail_open=False),
+                        positions_fn=lambda: None,      # read failing
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert "positions unavailable" in res["error"]
+    assert b.submits == []                              # nothing was placed
+
+
+def test_verify_flat_fail_open_allows_when_configured():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS, verify_flat_fail_open=True),
+                        positions_fn=lambda: None,
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is True
+
+
+def test_verify_flat_uses_cached_positions():
+    b = MockBroker()
+    fc = FakeClock()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda s, y: 100.0,
+                        params_fn=lambda: dict(PARAMS),
+                        positions_fn=lambda: [{"symbol": "AAA", "net_quantity": 75}],
+                        clock=fc.now, sleep=fc.sleep)
+    res = ex.execute(_legs(), verify_flat=True)
+    assert res["success"] is False
+    assert "existing position" in res["error"]          # AAA already held → blocked
+
+
+def test_legs_carry_the_fired_and_filled_timeline_and_keep_the_first_touch():
+    """A re-placement (escalation to market) must not move the slippage
+    baseline, and each leg records sent / acked / filled times."""
+    from arrow_statarb.core.executor import LegOrder, SpreadExecutor
+    prices = iter([100.0, 105.0, 105.0, 105.0])
+
+    class B:
+        def __init__(self):
+            self.n = 0
+        def submit_order(self, **kw):
+            self.n += 1
+            return {"order_id": f"O{self.n}", "status": "submitted"}
+        def get_order_status(self, oid):
+            return {"status": "COMPLETE", "filled_qty": 1, "avg_price": 106.0}
+        def cancel_order(self, oid):
+            return True
+        def amend_order(self, *a, **k):
+            return True
+
+    b = B()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda seg, sym, side=None: next(prices),
+                        params_fn=lambda: {"use_limit_orders": True, "fill_timeout_sec": 1,
+                                           "poll_interval_sec": 0.0})
+    leg = LegOrder("mcx_fo", "X", "buy", 1)
+    ex._place(b, leg, ex._params() if hasattr(ex, "_params") else {"use_limit_orders": True})
+    first_ref = leg.ref_price
+    ex._place(b, leg, {"use_limit_orders": False}, force_market=True)
+    assert leg.ref_price == first_ref == 100.0          # baseline kept
+    ex._refresh(b, leg, {})
+    v = leg.view()
+    assert v["sent_at"] and v["acked_at"] and v["filled_at"]
+    assert v["sent_at"] <= v["acked_at"] <= v["filled_at"]
