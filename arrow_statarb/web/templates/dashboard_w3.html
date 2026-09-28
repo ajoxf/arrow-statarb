@@ -50,7 +50,7 @@
                     <i class="bi bi-graph-up-arrow me-2"></i>
                     <div>
                         <small class="text-secondary">Unrealized P&L</small>
-                        <div class="fw-bold pnl-value" id="daily-pnl">₹0.00</div>
+                        <div class="fw-bold" id="daily-pnl">₹0.00</div>
                         <small class="text-muted" id="account-last-updated" style="font-size:0.65rem;">—</small>
                     </div>
                 </div>
@@ -2681,7 +2681,7 @@ function updateFilterStatus(elementId, passed, value) {
             pnlEl.className = pnl >= 0 ? 'price-up' : 'price-down';
             const topPnl = document.getElementById('daily-pnl');
             if (topPnl) {
-                topPnl.textContent = (pnl >= 0 ? '+₹' : '-₹') + Math.abs(pnl).toFixed(2);
+                topPnl.textContent = (pnl >= 0 ? '+' : '-') + fmtMoney(Math.abs(pnl));
                 topPnl.classList.remove('balance-positive', 'balance-negative');
                 topPnl.classList.add(pnl >= 0 ? 'balance-positive' : 'balance-negative');
             }
