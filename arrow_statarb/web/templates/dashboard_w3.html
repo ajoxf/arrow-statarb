@@ -1000,6 +1000,64 @@
     </div>
 </div>
 
+<!-- Fills & Slippage (full width): every executed order, fired → filled. -->
+<div class="row mt-3">
+    <div class="col-12">
+        <div class="card" id="fills-card">
+            <div class="card-header py-1 d-flex justify-content-between align-items-center">
+                <small><i class="bi bi-stopwatch me-2"></i>Fills &amp; Slippage</small>
+                <button class="btn btn-sm btn-outline-secondary py-0" onclick="refreshFills()" style="font-size: 0.65rem;">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body py-2" style="font-size: 0.75rem;">
+                <div class="d-flex flex-wrap gap-4 mb-2" id="fills-summary">
+                    <div title="Average of (fill − touch at firing) × units × ₹ per point, per order per lot. Positive = worse than the touch. This is the number to enter as Slippage per Lot.">
+                        <div class="text-secondary" style="font-size:0.65rem;">AVG SLIPPAGE / ORDER / LOT</div>
+                        <div class="fw-bold font-monospace" style="font-size:1rem;" id="fills-avg-inr">—</div>
+                    </div>
+                    <div title="What the edge filter currently assumes (Settings → Slippage per Lot).">
+                        <div class="text-secondary" style="font-size:0.65rem;">SETTING (SLIPPAGE PER LOT)</div>
+                        <div class="fw-bold font-monospace" style="font-size:1rem;" id="fills-setting">—</div>
+                    </div>
+                    <div title="First order sent → its fill seen, averaged over orders.">
+                        <div class="text-secondary" style="font-size:0.65rem;">AVG TIME TO FILL</div>
+                        <div class="fw-bold font-monospace" style="font-size:1rem;" id="fills-avg-ms">—</div>
+                    </div>
+                    <div title="First leg filled → second leg filled: the time the spread is one-sided. Most calendar-spread slippage happens here.">
+                        <div class="text-secondary" style="font-size:0.65rem;">AVG / MAX LEG GAP</div>
+                        <div class="fw-bold font-monospace" style="font-size:1rem;" id="fills-gap">—</div>
+                    </div>
+                    <div>
+                        <div class="text-secondary" style="font-size:0.65rem;">ORDERS MEASURED</div>
+                        <div class="fw-bold font-monospace" style="font-size:1rem;" id="fills-count">—</div>
+                    </div>
+                </div>
+                <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
+                    <table class="table table-sm table-striped mb-0" style="font-size: 0.72rem;">
+                        <thead class="sticky-top" style="background: var(--bg-secondary);">
+                            <tr>
+                                <th>Date</th><th>Trade</th><th>Symbol</th><th>Side</th><th>Lots</th>
+                                <th title="When the order left for Arrow">Fired</th>
+                                <th title="When the fill was first seen">Filled</th>
+                                <th class="text-end" title="Fired → filled">Took</th>
+                                <th class="text-end" title="Touch at firing: the ask to buy, the bid to sell">Touch</th>
+                                <th class="text-end">Fill</th>
+                                <th class="text-end" title="Fill − touch, positive = worse">Slip (pts)</th>
+                                <th class="text-end" title="Slip × units × ₹ per point">Slip (₹)</th>
+                                <th title="Order type · amendments · escalated to market">How</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fills-table">
+                            <tr><td colspan="13" class="text-center text-secondary py-3">No executed orders yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Exchange Order Log (full width) -->
 <div class="row mt-3">
     <div class="col-12">
@@ -1679,12 +1737,15 @@
         const entryEl = document.getElementById('entry-latency-ms');
         const exitEl  = document.getElementById('exit-latency-ms');
         if (entryEl) {
-            const v = trade && trade.entry_latency_ms != null ? trade.entry_latency_ms : null;
+            // Latest entry: first order sent → last leg filled (execution log)
+            const v = data.last_entry_ms != null ? data.last_entry_ms
+                    : (trade && trade.entry_latency_ms != null ? trade.entry_latency_ms : null);
             entryEl.textContent = v != null ? `${Math.round(v)}ms` : '—';
             entryEl.className = v != null && v > 500 ? 'fw-bold text-warning' : 'fw-bold text-light';
         }
         if (exitEl) {
-            const v = trade && trade.exit_latency_ms != null ? trade.exit_latency_ms : null;
+            const v = data.last_exit_ms != null ? data.last_exit_ms
+                    : (trade && trade.exit_latency_ms != null ? trade.exit_latency_ms : null);
             exitEl.textContent = v != null ? `${Math.round(v)}ms` : '—';
             exitEl.className = v != null && v > 500 ? 'fw-bold text-warning' : 'fw-bold text-light';
         }
@@ -3660,6 +3721,72 @@ function updateFilterStatus(elementId, passed, value) {
         })
         .catch(err => showToast('Error: ' + err, 'danger'));
     }
+
+    // ========== Fills & Slippage ==========
+    // One row per executed leg order from the execution log: the touch when it
+    // was fired, the fill, and the time between — plus the averages that
+    // calibrate Settings → Slippage per Lot.
+    function refreshFills() {
+        fetch('/api/execution')
+            .then(r => r.json())
+            .then(d => {
+                const st = d.stats || {};
+                const inr = v => (v == null || !isFinite(v)) ? '—'
+                    : (v > 0 ? '+' : v < 0 ? '−' : '') + '₹' + Math.abs(v).toLocaleString('en-IN', {maximumFractionDigits: 0});
+                const ms = v => v == null ? '—' : (v >= 1000 ? (v / 1000).toFixed(2) + 's' : v + 'ms');
+                const avgEl = document.getElementById('fills-avg-inr');
+                if (avgEl) {
+                    const a = st.avg_slippage_inr_per_lot_order;
+                    avgEl.textContent = inr(a);
+                    avgEl.className = 'fw-bold font-monospace ' + (a == null ? '' : a > 0 ? 'text-danger' : 'text-success');
+                }
+                updateElement('fills-setting', d.configured_slippage_per_lot != null
+                    ? '₹' + Number(d.configured_slippage_per_lot).toLocaleString('en-IN') : '—');
+                updateElement('fills-avg-ms', ms(st.avg_fill_ms));
+                updateElement('fills-gap', (st.avg_leg_gap_ms == null && st.max_leg_gap_ms == null)
+                    ? '—' : ms(st.avg_leg_gap_ms) + ' / ' + ms(st.max_leg_gap_ms));
+                updateElement('fills-count', st.orders != null ? String(st.orders) : '—');
+
+                const tbody = document.getElementById('fills-table');
+                if (!tbody) return;
+                const rows = [];
+                (d.events || []).forEach(e => (e.legs || []).forEach(l => rows.push([e, l])));
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary py-3">No executed orders yet</td></tr>';
+                    return;
+                }
+                const clock = t => t ? new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}) : '—';
+                const px = v => (v && v > 0) ? Number(v).toLocaleString('en-IN', {maximumFractionDigits: 2}) : '—';
+                tbody.innerHTML = rows.slice(0, 200).map(([e, l]) => {
+                    const side = String(l.side || '').toUpperCase();
+                    const sp = l.slippage;
+                    const cls = sp == null ? '' : sp > 0 ? 'text-danger' : sp < 0 ? 'text-success' : '';
+                    const how = [String(l.order_type || '').toUpperCase() || '—',
+                                 l.amend_count ? l.amend_count + ' amend' : '',
+                                 l.escalated ? '→ MKT' : '',
+                                 l.unconfirmed ? 'unconfirmed' : '',
+                                 l.error ? '⚠ ' + l.error : ''].filter(Boolean).join(' · ');
+                    return '<tr>'
+                        + '<td>' + escapeHtml(e.date || '') + '</td>'
+                        + '<td>' + escapeHtml(e.label === 'Close' ? 'Exit' : e.label === 'Order' ? 'Entry' : (e.label || '')) + ' <span class="text-secondary">' + escapeHtml(e.mode || '') + '</span></td>'
+                        + '<td>' + escapeHtml(l.symbol || '—') + '</td>'
+                        + '<td class="' + (side === 'BUY' ? 'text-success' : 'text-danger') + ' fw-bold">' + escapeHtml(side) + '</td>'
+                        + '<td>' + (l.lots != null ? l.lots : '—') + '</td>'
+                        + '<td class="font-monospace">' + clock(l.sent_at) + '</td>'
+                        + '<td class="font-monospace">' + clock(l.filled_at) + '</td>'
+                        + '<td class="text-end font-monospace">' + ms(l.fill_ms) + '</td>'
+                        + '<td class="text-end font-monospace">' + px(l.ref_price) + '</td>'
+                        + '<td class="text-end font-monospace">' + px(l.fill_price) + '</td>'
+                        + '<td class="text-end font-monospace ' + cls + '">' + (sp == null ? '—' : (sp > 0 ? '+' : '') + Number(sp).toFixed(2)) + '</td>'
+                        + '<td class="text-end font-monospace ' + cls + '">' + inr(l.slippage_inr) + '</td>'
+                        + '<td class="text-secondary">' + escapeHtml(how) + '</td>'
+                        + '</tr>';
+                }).join('');
+            })
+            .catch(() => {});
+    }
+    refreshFills();
+    setInterval(refreshFills, 10000);
 
     // ========== Exchange Order Log ==========
     // Arrow's own order book for the day (the source of truth), as

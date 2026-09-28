@@ -340,3 +340,37 @@ def test_verify_flat_uses_cached_positions():
     res = ex.execute(_legs(), verify_flat=True)
     assert res["success"] is False
     assert "existing position" in res["error"]          # AAA already held → blocked
+
+
+def test_legs_carry_the_fired_and_filled_timeline_and_keep_the_first_touch():
+    """A re-placement (escalation to market) must not move the slippage
+    baseline, and each leg records sent / acked / filled times."""
+    from arrow_statarb.core.executor import LegOrder, SpreadExecutor
+    prices = iter([100.0, 105.0, 105.0, 105.0])
+
+    class B:
+        def __init__(self):
+            self.n = 0
+        def submit_order(self, **kw):
+            self.n += 1
+            return {"order_id": f"O{self.n}", "status": "submitted"}
+        def get_order_status(self, oid):
+            return {"status": "COMPLETE", "filled_qty": 1, "avg_price": 106.0}
+        def cancel_order(self, oid):
+            return True
+        def amend_order(self, *a, **k):
+            return True
+
+    b = B()
+    ex = SpreadExecutor(broker_fn=lambda: b, price_fn=lambda seg, sym, side=None: next(prices),
+                        params_fn=lambda: {"use_limit_orders": True, "fill_timeout_sec": 1,
+                                           "poll_interval_sec": 0.0})
+    leg = LegOrder("mcx_fo", "X", "buy", 1)
+    ex._place(b, leg, ex._params() if hasattr(ex, "_params") else {"use_limit_orders": True})
+    first_ref = leg.ref_price
+    ex._place(b, leg, {"use_limit_orders": False}, force_market=True)
+    assert leg.ref_price == first_ref == 100.0          # baseline kept
+    ex._refresh(b, leg, {})
+    v = leg.view()
+    assert v["sent_at"] and v["acked_at"] and v["filled_at"]
+    assert v["sent_at"] <= v["acked_at"] <= v["filled_at"]

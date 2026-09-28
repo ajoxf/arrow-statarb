@@ -45,7 +45,8 @@ class LegOrder:
     __slots__ = ("segment", "symbol", "side", "units", "token",
                  "order_id", "status", "order_type", "filled", "avg_price",
                  "limit_price", "ref_price", "error", "unconfirmed", "amend_count",
-                 "recovery", "escalated", "prefill", "unknown_polls")
+                 "recovery", "escalated", "prefill", "unknown_polls",
+                 "sent_at", "acked_at", "filled_at")
 
     def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = ""):
         self.segment = segment
@@ -67,6 +68,13 @@ class LegOrder:
         self.escalated = False            # limit timed out → re-sent as MARKET
         self.prefill = 0                  # units already filled BEFORE the current order
         self.unknown_polls = 0            # consecutive UNKNOWN status reads (transient guard)
+        # Wall-clock (epoch s) execution timeline, for the Fills table:
+        #   sent_at  — the FIRST order for this leg left for the broker
+        #   acked_at — the broker returned an order id for it
+        #   filled_at — the leg was first seen fully filled
+        self.sent_at: Optional[float] = None
+        self.acked_at: Optional[float] = None
+        self.filled_at: Optional[float] = None
 
     @property
     def working(self) -> bool:
@@ -82,7 +90,9 @@ class LegOrder:
                 "limit_price": self.limit_price, "ref_price": self.ref_price,
                 "order_type": self.order_type, "amend_count": self.amend_count,
                 "escalated": self.escalated, "unconfirmed": self.unconfirmed,
-                "error": self.error}
+                "error": self.error, "units": self.units,
+                "sent_at": self.sent_at, "acked_at": self.acked_at,
+                "filled_at": self.filled_at}
 
 
 class SpreadExecutor:
@@ -226,11 +236,16 @@ class SpreadExecutor:
         residual = max(0, leg.units - leg.filled)
         if residual <= 0:
             leg.status = "COMPLETE"
+            if leg.filled_at is None:
+                leg.filled_at = time.time()
             return
         leg.prefill = leg.filled          # baseline so _refresh keeps fills cumulative
-        # Reference price (slippage baseline) is captured on every placement.
+        # Reference price (slippage baseline): the touch for this leg's side at
+        # the FIRST placement. A re-placement (residual, escalation to market)
+        # must not move the baseline, or the cost of chasing the fill would
+        # disappear from the slippage figure.
         ltp = self._px(leg)
-        if ltp is not None:
+        if ltp is not None and leg.ref_price is None:
             leg.ref_price = ltp
         price = None
         if order_type == "limit":
@@ -243,6 +258,8 @@ class SpreadExecutor:
         if force_market:
             leg.escalated = True
 
+        if leg.sent_at is None:
+            leg.sent_at = time.time()
         res = broker.submit_order(
             symbol=leg.symbol, side=leg.side, quantity=residual,
             order_type=order_type, price=price, exchange_segment=leg.segment,
@@ -257,6 +274,8 @@ class SpreadExecutor:
                          leg.side, leg.units, leg.symbol, leg.error)
         else:
             leg.order_id = str(res.get("order_id"))
+            if leg.acked_at is None:
+                leg.acked_at = time.time()
             leg.status = "PENDING"
             leg.order_type = order_type
             leg.limit_price = price
@@ -288,6 +307,8 @@ class SpreadExecutor:
                 leg.status = "COMPLETE"
                 leg.unconfirmed = True
                 leg.filled = leg.units
+                if leg.filled_at is None:
+                    leg.filled_at = time.time()
             else:
                 # Fail-safe: do NOT fabricate a fill. Leave the leg working so the
                 # escalation/orphan logic handles it, and flag it loudly.
@@ -304,6 +325,8 @@ class SpreadExecutor:
         leg.filled = leg.prefill + int(st.get("filled_qty") or 0)
         if st.get("avg_price"):
             leg.avg_price = float(st["avg_price"])
+        if leg.status == "COMPLETE" and leg.filled_at is None:
+            leg.filled_at = time.time()
 
     def _await_fills(self, broker, legs: List[LegOrder], p: Dict) -> None:
         timeout = float(p.get("fill_timeout_sec", 5.0))

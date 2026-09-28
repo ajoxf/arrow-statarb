@@ -67,6 +67,7 @@ TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
 # Module-level so tests can redirect it away from a real session file.
 SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
 SIGNAL_WINDOW_FILE = PROJECT_ROOT / "data" / "signal_window.json"
+EXECUTION_LOG_FILE = PROJECT_ROOT / "data" / "execution_log.jsonl"
 UNTRACKED_FILE = PROJECT_ROOT / "data" / "untracked_closes.json"
 SHADOW_FILE = PROJECT_ROOT / "data" / "whatif_shadow.json"
 HEARTBEAT_FILE = PROJECT_ROOT / "data" / "heartbeat.txt"
@@ -133,7 +134,21 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "notify_errors": bool(t.get("notify_errors", True))}
     telegram = TelegramNotifier(params_provider=_telegram_params)  # token from env only
 
-    execution_log = ExecutionLog()
+    def _leg_scale(r: Dict) -> Optional[Dict]:
+        """₹ per 1-point move per filled UNIT of an executed leg, and its broker
+        lot size — so the execution log can price slippage in rupees. For MCX
+        the broker lot is 1 unit and a point is worth the multiplier (₹100 on
+        CRUDEOIL); for NSE the lot size already is the multiplier."""
+        legs = _read_legs()
+        sym = str(r.get("symbol") or "").upper()
+        for lk in ("leg_a", "leg_b"):
+            e = legs.get(lk) or {}
+            if str(e.get("symbol") or "").upper() == sym:
+                lot = _resolve_lot_size(e["segment"], e["symbol"]) or 1.0
+                return {"inr_per_point": _price_multiplier(lk) / lot, "lot_size": lot}
+        return None
+
+    execution_log = ExecutionLog(path=EXECUTION_LOG_FILE, leg_scale=lambda r: _leg_scale(r))
 
     # ── broker-read cache (positions + funds) ─────────────────────────────────
     # Arrow's positions/limits API can be slow (10s read-timeouts) and flaky
@@ -1147,16 +1162,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         alarm (either side ≥ 2× the other) — the model must track real fills or
         the edge filter blocks good trades / lets through bad ones."""
         realized = trade_log.cost_audit()
-        lots = int(_algo_lots["lots"]); lot_m = _lot_multiplier()
-        brk = float(cfg.get("filters.brokerage_per_lot", 20) or 0) * lots * 4
-        slp = float(cfg.get("filters.slippage_per_lot", 5) or 0) * lots * 4
-        stt_pct = float(cfg.get("filters.stt_pct", 0) or 0) / 100.0
-        other_pct = float(cfg.get("filters.other_cost_pct", 0) or 0) / 100.0
-        la, _ = _leg_prices()
-        notional = float(la) * lots * lot_m if la else 0.0
-        stt = 2 * stt_pct * notional
-        other = 4 * other_pct * notional
-        modeled = round(brk + slp + stt + other, 2)
+        # The SAME cost function the edge filter and break-even use (per-segment
+        # model when enabled, else brokerage + STT + other), at the live leg
+        # prices — so "modelled" means what the algo actually assumed.
+        p = _algo_params()
+        la, lb = _leg_prices()
+        modeled = round(arrow_algo._round_trip_cost(
+            p, lots=int(p.get("lots", 1) or 1), ref_price=la, ref_b=lb), 2)
         rc = realized.get("avg_realized_cost", 0.0)
         alarm = bool(rc > 0 and (modeled >= 2 * rc or rc >= 2 * modeled))
         return jsonify({"modeled_cost": modeled, "realized": realized, "alarm": alarm})
@@ -1402,7 +1414,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      if px_a else None)
         futures_tick = ({"bid": sig.get("bid_b"), "ask": sig.get("ask_b"), "last": px_b}
                         if px_b else None)
+        # Latest entry / exit execution time (first order sent → last leg filled)
+        _ev = execution_log.all()
+        _last = lambda lbl: next((e for e in _ev if e.get("label") == lbl
+                                  and e.get("total_ms") is not None), None)
+        _le, _lx = _last("Order"), _last("Close")
         return jsonify({
+            "last_entry_ms": _le.get("total_ms") if _le else None,
+            "last_exit_ms": _lx.get("total_ms") if _lx else None,
             "position": pos_label,
             "open_trade": open_trade,
             "spot_tick": spot_tick, "futures_tick": futures_tick,
@@ -2448,7 +2467,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_execution():
         """Execution telemetry — recent live/live-sim executions with per-leg
         fill vs reference, slippage, amendments, escalation and orphan recovery."""
-        return jsonify({"events": execution_log.all(), "stats": execution_log.stats()})
+        return jsonify({"events": execution_log.all(), "stats": execution_log.stats(),
+                        # what the edge filter ASSUMES, beside what fills measure
+                        "configured_slippage_per_lot": float(
+                            cfg.get("filters.slippage_per_lot", 5) or 0)})
 
     @app.route("/api/execution/clear", methods=["POST"])
     def api_execution_clear():

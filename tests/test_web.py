@@ -70,6 +70,7 @@ def _app(tmp_path, mode="dry_run"):
     appmod.SHADOW_FILE = tmp_path / "shadow.json"
     appmod.HEARTBEAT_FILE = tmp_path / "heartbeat.txt"
     appmod.SIGNAL_WINDOW_FILE = tmp_path / "signal_window.json"
+    appmod.EXECUTION_LOG_FILE = tmp_path / "execution_log.jsonl"
 
     cfg = Config(settings)
     app, _sio = appmod.create_app(cfg)
@@ -565,6 +566,7 @@ def test_beta_drift_endpoint_wiring(tmp_path):
     )
     appmod.LEG_ASSIGNMENTS_FILE = legs
     appmod.SIGNAL_WINDOW_FILE = tmp_path / "signal_window.json"
+    appmod.EXECUTION_LOG_FILE = tmp_path / "execution_log.jsonl"
     app, _sio = appmod.create_app(Config(settings))
     client = app.test_client()
 
@@ -630,6 +632,7 @@ def test_volume_endpoint_day_week_month(tmp_path):
     appmod.LEG_ASSIGNMENTS_FILE = legs
     appmod.TRADES_FILE = trades_file
     appmod.SIGNAL_WINDOW_FILE = tmp_path / "sw.json"
+    appmod.EXECUTION_LOG_FILE = tmp_path / "execution_log.jsonl"
     app, _sio = appmod.create_app(Config(settings))
     client = app.test_client()
 
