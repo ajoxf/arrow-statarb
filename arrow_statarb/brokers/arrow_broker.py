@@ -447,6 +447,23 @@ class ArrowBroker(BaseBroker):
             return "option" if is_opt else "cash"
         return "other"
 
+    #: Underlying, DDMONYY expiry, then the tail: ``F`` for a future, or the
+    #: option letter and strike (``CRUDEOILM17SEP26C8950``). The expiry is
+    #: matched explicitly so the P of SEP / C of DEC are not read as options.
+    _SYMBOL_SHAPE = re.compile(
+        r"^[A-Z&\-]+?\d{1,2}?(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
+        r"\d{2,4}(?P<tail>.*)$")
+
+    @classmethod
+    def _is_option_row(cls, strike, tsym: str) -> bool:
+        try:
+            if strike not in (None, "") and float(strike) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        m = cls._SYMBOL_SHAPE.match(str(tsym or "").upper())
+        return bool(m and re.match(r"^(CE|PE|C|P)\d", m.group("tail")))
+
     def _build_instrument_index(self) -> None:
         """Index the master once into (exch_seg, kind) → underlyings and
         (exch_seg, kind, underlying) → contracts, so the picker is O(1).
@@ -483,14 +500,18 @@ class ArrowBroker(BaseBroker):
             und = str(g.get("symbol") or g.get("underlying") or "").strip().upper() \
                   or self._derive_underlying(tsym)
 
+            strike = g.get("strikeprice") or g.get("strike")
             if exch_seg.endswith("CM"):
                 kind = "cash"
-            elif ot in ("CE", "PE"):
+            elif ot in ("CE", "PE", "C", "P", "CALL", "PUT") \
+                    or self._is_option_row(strike, tsym):
+                # MCX lists options with OptionType left EMPTY; the strike
+                # and the symbol's own shape still say it is an option, so a
+                # futures picker is not flooded with calls and puts.
                 kind = "option"
             else:
                 kind = "future"
 
-            strike = g.get("strikeprice") or g.get("strike")
             underlyings.setdefault((exch_seg, kind), set()).add(und)
             contracts.setdefault((exch_seg, kind, und), []).append({
                 "trading_symbol": tsym,
@@ -532,11 +553,49 @@ class ArrowBroker(BaseBroker):
         """Contracts for a given underlying, sorted by expiry then strike."""
         return self._idx_contracts.get((exchange.upper(), kind, underlying.upper()), [])
 
+    def _mcx_supplement(self, have: List[Dict]) -> List[Dict]:
+        """MCX rows from Arrow's own ``/mcx`` route that ``/all`` lacks.
+
+        pyarrow-client's enum says MCX instruments are downloaded from
+        ``GET /mcx`` but wraps no method for it; ``get_instruments()`` is
+        ``/all`` only. A live ``/all`` was seen carrying CRUDEOIL futures from
+        Jun-2027 onwards and none of the nearer months, so the picker offered
+        next year's contract as the front month. Nothing in ``/all`` can tell a
+        complete segment from a partial one, so ``/mcx`` is asked EVERY time
+        and only symbols ``/all`` does not already carry are added. A route
+        that is not there is not an error.
+        """
+        client = self._client
+        get = getattr(client, "_get", None)
+        routes = getattr(client, "_routes", None)
+        if not callable(get) or routes is None:
+            return []
+        root = getattr(routes, "_root_url", "") or ""
+        try:
+            found = self._parse_instruments(get(root + "/mcx"))
+        except Exception as exc:
+            logger.info("ArrowBroker: /mcx carries no extra instruments ({})", exc)
+            return []
+
+        def _tsym(row):
+            if not isinstance(row, dict):
+                return ""
+            g = {str(k).lower(): v for k, v in row.items()}
+            return str(g.get("tradingsymbol") or g.get("trading_symbol") or "").strip().upper()
+
+        held = {_tsym(row) for row in have}
+        extra = [row for row in found if _tsym(row) and _tsym(row) not in held]
+        logger.info("ArrowBroker: /mcx answered {} instruments, {} not on /all",
+                    len(found), len(extra))
+        return extra
+
     def _fetch_instruments(self) -> None:
         """Background thread: download Arrow's instrument list and index lot sizes."""
         try:
             raw = self._client.get_instruments()
             instruments = self._parse_instruments(raw)
+            if instruments:
+                instruments = instruments + self._mcx_supplement(instruments)
 
             if not instruments:
                 # Couldn't parse — log a fingerprint so we can see what arrived

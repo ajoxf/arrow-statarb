@@ -168,3 +168,73 @@ def test_derive_underlying():
     assert ArrowBroker._derive_underlying("NIFTY30JUN26F") == "NIFTY"
     assert ArrowBroker._derive_underlying("RELIANCE-EQ") == "RELIANCE"
     assert ArrowBroker._derive_underlying("HDFCBANK30JUN26C875") == "HDFCBANK"
+
+
+# ── /mcx supplement: near-month MCX futures /all can leave out ───────────────
+
+def _crude(tsym, expiry, strike="", token="9"):
+    return {"ExchSeg": "MCXFO", "Symbol": "CRUDEOIL", "TradingSymbol": tsym,
+            "OptionType": "", "StrikePrice": strike, "Expiry": expiry,
+            "LotSize": "100", "Token": token}
+
+
+class _Routes:
+    _root_url = "https://edge.arrow.trade"
+
+
+def _with_mcx_route(broker, all_rows, mcx_rows):
+    asked = []
+
+    def _get(url, **_kw):
+        asked.append(url)
+        if mcx_rows is None:
+            raise RuntimeError("404 Not Found")
+        return mcx_rows
+
+    broker._client.get_instruments = lambda: list(all_rows)
+    broker._client._get = _get
+    broker._client._routes = _Routes()
+    return asked
+
+
+def test_mcx_route_adds_near_months_all_left_out(arrow_broker):
+    """A live /all carried CRUDEOIL from Jun-2027 on and none of the nearer
+    months; one far future made MCX look complete. /mcx is asked every time."""
+    far = _crude("CRUDEOIL21JUN27F", "21-Jun-2027", token="1")
+    near = _crude("CRUDEOIL19OCT26F", "19-Oct-2026", token="2")
+    asked = _with_mcx_route(arrow_broker, [far], [far, near])
+    arrow_broker._fetch_instruments()
+    assert asked == ["https://edge.arrow.trade/mcx"]
+    syms = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")]
+    assert syms == ["CRUDEOIL19OCT26F", "CRUDEOIL21JUN27F"]
+    # a symbol on both routes is held once
+    assert len(arrow_broker._instruments) == 2
+
+
+def test_missing_mcx_route_is_not_an_error(arrow_broker):
+    far = _crude("CRUDEOIL21JUN27F", "21-Jun-2027")
+    _with_mcx_route(arrow_broker, [far], None)
+    arrow_broker._fetch_instruments()
+    assert [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")] \
+        == ["CRUDEOIL21JUN27F"]
+
+
+def test_mcx_options_with_blank_option_type_are_not_futures(arrow_broker):
+    """MCX leaves OptionType empty on options; the strike and the symbol say
+    what they are. SEP/DEC/OCT futures must NOT be read as options."""
+    arrow_broker._instruments = [
+        _crude("CRUDEOIL17SEP26F", "17-Sep-2026"),
+        _crude("CRUDEOIL17SEP26", "17-Sep-2026"),
+        _crude("CRUDEOIL16DEC26F", "16-Dec-2026"),
+        _crude("CRUDEOILM17SEP26C8950", "17-Sep-2026", strike="8950"),
+        _crude("CRUDEOIL17SEP26P5000", "17-Sep-2026"),
+    ]
+    arrow_broker._build_instrument_index()
+    futs = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "future", "CRUDEOIL")]
+    assert futs == ["CRUDEOIL17SEP26", "CRUDEOIL17SEP26F", "CRUDEOIL16DEC26F"]
+    opts = [c["trading_symbol"] for c in
+            arrow_broker.list_contracts("MCXFO", "option", "CRUDEOIL")]
+    assert sorted(opts) == ["CRUDEOIL17SEP26P5000", "CRUDEOILM17SEP26C8950"]
