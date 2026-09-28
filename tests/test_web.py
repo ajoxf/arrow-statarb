@@ -290,8 +290,12 @@ def test_live_transmits_with_mpp_and_units(tmp_path):
 def test_close_reverses_direction(tmp_path):
     app, broker = _app(tmp_path, mode="live")
     client = app.test_client()
-    client.post("/api/manual-trade/close",
-                json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert client.post("/api/manual-trade/execute",
+                       json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    broker.orders.clear()
+    r = client.post("/api/manual-trade/close",
+                    json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is True
     # Closing a LONG_SPREAD reverses to sell A / buy B.
     by_sym = {o["symbol"]: o["side"] for o in broker.orders}
     assert by_sym["NIFTY30JUN26F"] == "sell"
@@ -811,3 +815,126 @@ def test_status_names_the_held_side_and_entry_details(tmp_path):
     assert t["position_type"] == "SHORT" and t["quantity"] == 3 and t["entry_zscore"] == 2.7
     assert t["entry_spot_price"] == 110.0 and t["entry_futures_price"] == 8.5
     assert t["entry_time"] == "2026-09-21T14:13:20"    # UTC; the page appends Z
+
+
+
+# ── MANUAL / ALGO lock: whole account, both directions, enforced server-side ──
+
+def _lock_app(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    return app, broker, app.test_client(), app.extensions["arrow"]["algo"]
+
+
+def test_manual_orders_refused_while_algo_is_on(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    assert c.post("/api/algo/start", json={}).get_json()["success"] is True
+    for url in ("/api/manual-trade/execute", "/api/manual-trade/close"):
+        r = c.post(url, json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+        assert r["success"] is False and "algo is ON" in r["error"], url
+    r = c.post("/api/engine/close-position", json={}).get_json()
+    assert r["success"] is False
+    assert broker.orders == []
+    algo.stop()
+
+
+def test_algo_cannot_start_while_a_manual_position_is_open(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    for url, body in (("/api/algo/start", {}), ("/api/engine/toggle-algo", {"enabled": True})):
+        r = c.post(url, json=body).get_json()
+        assert r["success"] is False and "MANUAL" in r["error"], url
+    assert algo.running is False
+    # close it by hand → the algo may start
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    assert c.post("/api/algo/start", json={}).get_json()["success"] is True
+    algo.stop()
+
+
+def test_algo_entry_refused_while_a_manual_position_is_open(tmp_path):
+    """Belt and braces: even if the algo were running, its entry path refuses."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    n = len(broker.orders)
+    res = algo._execute("SHORT_SPREAD", 1, source="algo", z=2.5, spread=100.0)
+    assert res["success"] is False and "MANUAL" in res["error"]
+    assert len(broker.orders) == n
+
+
+def test_one_position_at_a_time_and_close_must_match(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    r = c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is False and "No open position" in r["error"]
+    assert broker.orders == []                      # never opened the opposite
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    r = c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is False and "already open" in r["error"]
+    r = c.post("/api/manual-trade/close", json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is False and "not SHORT SPREAD" in r["error"]
+    r = c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 3}).get_json()
+    assert r["success"] is False and "Only 1 lot" in r["error"]
+
+
+def test_every_order_is_tagged_manual_or_algo(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 1})
+    algo._execute("SHORT_SPREAD", 1, source="algo", z=2.5, spread=100.0)
+    evs = c.get("/api/execution").get_json()["events"]
+    assert [e["source"] for e in reversed(evs)] == ["manual", "manual", "algo"]
+    trades = app.extensions["arrow"]["algo"]  # noqa: F841 — journal checked below
+    import json as _json
+    recs = _json.loads((tmp_path / "trades.json").read_text())
+    recs = recs if isinstance(recs, list) else recs.get("trades", [])
+    assert [r["source"] for r in recs] == ["manual", "manual", "algo"]
+
+
+def test_restart_adopts_only_an_ALGO_position(tmp_path):
+    import json as _json
+    import arrow_statarb.web.app as appmod
+    for owner, expect in (("manual", False), ("algo", True)):
+        d = tmp_path / owner
+        d.mkdir()
+        app, broker = _app(d, mode="live")
+        c = app.test_client()
+        if owner == "manual":
+            assert c.post("/api/manual-trade/execute",
+                          json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+        else:
+            app.extensions["arrow"]["algo"]._execute("LONG_SPREAD", 1, source="algo",
+                                                   z=-2.5, spread=100.0)
+        app2, _ = _app(d, mode="live")                 # "restart" on the same journal
+        assert app2.extensions["arrow"]["algo"].get_state()["in_position"] is expect, owner
+
+
+def test_manual_position_is_shown_valued_and_closable(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 2}).get_json()["success"]
+    d = c.get("/api/engine/status").get_json()
+    t = d["open_trade"]
+    assert d["position"] == "SHORT" and t["owner"] == "MANUAL" and t["quantity"] == 2
+    assert t["spread_levels"]["break_even"] is not None
+    assert t["exit_target_usd"] is None and t["exit_stop_usd"] is None   # nothing manages it
+    broker.orders.clear()
+    r = c.post("/api/engine/close-position", json={}).get_json()
+    assert r["success"] is True
+    assert [(o["side"], o["quantity"]) for o in broker.orders] == [("buy", 150), ("sell", 150)]
+    assert c.get("/api/engine/status").get_json()["position"] == "NONE"
+
+
+def test_algo_state_reports_the_lock(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    st = c.get("/api/algo/state").get_json()
+    assert st["manual_block"] is None and st["algo_block"] is None and st["position_owner"] is None
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    st = c.get("/api/algo/state").get_json()
+    assert st["position_owner"] == "manual" and "MANUAL" in st["algo_block"]
+    c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 1})
+    c.post("/api/algo/start", json={})
+    st = c.get("/api/algo/state").get_json()
+    assert "algo is ON" in st["manual_block"]
+    algo.stop()

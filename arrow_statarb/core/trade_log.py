@@ -237,7 +237,15 @@ class TradeLog:
                             "lots": int(rec.get("lots", 1)),
                             "entry_spread": rec.get("entry_spread"),
                             "ts": float(rec.get("ts", 0.0)),
-                            "dry_run": bool(rec.get("dry_run", False))}
+                            "dry_run": bool(rec.get("dry_run", False)),
+                            # WHO opened it. A record without one predates
+                            # ownership and is treated as MANUAL: the algo
+                            # must never adopt a position it cannot prove
+                            # it opened.
+                            "source": (rec.get("source") or "manual"),
+                            "leg_a_price": rec.get("leg_a_price"),
+                            "leg_b_price": rec.get("leg_b_price"),
+                            "zscore": rec.get("zscore")}
         return None
 
     def last_close_time(self, source: Optional[str] = None) -> Optional[float]:
