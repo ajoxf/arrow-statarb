@@ -696,8 +696,8 @@
 
         socket.on('status', function(data) {
             console.log('Status:', data);
-            document.getElementById('algoSwitch').checked = data.algo_enabled;
-            updateConnectionStatus(data.is_running ? 'connected' : 'disconnected');
+            document.getElementById('algoSwitch').checked = !!data.algo_enabled;
+            updateConnectionStatus((data.connected || data.is_running) ? 'connected' : 'disconnected');
         });
 
         socket.on('error', function(data) {
@@ -732,7 +732,17 @@
                 body: JSON.stringify({enabled: enabled})
             })
             .then(r => r.json())
-            .then(() => showToast(enabled ? 'Algo trading enabled' : 'Algo trading disabled', 'success'))
+            .then(d => {
+                // The server refuses a start it cannot honour (no broker, legs
+                // not assigned): show why and put the switch back.
+                if (d && d.success === false) {
+                    switchEl.checked = !enabled;
+                    showToast('Algo not ' + (enabled ? 'started' : 'stopped') + ': '
+                              + (d.error || 'refused'), 'danger');
+                    return;
+                }
+                showToast(enabled ? 'Algo trading enabled' : 'Algo trading disabled', 'success');
+            })
             .catch(err => {
                 console.error('Error:', err);
                 switchEl.checked = !enabled;
@@ -757,15 +767,15 @@
                 btn.textContent  = 'Enable Algo';
                 body.innerHTML   = `
                     <p class="mb-3 text-body-secondary" style="font-size:0.9rem;">
-                        This will send <strong>real orders</strong> to the MT5 broker using real funds.
+                        This will send <strong>real orders</strong> to Arrow using real funds.
                         Orders cannot be recalled once placed.
                     </p>
                     <div class="rounded border border-danger-subtle bg-danger-subtle px-3 py-2 mb-1" style="font-size:0.85rem;">
                         <p class="fw-semibold text-danger mb-2"><i class="bi bi-check2-circle me-1"></i>Verify before continuing</p>
                         <ul class="mb-0 ps-3 text-danger-emphasis" style="line-height:1.8;">
-                            <li>Position size and leverage are correct</li>
+                            <li>Lots per trade and the pair's units per lot (MCX multiplier) are correct</li>
                             <li>Stop-loss threshold is set</li>
-                            <li>API key has <strong>Trade</strong> permission enabled</li>
+                            <li>Available margin covers the pair's SPAN + exposure</li>
                         </ul>
                     </div>`;
             } else if (isDemo) {
@@ -776,8 +786,8 @@
                 btn.textContent  = 'Enable Algo';
                 body.innerHTML   = `
                     <p class="mb-2 text-body-secondary" style="font-size:0.9rem;">
-                        Orders will be routed to the <strong>MT5 Demo exchange</strong>.
-                        Fills are simulated — no real funds are at risk.
+                        Orders go to the <strong>simulated broker</strong> (live-sim) at real
+                        Arrow prices. Fills are simulated — no real funds are at risk.
                     </p>`;
             } else {
                 header.className = 'modal-header py-3 bg-secondary text-white';

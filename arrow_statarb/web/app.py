@@ -1297,20 +1297,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "round_trip_slippage_bps": edge.get("round_trip_slippage_bps"),
             "order_mode": edge.get("order_mode"),
             "fee_bps_used": edge.get("fee_bps_per_side"),
+            "units_per_lot_a": contract_a, "units_per_lot_b": contract_b,
+            "is_mcx": any(sessions.is_mcx(sg) for sg in _leg_segments()),
             "leg_a_notional": size.get("leg_a_notional_inr"),
             "leg_b_notional": size.get("leg_b_notional_inr"),
             "clip_lots": float(cfg.get("risk.lots_per_trade", 1) or 1),
             "contract_size": contract_b,
             "sizing": size,
-            "leg_a_leverage": size.get("leg_a_leverage"),
-            "leg_b_leverage": size.get("leg_b_leverage"),
             "min_notional_usd": size.get("min_notional_inr"),
             "notional_gap_pct": size.get("notional_gap_pct"),
             "hedge_mode": size.get("hedge_mode"),
             "dollar_neutral_beta": size.get("dollar_neutral_beta"),
             "beta_gap_pct": size.get("beta_gap_pct"),
-            "leg_a_margin": size.get("leg_a_margin_inr"),
-            "leg_b_margin": size.get("leg_b_margin_inr"),
             "mean": sig.get("mean"), "std": sig.get("std"),
             "spread_mean": sig.get("mean"), "spread_std": sig.get("std"),
             "trend_slope": (sig.get("regime_detail") or {}).get("slope"),
@@ -1475,8 +1473,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     @app.route("/api/account-info", methods=["GET"])
     def api_account_info_w3():
-        """Arrow margin/funds in the reference account-strip shape. VIP volume
-        tiers (crypto-only) are omitted so that panel stays hidden."""
+        """Arrow funds for the account strip: ledger cash, available and used
+        margin. The pair's SPAN + exposure is on /api/arrow-margin."""
         broker = active.get()
         connected = broker is not None
         funds = {}
@@ -1494,28 +1492,80 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "has_adapters": connected,
             "connected": connected,
             "uid": env.get("user_id", "") or "-",
-            "account_level": "",
-            "total_equity": funds.get("equity"),
             "balance": funds.get("cash"),
             "available": funds.get("available"),
             "used_margin": funds.get("used"),
-            "month_volume_usd": None,          # hides the VIP-volume bar
-            "vip_maintain_floor_usd": None,
-            "accounts": [],
         })
 
-    @app.route("/api/spot-holdings", methods=["GET"])
-    def api_spot_holdings_w3():
-        """Arrow trades futures only — no spot wallet, so never an orphan."""
-        return jsonify({"has_orphan": False, "holdings": []})
+    _margin_cache: Dict[str, Any] = {"key": None, "at": 0.0, "value": None}
 
-    @app.route("/api/exchange-positions", methods=["GET"])
-    def api_exchange_positions_w3():
-        """Broker-side position reconciliation. Arrow's own reconciler owns this;
-        the W3 warning panel stays quiet (no mismatch, no crypto 'dust')."""
-        return jsonify({"success": True, "mismatch": False,
-                        "exchange_has_position": False,
-                        "positions": [], "dust_positions": []})
+    @app.route("/api/arrow-margin", methods=["GET"])
+    def api_arrow_margin():
+        """The Margin card, Indian-broker style.
+
+        Account: ledger cash, margin used, margin available, utilisation.
+        Pair: SPAN + exposure for ONE trade at the configured lots, asked of
+        Arrow for both legs together (the exchange's calendar-spread benefit
+        included) and for each leg alone. No leverage, liquidation price or
+        IMR/MMR — those are CFD/crypto concepts an exchange-margined futures
+        account does not have. Anything Arrow did not answer is null."""
+        broker = active.get()
+        out: Dict[str, Any] = {"connected": broker is not None, "cash": None,
+                               "used": None, "available": None, "utilisation_pct": None,
+                               "pair": None}
+        if broker is None:
+            return jsonify(out)
+        try:
+            funds = broker.get_funds() or {}
+        except Exception:
+            funds = {}
+        used, avail = funds.get("used"), funds.get("available")
+        out.update(cash=funds.get("cash"), used=used, available=avail)
+        if used is not None and avail is not None and (used + avail) > 0:
+            out["utilisation_pct"] = round(used / (used + avail) * 100.0, 2)
+
+        legs = _read_legs()
+        if not _have_both_legs(legs) or not hasattr(broker, "get_pair_margin"):
+            return jsonify(out)
+        lots = max(1, int(float(cfg.get("risk.lots_per_trade", 1) or 1)))
+        la, lb = _leg_prices()
+        key = (legs["leg_a"]["symbol"], legs["leg_b"]["symbol"], lots)
+        now = time.time()
+        if _margin_cache["key"] == key and now - _margin_cache["at"] < 60:
+            pair = _margin_cache["value"]
+        else:
+            spec = []
+            for lk, side, px in (("leg_a", "buy", la), ("leg_b", "sell", lb)):
+                seg, sym = legs[lk]["segment"], legs[lk]["symbol"]
+                units = int(lots * _resolve_lot_size(seg, sym))
+                spec.append({"segment": seg, "symbol": sym, "side": side,
+                             "quantity": units, "price": px or 0})
+            try:
+                res = broker.get_pair_margin(
+                    spec, product=str(cfg.get("execution.product", "NRML")))
+            except Exception as exc:
+                res = {"basket": None, "legs": [], "error": str(exc)}
+            outright = [(x or {}).get("total") for x in res.get("legs") or []]
+            basket = (res.get("basket") or {}).get("total")
+            pair = {
+                "lots": lots,
+                "legs": [legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]],
+                "basket_total": basket,
+                "basket_span": (res.get("basket") or {}).get("span"),
+                "basket_exposure": (res.get("basket") or {}).get("exposure"),
+                "leg_a_outright": outright[0] if len(outright) > 0 else None,
+                "leg_b_outright": outright[1] if len(outright) > 1 else None,
+                "spread_benefit": (round(sum(outright) - basket, 2)
+                                   if basket is not None and len(outright) == 2
+                                   and all(v is not None for v in outright) else None),
+                "error": res.get("error"),
+            }
+            _margin_cache.update(key=key, at=now, value=pair)
+        if pair and pair.get("basket_total") is not None and avail is not None:
+            pair = dict(pair, headroom_trades=(int(avail // pair["basket_total"])
+                                               if pair["basket_total"] > 0 else None))
+        out["pair"] = pair
+        return jsonify(out)
 
     @app.route("/api/active-orders", methods=["GET"])
     def api_active_orders_w3():
@@ -1567,17 +1617,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_learning_log_w3():
         return jsonify([])
 
-    @app.route("/api/balance-debug", methods=["GET"])
-    def api_balance_debug_w3():
-        broker = active.get()
-        raw = {}
-        if broker and hasattr(broker, "get_funds"):
-            try:
-                raw = (broker.get_funds() or {}).get("raw", {}) or {}
-            except Exception:
-                raw = {}
-        return jsonify({"raw": raw})
-
     # ── W3 action buttons (Arrow-appropriate or safe no-ops) ─────────────────
     @app.route("/api/engine/close-position", methods=["POST"])
     def api_engine_close_position_w3():
@@ -1610,18 +1649,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                         "trade_id": None,
                         "entry_zscore": (op.get("entry_spread") if op else 0) or 0,
                         "message": ("Recovered" if op else "No open trades to recover")})
-
-    @app.route("/api/close-exchange-position", methods=["POST"])
-    def api_close_exchange_position_w3():
-        return jsonify({"success": True, "message": "No broker-side position to close"})
-
-    @app.route("/api/close-orphaned-spot", methods=["POST"])
-    def api_close_orphaned_spot_w3():
-        return jsonify({"success": True, "message": "Arrow has no spot wallet"})
-
-    @app.route("/api/sweep-dust", methods=["POST"])
-    def api_sweep_dust_w3():
-        return jsonify({"success": True, "swept": 0, "message": "No dust on Arrow"})
 
     @app.route("/api/sd-touches/clear", methods=["POST"])
     def api_sd_touches_clear_w3():
@@ -2203,6 +2230,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     _algo_lots["lots"], "DRY-RUN" if _is_dry_run() else "LIVE")
         return jsonify({"success": True, "running": True, "already_running": not ok,
                         "lots": _algo_lots["lots"], "dry_run": _is_dry_run()})
+
+    @app.route("/api/engine/toggle-algo", methods=["POST"])
+    def api_engine_toggle_algo():
+        """The dashboard's Algo switch — the SAME start/stop path as
+        /api/algo/start and /api/algo/stop, so both entry points share their
+        preconditions (broker connected, both legs assigned)."""
+        data = request.get_json(silent=True) or {}
+        if bool(data.get("enabled")):
+            return api_algo_start()
+        return api_algo_stop()
 
     @app.route("/api/algo/stop", methods=["POST"])
     def api_algo_stop():
@@ -2983,9 +3020,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return jsonify({"success": False, "output": str(exc)}), 500
 
     # ── socketio ─────────────────────────────────────────────────────────────
+    def _status_payload() -> Dict:
+        return {"connected": active.get() is not None,
+                "is_running": active.get() is not None,
+                "algo_enabled": bool((arrow_algo.get_state() or {}).get("running"))}
+
     @socketio.on("connect")
     def _on_connect():
-        emit("status", {"connected": active.get() is not None})
+        emit("status", _status_payload())
+
+    @socketio.on("get_status")
+    def _on_get_status():
+        emit("status", _status_payload())
 
     # Expose internals for tests (inject a fake broker, inspect the engines).
     app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo}

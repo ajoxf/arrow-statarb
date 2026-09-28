@@ -1416,6 +1416,110 @@ class ArrowBroker(BaseBroker):
             "raw": raw,
         }
 
+    # ── Margin (SPAN + exposure, as Arrow computes it) ────────────────────────
+
+    #: Keys a margin response has been seen to carry its total under, most
+    #: specific first. Arrow's margin routes are undocumented beyond the SDK
+    #: signature, so the reader is tolerant and says None rather than guess.
+    _MARGIN_TOTAL_KEYS = ("finalMargin", "totalMargin", "requiredMargin",
+                          "marginRequired", "total", "margin", "initialMargin")
+
+    @classmethod
+    def _margin_figures(cls, raw) -> Dict:
+        """{total, span, exposure, benefit} from a margin response (any shape),
+        each None when absent."""
+        rec = raw
+        for key in ("data", "result"):
+            if isinstance(rec, dict) and isinstance(rec.get(key), (dict, list)):
+                rec = rec[key]
+        if isinstance(rec, list):
+            rec = rec[0] if rec and isinstance(rec[0], dict) else {}
+        if not isinstance(rec, dict):
+            try:
+                return {"total": float(rec), "span": None, "exposure": None, "benefit": None}
+            except (TypeError, ValueError):
+                return {"total": None, "span": None, "exposure": None, "benefit": None}
+
+        def _f(*keys):
+            v = _dig(rec, *keys)
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        return {"total": _f(*cls._MARGIN_TOTAL_KEYS),
+                "span": _f("span", "spanMargin", "spanRequired"),
+                "exposure": _f("exposure", "exposureMargin", "elm"),
+                "benefit": _f("marginBenefit", "spreadBenefit", "benefit")}
+
+    def _margin_exchanges(self, segment: str):
+        """Exchange enums to try for a margin request. The SDK says MCX margin
+        requests prefer MCXFO; the order path uses MCX. Try both."""
+        wire = _SEGMENT_MAP.get(segment.lower(), segment.upper())
+        names = ["MCXFO", "MCX"] if wire == "MCX" else [wire]
+        out = []
+        for n in names:
+            try:
+                out.append(Exchange(n))
+            except ValueError:
+                continue
+        return out
+
+    def get_pair_margin(self, legs: List[Dict], product: str = "NRML") -> Dict:
+        """Margin for a spread, both legs TOGETHER (so an exchange calendar-
+        spread benefit is included) and each leg alone for comparison.
+
+        ``legs`` = [{segment, symbol, side ('buy'/'sell'), quantity (units),
+        price}]. Returns {basket: {...}, legs: [{...}, ...], error}. Figures are
+        None where Arrow did not answer — never estimated from notional."""
+        out: Dict = {"basket": None, "legs": [], "error": None}
+        if not self.connected or not self._client:
+            out["error"] = "not connected"
+            return out
+        prod_wire = _PRODUCT_MAP.get(product.upper(), "M")
+        try:
+            prod_enum = ProductType(prod_wire)
+        except ValueError:
+            prod_enum = ProductType.NRML
+        basket_last_err = None
+        for pick in range(2):                 # 0: first exchange spelling, 1: fallback
+            orders, legs_out = [], []
+            usable = True
+            for lg in legs:
+                exchanges = self._margin_exchanges(lg["segment"])
+                if not exchanges:
+                    usable = False
+                    break
+                ex = exchanges[min(pick, len(exchanges) - 1)]
+                tt = TransactionType.BUY if lg["side"].lower() == "buy" else TransactionType.SELL
+                price = float(lg.get("price") or 0)
+                orders.append({"exchange": str(ex), "symbol": lg["symbol"],
+                               "quantity": str(int(lg["quantity"])),
+                               "product": str(prod_enum), "order": str(OrderType.LIMIT),
+                               "transactionType": str(tt), "price": str(price)})
+                try:
+                    one = self._client.order_margin(ex, lg["symbol"], int(lg["quantity"]),
+                                                    prod_enum, OrderType.LIMIT, tt, price)
+                    legs_out.append(self._margin_figures(one))
+                except Exception as exc:
+                    legs_out.append({"total": None, "span": None, "exposure": None,
+                                     "benefit": None, "error": self._format_error(exc)})
+            if not usable:
+                out["error"] = "unknown exchange segment"
+                return out
+            try:
+                basket = self._margin_figures(self._client.basket_margin(orders))
+            except Exception as exc:
+                basket, basket_last_err = None, self._format_error(exc)
+            if basket and basket.get("total") is not None:
+                out.update(basket=basket, legs=legs_out, error=None)
+                return out
+            out["legs"] = legs_out
+            if not any(len(self._margin_exchanges(lg["segment"])) > 1 for lg in legs):
+                break
+        out["error"] = basket_last_err or "Arrow returned no margin figure"
+        return out
+
     # ── Token (for symbol lookup — Arrow uses symbols directly) ───────────────
 
     def resolve_token(self, exchange_segment: str, symbol: str) -> str:

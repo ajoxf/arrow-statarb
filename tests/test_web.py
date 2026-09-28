@@ -672,3 +672,58 @@ def test_dashboard_is_offline_capable_no_cdn(tmp_path):
     assert "fonts/bootstrap-icons.woff2" in css
     assert "url(https://" not in css.replace(" ", "")
     assert "@import" not in css
+
+
+# ── Algo switch, Arrow margin card, executable spreads on the status API ─────
+
+def test_dashboard_algo_switch_endpoint_starts_and_stops(tmp_path):
+    """The dashboard's switch posted to /api/engine/toggle-algo, which did not
+    exist — the algo could not be started from the main dashboard."""
+    app, _broker = _app(tmp_path)
+    c = app.test_client()
+    r = c.post("/api/engine/toggle-algo", json={"enabled": True}).get_json()
+    assert r["success"] is True
+    assert app.extensions["arrow"]["algo"].get_state()["running"] is True
+    r = c.post("/api/engine/toggle-algo", json={"enabled": False}).get_json()
+    assert r["success"] is True
+    assert app.extensions["arrow"]["algo"].get_state()["running"] is False
+
+
+def test_algo_switch_refuses_without_a_broker(tmp_path):
+    app, _broker = _app(tmp_path)
+    app.extensions["arrow"]["active"].set(None)
+    r = app.test_client().post("/api/engine/toggle-algo", json={"enabled": True}).get_json()
+    assert r["success"] is False and "broker" in r["error"].lower()
+
+
+def test_arrow_margin_reports_funds_and_pair_basket(tmp_path):
+    app, broker = _app(tmp_path)
+    seen = {}
+    broker.get_funds = lambda: {"cash": 500000.0, "used": 100000.0, "available": 400000.0}
+
+    def pair_margin(legs, product="NRML"):
+        seen["legs"] = legs
+        return {"basket": {"total": 50000.0, "span": 42000.0, "exposure": 8000.0},
+                "legs": [{"total": 130000.0}, {"total": 128000.0}], "error": None}
+    broker.get_pair_margin = pair_margin
+    d = app.test_client().get("/api/arrow-margin").get_json()
+    assert d["utilisation_pct"] == 20.0
+    assert d["pair"]["basket_total"] == 50000.0
+    assert d["pair"]["spread_benefit"] == 208000.0
+    assert d["pair"]["headroom_trades"] == 8
+    # both legs, opposite sides, quantity in UNITS (lots × lot size 75)
+    assert [(l["side"], l["quantity"]) for l in seen["legs"]] == [("buy", 75), ("sell", 75)]
+    assert "leverage" not in str(d).lower()
+
+
+def test_status_publishes_executable_spreads_and_real_readiness(tmp_path):
+    app, _broker = _app(tmp_path)
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(5):
+        eng.push(110.0 + (i % 2), 10.0, ts=1000.0 + i)
+    eng._book = {"leg_a": {"bid": 109.0, "ask": 111.0}, "leg_b": {"bid": 9.0, "ask": 11.0}}
+    sig = app.test_client().get("/api/engine/status").get_json()["signal"]
+    assert sig["sell_spread"] == 98.0 and sig["buy_spread"] == 102.0
+    # 4 s sampled of a 2 h warm-up is NOT ready, even though a z exists
+    assert sig["zscore"] is not None and sig["data_ready"] is False
+    assert sig["history_sec"] == 4.0
