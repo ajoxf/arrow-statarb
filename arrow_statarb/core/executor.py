@@ -18,7 +18,8 @@ leg is rejected or lags. This executor closes that gap:
 Dependency-injected to stay testable and free of web/broker-construction logic:
 
   broker_fn()            -> the active broker (or None)
-  price_fn(seg, sym)     -> latest LTP for a leg (or None)
+  price_fn(seg, sym[, side]) -> reference price for a leg (or None): the touch
+                         for ``side`` (ask to buy / bid to sell) when known, else LTP
   params_fn()            -> execution params dict (offsets, timeouts, flags)
 
 ``clock`` / ``sleep`` are injectable so tests drive timeouts deterministically.
@@ -182,6 +183,15 @@ class SpreadExecutor:
         r = math.ceil(steps - 1e-9) if side == "buy" else math.floor(steps + 1e-9)
         return round(r * tick, 2)
 
+    def _px(self, leg: "LegOrder") -> Optional[float]:
+        """Reference price for pricing one leg's order: the TOUCH for its side
+        (ask to buy, bid to sell) when the price source can give one, else the
+        LTP. Price sources that take no side are still supported."""
+        try:
+            return self._price_fn(leg.segment, leg.symbol, leg.side)
+        except TypeError:
+            return self._price_fn(leg.segment, leg.symbol)
+
     @staticmethod
     def _limit_price(side: str, ltp: Optional[float], offset: float,
                      tick: float = 0.0) -> Optional[float]:
@@ -219,7 +229,7 @@ class SpreadExecutor:
             return
         leg.prefill = leg.filled          # baseline so _refresh keeps fills cumulative
         # Reference price (slippage baseline) is captured on every placement.
-        ltp = self._price_fn(leg.segment, leg.symbol)
+        ltp = self._px(leg)
         if ltp is not None:
             leg.ref_price = ltp
         price = None
@@ -322,7 +332,7 @@ class SpreadExecutor:
         """Walk the resting limit further through the market to chase the fill."""
         if not leg.order_id or leg.order_type != "limit":
             return
-        ltp = self._price_fn(leg.segment, leg.symbol)
+        ltp = self._px(leg)
         if ltp is None:
             return
         leg.amend_count += 1

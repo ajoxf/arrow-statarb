@@ -7,7 +7,16 @@ requirement). It samples live leg prices into a TIME-based rolling window
 and computes mean/std/z plus a mean-reversion half-life over that window.
 
 Convention (Arrow fact #10):
-    spread = leg_a - leg_b ; z = (spread - mean) / std
+    spread = k × leg_a − leg_b ; z = (spread − mean) / std
+
+The window is built from the MID of each leg's book (last trade when the feed
+carries no book). Two EXECUTABLE prices are published beside it:
+
+    sell_spread = k × bid_a − ask_b    (what selling the spread gets: sell A, buy B)
+    buy_spread  = k × ask_a − bid_b    (what buying the spread costs:  buy A, sell B)
+
+each with its own z against the same mean/std, so an entry or exit is judged on
+the price it would actually trade at, not the mid.
 """
 
 from __future__ import annotations
@@ -32,8 +41,21 @@ class SignalEngine:
         params_provider: Callable[[], Dict],
         persist_path: Optional[Path] = None,
         series_key_provider: Optional[Callable[[], str]] = None,
+        book_provider: Optional[Callable[[], Optional[Dict]]] = None,
+        session_provider: Optional[Callable[[], bool]] = None,
     ):
         self._prices = prices_provider
+        # Optional top-of-book source: {"leg_a": {bid, ask, ltp, ts}, "leg_b": {…}}.
+        # When it answers, the window samples the MID and the executable
+        # sell/buy spreads are published; otherwise prices_provider (LTP) is used.
+        self._book_provider = book_provider
+        # Optional "are both legs' exchanges open?" — no sampling while shut, so
+        # a frozen price from a closed market never enters the window.
+        self._session_provider = session_provider
+        self._book: Optional[Dict] = None        # latest book, for get_signal
+        self._sample_status = ""                 # why the last sample was skipped
+        self._k_last: Optional[float] = None     # hedge ratio the window was built with
+        self._stats_cache: Optional[Tuple[float, float, float]] = None
         self._params = params_provider
         # Optional disk persistence of the rolling window so a quick restart
         # resumes the warm-up instead of re-collecting it (with strict freshness
@@ -91,6 +113,9 @@ class SignalEngine:
             # future, ~90× apart). 1.0 = same-scale legs (calendar / cash-future),
             # i.e. the original raw-difference behaviour.
             "hedge_ratio": 1.0,
+            # Skip a sample when either leg's last tick is older than this (s):
+            # a stalled feed must not add flat, fake-calm samples. 0 = off.
+            "max_quote_age_sec": 60.0,
         }
         try:
             p.update({k: float(v) for k, v in (self._params() or {}).items()
@@ -121,6 +146,7 @@ class SignalEngine:
     def reset(self) -> None:
         with self._lock:
             self._samples.clear()
+            self._stats_cache = None      # never serve stats from the old window
             self._reset_exc_state()       # series discontinues; counters preserved
             self._clear_persisted()       # don't let a restore undo an intentional reset
 
@@ -214,17 +240,75 @@ class SignalEngine:
                 logger.exception("SignalEngine: sample error")
             self._stop_evt.wait(interval)
 
+    @staticmethod
+    def _mid(leg: Optional[Dict]) -> Optional[float]:
+        """Mid of a leg's book, else its last trade, else None."""
+        if not leg:
+            return None
+        bid, ask = leg.get("bid"), leg.get("ask")
+        if bid and ask and bid > 0 and ask > 0:
+            return (float(bid) + float(ask)) / 2.0
+        ltp = leg.get("ltp")
+        return float(ltp) if ltp and ltp > 0 else None
+
+    def _read_prices(self, now: float) -> Tuple[Optional[float], Optional[float]]:
+        """(leg_a, leg_b) to sample — book mids when available — or (None, None)
+        with ``_sample_status`` saying why nothing was sampled."""
+        if self._session_provider is not None:
+            try:
+                if not self._session_provider():
+                    self._sample_status = "market closed"
+                    return None, None
+            except Exception:
+                pass
+        book = None
+        if self._book_provider is not None:
+            try:
+                book = self._book_provider()
+            except Exception:
+                book = None
+        if book and book.get("leg_a") and book.get("leg_b"):
+            a, b = book["leg_a"], book["leg_b"]
+            max_age = float(self._p().get("max_quote_age_sec", 0) or 0)
+            if max_age > 0:
+                ages = [now - float(x.get("ts") or 0) for x in (a, b) if x.get("ts")]
+                if ages and max(ages) > max_age:
+                    self._book = book
+                    self._sample_status = f"stale quotes (last tick {max(ages):.0f}s ago)"
+                    return None, None
+            self._book = book
+            la, lb = self._mid(a), self._mid(b)
+            if la is not None and lb is not None:
+                self._sample_status = ""
+                return la, lb
+        self._book = book if book else None
+        la, lb = self._prices()
+        self._sample_status = "" if (la and lb) else "waiting for prices"
+        return la, lb
+
+    def _check_hedge_ratio(self, k: float) -> None:
+        """A window mixes spreads from ONE hedge ratio only. A change of k is a
+        different series: discard the window rather than blend the two."""
+        if self._k_last is not None and abs(k - self._k_last) > 1e-12 and self._samples:
+            logger.info("SignalEngine: hedge ratio changed {} → {} — window reset",
+                        self._k_last, k)
+            self._samples.clear()
+            self._stats_cache = None
+            self._reset_exc_state()
+        self._k_last = k
+
     def sample_once(self, now: Optional[float] = None) -> None:
         """Take one spread sample from the live feed and trim the window.
         Exposed (not just internal) so tests can drive it deterministically."""
         now = time.time() if now is None else now
-        la, lb = self._prices()
+        la, lb = self._read_prices(now)
         if la is None or lb is None or la <= 0 or lb <= 0:
             return
         k = self._p().get("hedge_ratio", 1.0) or 1.0
         spread = k * float(la) - float(lb)         # non-1:1 pairs: scale leg_a to leg_b
         window_sec = self._p()["window_minutes"] * 60.0
         with self._lock:
+            self._check_hedge_ratio(k)
             self._samples.append((now, float(la), float(lb), spread))
             self._trim(now, window_sec)
             self._update_excursions_locked(now)
@@ -234,6 +318,7 @@ class SignalEngine:
         ts = time.time() if ts is None else ts
         k = self._p().get("hedge_ratio", 1.0) or 1.0
         with self._lock:
+            self._check_hedge_ratio(k)
             self._samples.append((ts, float(leg_a), float(leg_b), k * float(leg_a) - float(leg_b)))
             self._trim(ts, self._p()["window_minutes"] * 60.0)
             self._update_excursions_locked(ts)
@@ -294,6 +379,7 @@ class SignalEngine:
         if not samples:
             return
         payload = {"series_key": key,
+                   "hedge_ratio": self._p().get("hedge_ratio", 1.0) or 1.0,
                    "window_minutes": self._p()["window_minutes"],
                    "saved_at": now,
                    "samples": [list(s) for s in samples]}
@@ -339,6 +425,11 @@ class SignalEngine:
             logger.info("SignalEngine: window not restored — leg series changed "
                         "(saved={}, current={})", data.get("series_key"), cur_key)
             return
+        k_now = self._p().get("hedge_ratio", 1.0) or 1.0
+        if abs(float(data.get("hedge_ratio", k_now) or k_now) - k_now) > 1e-12:
+            logger.info("SignalEngine: window not restored — hedge ratio changed "
+                        "(saved={}, current={})", data.get("hedge_ratio"), k_now)
+            return
         now = time.time()
         window_sec = self._p()["window_minutes"] * 60.0
         kept = [tuple(s) for s in (data.get("samples") or [])
@@ -353,10 +444,13 @@ class SignalEngine:
             return
         with self._lock:
             self._samples = deque(kept)
+            self._stats_cache = None
+            self._k_last = k_now
             self._reset_exc_state()
         span = (kept[-1][0] - kept[0][0]) / 60.0
         logger.info("SignalEngine: restored {} samples spanning {:.1f} min "
-                    "(gap {:.1f} min) — warm-up skipped", len(kept), span, gap / 60.0)
+                    "(gap {:.1f} min; only sampled time counts toward warm-up)",
+                    len(kept), span, gap / 60.0)
 
     # ── stats ────────────────────────────────────────────────────────────────
     @staticmethod
@@ -436,11 +530,44 @@ class SignalEngine:
         with self._lock:
             return [(ts, la, lb) for (ts, la, lb, _sp) in self._samples]
 
+    @staticmethod
+    def _coverage(ts: List[float], interval: float) -> Tuple[float, float]:
+        """(history_sec, measured_interval_sec) for a window's timestamps.
+
+        history_sec counts only time the engine was actually SAMPLING: a gap
+        longer than the tolerance (a restart, a closed market, a stalled feed)
+        adds nothing. A window restored after a 2-hour gap is therefore not
+        "2 hours warm". measured_interval is the median spacing between
+        samples, which is what half-life in samples must be converted with —
+        the loop's nominal interval understates it (each fetch takes time)."""
+        if len(ts) < 2:
+            return 0.0, float(interval)
+        d = np.diff(np.asarray(ts, dtype=float))
+        tol = max(5.0, 10.0 * float(interval))
+        live = d[(d > 0) & (d <= tol)]
+        history = float(np.sum(live))
+        measured = float(np.median(live)) if live.size else float(interval)
+        return history, measured
+
+    def _window_stats(self, spreads: List[float], ready: bool, now: float,
+                      interval: float) -> Tuple[float, float]:
+        """Mean/std shared by the signal AND the chart. Cached for
+        ``stats_update_interval_sec`` so the bands hold still — but only once
+        the window is ready: during warm-up a cache would freeze a σ taken from
+        a handful of samples for minutes."""
+        cache = self._stats_cache
+        if ready and interval > 0 and cache is not None and (now - cache[2]) < interval:
+            return cache[0], cache[1]
+        mean, std = self.compute_stats(spreads)
+        self._stats_cache = (mean, std, now) if ready else None
+        return mean, std
+
     def get_signal(self) -> Dict:
         """Return the live signal snapshot — the ONE z the algo + dashboard use."""
         p = self._p()
         with self._lock:
             samples = list(self._samples)
+        book = self._book
 
         out: Dict = {
             "running": self.running,
@@ -453,38 +580,66 @@ class SignalEngine:
             "stop_zscore": p["stop_zscore"],
             "leg_a": None, "leg_b": None, "spread": None,
             "mean": None, "std": None, "zscore": None,
+            "sell_spread": None, "buy_spread": None, "z_sell": None, "z_buy": None,
+            "bid_a": None, "ask_a": None, "bid_b": None, "ask_b": None,
+            "book": False,
             "half_life": 0.0, "half_life_sec": 0.0,
+            "history_sec": 0.0, "min_history_sec": p["min_signal_minutes"] * 60.0,
+            "window_sec": p["window_minutes"] * 60.0,
+            "measured_interval_sec": p["sample_interval_sec"],
+            "quote_rate_per_min": 0,
+            "degenerate": False,
+            "sample_status": self._sample_status,
             "ready": False, "last_error": self._last_error,
         }
         if not samples:
             return out
 
-        ts0, _, _, _ = samples[0]
+        ts = [x[0] for x in samples]
+        ts0 = ts[0]
         tsN, la, lb, spread = samples[-1]
-        span_min = (tsN - ts0) / 60.0
-        spreads = [s[3] for s in samples]
-        # Stats-update interval: reuse a cached mean/std for up to N seconds so the
-        # bands stay stable (easier to track entries/exits). z always uses the LIVE
-        # spread against the (cached) mean/std. 0 = recompute every tick.
-        interval = float(p.get("stats_update_interval_sec", 0) or 0)
         now = time.time()
-        cache = getattr(self, "_stats_cache", None)
-        if interval > 0 and cache is not None and (now - cache[2]) < interval:
-            mean, std = cache[0], cache[1]
-        else:
-            mean, std = self.compute_stats(spreads)
-            self._stats_cache = (mean, std, now)
+        span_min = (tsN - ts0) / 60.0
+        history_sec, measured = self._coverage(ts, p["sample_interval_sec"])
+        spreads = [x[3] for x in samples]
+        enough = history_sec >= p["min_signal_minutes"] * 60.0
+        mean, std = self._window_stats(spreads, enough, now,
+                                       float(p.get("stats_update_interval_sec", 0) or 0))
         hl = self.half_life(spreads)
-        z = (spread - mean) / std if std > 1e-12 else 0.0
+        usable = std > 1e-12
+        z = (spread - mean) / std if usable else 0.0
+        cutoff = tsN - 60.0
+        rate = sum(1 for t in ts if t >= cutoff)
 
         out.update(
             leg_a=round(la, 4), leg_b=round(lb, 4), spread=round(spread, 4),
             mean=round(mean, 4), std=round(std, 6), zscore=round(z, 4),
-            half_life=round(hl, 4), half_life_sec=round(hl * p["sample_interval_sec"], 2),
+            half_life=round(hl, 4), half_life_sec=round(hl * measured, 2),
             span_minutes=round(span_min, 3),
-            # Need enough history AND a usable std before the signal is tradeable.
-            ready=(span_min >= p["min_signal_minutes"] and std > 1e-12),
+            history_sec=round(history_sec, 1),
+            measured_interval_sec=round(measured, 3),
+            quote_rate_per_min=rate,
+            degenerate=(len(samples) >= 2 and not usable),
+            # Need enough SAMPLED history AND a usable std before it is tradeable.
+            ready=(enough and usable),
         )
+
+        # Executable spreads from the book (None where a side is missing).
+        if book and book.get("leg_a") and book.get("leg_b"):
+            k = p.get("hedge_ratio", 1.0) or 1.0
+            A, B = book["leg_a"], book["leg_b"]
+            ba, aa, bb, ab = A.get("bid"), A.get("ask"), B.get("bid"), B.get("ask")
+            out.update(bid_a=ba, ask_a=aa, bid_b=bb, ask_b=ab,
+                       book=all(v is not None for v in (ba, aa, bb, ab)))
+            if ba is not None and ab is not None:
+                sell = k * float(ba) - float(ab)
+                out["sell_spread"] = round(sell, 4)
+                out["z_sell"] = round((sell - mean) / std, 4) if usable else None
+            if aa is not None and bb is not None:
+                buy = k * float(aa) - float(bb)
+                out["buy_spread"] = round(buy, 4)
+                out["z_buy"] = round((buy - mean) / std, 4) if usable else None
+
         reg = self.regime(spreads=spreads, ts_now=tsN)
         out["regime"] = reg["state"]
         out["regime_detail"] = reg
@@ -505,7 +660,13 @@ class SignalEngine:
                     "stop_zscore": self._p()["stop_zscore"]}
 
         spreads = [s[3] for s in samples]
-        mean, std = self.compute_stats(spreads)
+        # The SAME mean/std the live signal uses (cached per the stats-update
+        # interval), so the chart's z matches the traded z exactly.
+        cache = self._stats_cache
+        if cache is not None:
+            mean, std = cache[0], cache[1]
+        else:
+            mean, std = self.compute_stats(spreads)
         sd = std if std > 1e-12 else 0.0
 
         step = max(1, len(samples) // max_points)

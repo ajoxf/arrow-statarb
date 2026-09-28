@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -175,6 +176,11 @@ class ArrowBroker(BaseBroker):
         # keyed by integer token, fed by on_ticks at tick rate (~50ms or faster).
         self._streams = None
         self._stream_ltp: Dict[int, float] = {}
+        # Top of book per token from the FULL-mode stream: {bid, ask, ltp, ts}
+        # in RUPEES. A side with no resting order stays None — it is never
+        # back-filled from the LTP, which would make an untradeable price look
+        # executable.
+        self._stream_book: Dict[int, Dict] = {}
         self._stream_tokens: set = set()
         self._stream_lock = threading.Lock()
 
@@ -924,9 +930,7 @@ class ArrowBroker(BaseBroker):
 
                     def _on_tick(tick):
                         try:
-                            # Arrow's DataStream sends prices as integers in paise
-                            # (1 rupee = 100 paise) — convert to rupees.
-                            self._stream_ltp[int(tick.token)] = float(tick.ltp) / 100.0
+                            self._ingest_tick(tick)
                         except Exception:
                             pass
 
@@ -937,13 +941,69 @@ class ArrowBroker(BaseBroker):
 
                 new = [t for t in tokens if t not in self._stream_tokens]
                 if new:
-                    self._streams.subscribe_market_data(self._DataMode.LTP, new)
+                    # FULL is the only mode that carries the order book (5
+                    # levels a side); LTP/LTPC/QUOTE have no bid or ask price.
+                    mode = getattr(self._DataMode, "FULL", None) or self._DataMode.LTP
+                    self._streams.subscribe_market_data(mode, new)
                     self._stream_tokens.update(new)
                     logger.info("ArrowBroker: streaming {} token(s) (total {})", len(new), len(self._stream_tokens))
             return True
         except Exception as exc:
             logger.warning("ArrowBroker: price stream start failed — {}", exc)
             return False
+
+    @staticmethod
+    def _best_level(levels, pick) -> Optional[float]:
+        """Best price (rupees) on one side of a depth list, or None. Arrow's
+        levels are dicts with ``price`` in PAISE; an empty level has price 0."""
+        prices = []
+        for lv in levels or []:
+            try:
+                pr = lv.get("price") if isinstance(lv, dict) else getattr(lv, "price", None)
+                pr = float(pr)
+            except (TypeError, ValueError):
+                continue
+            if pr > 0:
+                prices.append(pr / 100.0)
+        return pick(prices) if prices else None
+
+    def _ingest_tick(self, tick) -> None:
+        """One DataStream tick → the LTP cache and the top-of-book cache.
+        Prices arrive as integers in PAISE (1 rupee = 100 paise). A tick that
+        carries no depth (an LTP/LTPC packet) must not wipe a book we already
+        hold, so bid/ask are merged forward side by side."""
+        tok = int(tick.token)
+        ltp = float(getattr(tick, "ltp", 0) or 0) / 100.0
+        if ltp > 0:
+            self._stream_ltp[tok] = ltp
+        bids = getattr(tick, "bids", None)
+        asks = getattr(tick, "asks", None)
+        bid = self._best_level(bids, max)
+        ask = self._best_level(asks, min)
+        prev = self._stream_book.get(tok) or {}
+        has_depth = bool(bids) or bool(asks)
+        book = {
+            # With depth present, an empty side is a REAL empty side (None);
+            # without depth, keep the previous reading.
+            "bid": bid if has_depth else prev.get("bid"),
+            "ask": ask if has_depth else prev.get("ask"),
+            "ltp": ltp if ltp > 0 else prev.get("ltp"),
+            "ts": time.time(),
+        }
+        if book["bid"] is not None and book["ask"] is not None and book["bid"] > book["ask"]:
+            book["bid"] = book["ask"] = None     # crossed/garbled book → unusable
+        self._stream_book[tok] = book
+
+    def get_streamed_book(self, symbols: List[str]) -> Dict[str, Dict]:
+        """``{symbol: {bid, ask, ltp, ts}}`` (rupees) from the live stream for
+        symbols that have received at least one tick. bid/ask are None when the
+        feed carries no book for that side."""
+        out: Dict[str, Dict] = {}
+        for s in symbols:
+            tok = self._sym_token.get(str(s).upper())
+            if tok is not None and int(tok) in self._stream_book:
+                out[str(s).upper()] = dict(self._stream_book[int(tok)])
+        return out
 
     def get_streamed_ltp(self, symbols: List[str]) -> Dict[str, float]:
         """Return {symbol: ltp} from the live stream cache for symbols that
@@ -965,6 +1025,7 @@ class ArrowBroker(BaseBroker):
             self._streams = None
             self._stream_tokens.clear()
             self._stream_ltp.clear()
+            self._stream_book.clear()
 
     # ── Orders ────────────────────────────────────────────────────────────────
 

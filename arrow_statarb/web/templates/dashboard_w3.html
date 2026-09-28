@@ -400,10 +400,23 @@
                     </div>
                     <div class="col-4 text-center">
                         <div class="price-large" id="spread-value" style="font-size: 1.5rem;">0.00</div>
-                        <div class="metric-label">Spread</div>
+                        <div class="metric-label">Spread (mid)</div>
                         <div class="text-secondary mt-1" style="font-size: 0.6rem; display:none;"
                              id="spread-breakdown"
-                             title="What the engine z-scores: Leg B (futures) minus the hedge ratio times Leg A (spot)."></div>
+                             title="What the engine z-scores: the hedge ratio times Leg A minus Leg B, on the mid of each book."></div>
+                        <!-- Executable spreads off the book: the prices the orders would meet. -->
+                        <div class="d-flex justify-content-center gap-3 mt-1 font-monospace" style="font-size: 0.75rem;">
+                            <div title="SELL SPREAD = Bid Leg A − Ask Leg B (× hedge ratio on A): what you get for selling the spread — sell Leg A at its bid, buy Leg B at its ask. A SHORT entry and a LONG exit trade here.">
+                                <div class="text-secondary" style="font-size: 0.6rem;">SELL (Bid A − Ask B)</div>
+                                <span id="sell-spread-value" class="price-down">&mdash;</span>
+                                <span id="sell-spread-z" class="text-secondary" style="font-size: 0.65rem;"></span>
+                            </div>
+                            <div title="BUY SPREAD = Ask Leg A − Bid Leg B (× hedge ratio on A): what buying the spread costs — buy Leg A at its ask, sell Leg B at its bid. A LONG entry and a SHORT exit trade here.">
+                                <div class="text-secondary" style="font-size: 0.6rem;">BUY (Ask A − Bid B)</div>
+                                <span id="buy-spread-value" class="price-up">&mdash;</span>
+                                <span id="buy-spread-z" class="text-secondary" style="font-size: 0.65rem;"></span>
+                            </div>
+                        </div>
                         <div class="mt-1" style="font-size: 0.6rem; display:none;" id="fair-value-row"
                              title="Theoretical value of the spread from cost of carry. REFERENCE ONLY — the signal is the z-score on the spread and never reads this. A large gap usually means the contract month, multiplier or contract size is wrong, not that the trade is good.">
                             <span class="text-secondary">fair</span>
@@ -2549,6 +2562,17 @@
         spreadEl.classList.remove('price-up', 'price-down', 'price-neutral');
         spreadEl.classList.add(spread > 0 ? 'price-up' : spread < 0 ? 'price-down' : 'price-neutral');
 
+        // Executable spreads. "—" when a side of either book is empty (the
+        // feed is LTP-only, or nobody is quoting that side): never the LTP.
+        const _fmtSide = (valId, zId, v, z) => {
+            const ve = document.getElementById(valId), ze = document.getElementById(zId);
+            if (ve) ve.textContent = (v != null && isFinite(v)) ? Number(v).toFixed(2) : '—';
+            if (ze) ze.textContent = (z != null && isFinite(z))
+                ? '(' + (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ)' : '';
+        };
+        _fmtSide('sell-spread-value', 'sell-spread-z', data.sell_spread, data.z_sell);
+        _fmtSide('buy-spread-value', 'buy-spread-z', data.buy_spread, data.z_buy);
+
         // Mirror spread + z into the always-visible header readout.
         const hSpread = document.getElementById('header-spread');
         if (hSpread && data.spread != null) hSpread.textContent = spread.toFixed(2);
@@ -2591,8 +2615,8 @@
 
         // Position Δ Spread — how far the spread has moved since entry, colored
         // by whether that move is favorable for the current direction.
-        //   LONG  profits when spread falls → favorable when Δ < 0
-        //   SHORT profits when spread rises → favorable when Δ > 0
+        //   spread = k·A − B. LONG (buy A / sell B) profits when it RISES,
+        //   SHORT (sell A / buy B) profits when it FALLS.
         // Live-updates every tick (data.spread) without needing a new payload.
         const deltaEl = document.getElementById('position-spread-delta');
         if (deltaEl) {
@@ -2601,8 +2625,8 @@
                 const delta = spread - es;
                 const sign = delta >= 0 ? '+' : '';
                 deltaEl.textContent = sign + delta.toFixed(2);
-                const favorable = (currentPosition.type === 'LONG' && delta < 0)
-                               || (currentPosition.type === 'SHORT' && delta > 0);
+                const favorable = (currentPosition.type === 'LONG' && delta > 0)
+                               || (currentPosition.type === 'SHORT' && delta < 0);
                 deltaEl.className = (delta === 0) ? '' : (favorable ? 'price-up' : 'price-down');
             } else {
                 deltaEl.textContent = '-';
@@ -2784,11 +2808,14 @@
         document.getElementById('data-points').textContent =
             dataPoints.toLocaleString();
 
-        // Same rule as the banner: the "/ min samples" ratio only means
-        // something while the threshold has yet to be cleared.
-        const warmingUp = dataPoints < lookback;
+        // Warm-up is TIME actually sampled (gaps excluded) against the
+        // engine's own ready threshold — the gate the algo trades on. A quote
+        // count is not a gate: a 0.5 s loop never lands exactly on N quotes.
+        const histSec = data.history_sec || 0;
+        const needSec = data.min_history_sec || 0;
+        const warmingUp = !data.data_ready && needSec > 0 && histSec < needSec;
         const progressPercent = warmingUp
-            ? Math.min(100, (dataPoints / lookback) * 100) : 100;
+            ? Math.min(100, (histSec / needSec) * 100) : 100;
         const progressEl = document.getElementById('collection-progress');
         const percentEl = document.getElementById('collection-percent');
         const targetEl = document.getElementById('data-points-target');
@@ -2796,8 +2823,7 @@
             progressEl.style.width = progressPercent + '%';
             progressEl.className = 'progress-bar ' + (warmingUp ? 'bg-warning' : 'bg-success');
         }
-        if (targetEl) targetEl.textContent = warmingUp
-            ? '/' + lookback.toLocaleString() : ' quotes in window';
+        if (targetEl) targetEl.textContent = ' quotes in window';
         if (percentEl) {
             percentEl.parentElement.style.display = warmingUp ? '' : 'none';
             percentEl.textContent = Math.round(progressPercent);
@@ -2808,7 +2834,7 @@
                             data.hurst_ok, data.std_filter_ok,
                             data.lookback_sec, data.degenerate,
                             data.history_sec, data.min_history_sec,
-                            data.quote_rate_per_min);
+                            data.quote_rate_per_min, data.sample_status);
 
         updateFilterStatus('hurst-status', data.hurst_ok, data.hurst);
         updateFilterStatus('std-status', data.std_filter_ok);
@@ -3345,7 +3371,7 @@ function updateFilterStatus(elementId, passed, value) {
 
     function updateTradingStatus(dataPoints, minSamples, dataReady, hurstOk,
                                  stdOk, lookbackSec, degenerate,
-                                 history, minHistory, quoteRate) {
+                                 history, minHistory, quoteRate, sampleStatus) {
         const statusCard = document.getElementById('trading-status-card');
         const statusIcon = document.getElementById('trading-status-icon');
         const statusText = document.getElementById('trading-status-text');
@@ -3360,13 +3386,15 @@ function updateFilterStatus(elementId, passed, value) {
         minHistory = minHistory || 0;
         // TWO gates: enough quotes AND enough elapsed time. The bar
         // tracks whichever is further from being met.
-        const needHistory = history < minHistory;
-        const warming = dataPoints < minSamples;
-        const quotePct = Math.min(100, (dataPoints / minSamples) * 100);
-        const timePct = minHistory ? Math.min(100, (history / minHistory) * 100)
-                                   : 100;
-        const percent = (needHistory || warming)
-            ? Math.min(quotePct, timePct) : 100;
+        // ONE gate: sampled time (gaps excluded) against the engine's ready
+        // threshold. The old quote-count gate assumed exactly one quote per
+        // tick interval, which the loop never achieves, so it could stall
+        // short of 100% for the whole window.
+        const needHistory = !dataReady && history < minHistory;
+        const warming = false;
+        const percent = needHistory
+            ? (minHistory ? Math.min(100, (history / minHistory) * 100) : 0)
+            : 100;
 
         progressBar.style.width = percent + '%';
         // Progress % while a gate is still filling, blank once both are
@@ -3427,9 +3455,8 @@ function updateFilterStatus(elementId, passed, value) {
                 ? Math.floor(Math.min(history, minHistory)) + ' / ' +
                   Math.round(minHistory) + 's history'
                 : 'history gate off');
-        gate(document.getElementById('gate-samples'), !warming,
-             Math.min(dataPoints, minSamples).toLocaleString() + ' / ' +
-             minSamples.toLocaleString() + ' quotes');
+        gate(document.getElementById('gate-samples'), true,
+             dataPoints.toLocaleString() + ' quotes in window');
         gate(document.getElementById('gate-sigma'), !!dataReady,
              dataReady ? 'mean & SD usable'
                        : (degenerate ? 'sigma too small'
@@ -3443,12 +3470,14 @@ function updateFilterStatus(elementId, passed, value) {
             if (needHistory) {
                 // Time gate, not the quote count — say which one is
                 // actually holding trading up.
-                statusText.textContent = 'Collecting Data...';
+                statusText.textContent = sampleStatus
+                    ? 'Collecting Data — paused' : 'Collecting Data...';
                 const left = Math.ceil((minHistory - history) / 60);
                 statusDetail.textContent =
                     Math.floor(history / 60) + ' of ' +
                     Math.round(minHistory / 60) + ' minutes collected — ' +
-                    left + ' more before trading can start';
+                    left + ' more before trading can start'
+                    + (sampleStatus ? ' (not sampling: ' + sampleStatus + ')' : '');
             } else if (warming) {
                 statusText.textContent = 'Collecting Data...';
                 statusDetail.textContent = (minSamples - dataPoints)

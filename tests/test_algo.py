@@ -889,3 +889,66 @@ def test_live_net_pnl_applies_cgt_and_other():
     state["sig"] = _sig(-1.0, spread=100.0); algo._tick()        # gross +100
     # no other cost; CGT 20% on +100 → net 80
     assert abs(algo.get_state()["net_pnl"] - 80.0) < 0.01
+
+
+# ── executable sides: sell_spread / buy_spread from the book ─────────────────
+
+def _book_sig(z_mid, z_sell, z_buy, sell=98.0, buy=102.0):
+    s = _sig(z_mid)
+    s.update(bid_a=109.0, ask_a=111.0, bid_b=9.0, ask_b=11.0, book=True,
+             z_sell=z_sell, z_buy=z_buy, sell_spread=sell, buy_spread=buy)
+    return s
+
+
+def test_short_needs_the_SELL_side_beyond_entry_not_the_mid():
+    """Mid z 2.2 looks like a SHORT, but selling the spread only gets z 1.8."""
+    algo, state, calls = _make()
+    state["sig"] = _book_sig(2.2, z_sell=1.8, z_buy=2.6)
+    algo._tick()
+    assert calls["execute"] == []
+    state["sig"] = _book_sig(2.6, z_sell=2.1, z_buy=3.0)
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+    assert algo.get_state()["position"]["entry_z"] == 2.1
+    assert algo.get_state()["position"]["entry_spread"] == 98.0     # the sell price
+
+
+def test_long_needs_the_BUY_side_beyond_entry():
+    algo, state, calls = _make()
+    state["sig"] = _book_sig(-2.2, z_sell=-2.6, z_buy=-1.8)
+    algo._tick()
+    assert calls["execute"] == []
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+    assert algo.get_state()["position"]["entry_spread"] == 102.0    # the buy price
+
+
+def test_long_exits_on_the_SELL_side_reverting():
+    """A LONG is closed by SELLING the spread: the mid reaching 0 is not
+    enough while the sell side is still below it."""
+    algo, state, calls = _make()
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1); algo._tick()
+    state["sig"] = _book_sig(0.1, z_sell=-0.3, z_buy=0.5); algo._tick()
+    assert calls["close"] == []
+    state["sig"] = _book_sig(0.4, z_sell=0.05, z_buy=0.8); algo._tick()
+    assert calls["close"] == [("LONG_SPREAD", 1)]
+
+
+def test_partial_book_side_cannot_trade():
+    """No ask on leg A → buy_spread is None → no LONG entry, however deep."""
+    algo, state, calls = _make()
+    s = _book_sig(-3.0, z_sell=-3.2, z_buy=None, buy=None)
+    s["ask_a"] = None
+    state["sig"] = s
+    algo._tick()
+    assert calls["execute"] == []
+
+
+def test_ltp_only_feed_falls_back_to_the_mid_z():
+    algo, state, calls = _make()
+    s = _sig(2.5)
+    s.update(z_sell=None, z_buy=None, sell_spread=None, buy_spread=None)
+    state["sig"] = s
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]

@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from flask import Flask, jsonify, render_template, request
@@ -43,6 +43,7 @@ from arrow_statarb.core.reconcile import ReconcileGuard
 from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core import beta_monitor
+from arrow_statarb.core import sessions
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
@@ -554,12 +555,47 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "trade")
         return res
 
-    # ── live leg prices (stream first, REST fallback) ────────────────────────
+    # ── live leg book (bid/ask from the FULL-mode stream) ────────────────────
+    def _leg_book() -> Optional[Dict]:
+        """{"leg_a": {bid, ask, ltp, ts}, "leg_b": {…}} from the stream, or None
+        until both legs have ticked. bid/ask are None where a side is empty."""
+        broker = active.get()
+        legs = _read_legs()
+        if not broker or not _have_both_legs(legs) or not hasattr(broker, "get_streamed_book"):
+            return None
+        syms = {lk: legs[lk]["symbol"] for lk in ("leg_a", "leg_b")}
+        try:
+            broker.start_price_stream([syms["leg_a"], syms["leg_b"]])  # idempotent
+            book = broker.get_streamed_book([syms["leg_a"], syms["leg_b"]]) or {}
+        except Exception:
+            return None
+        a, b = book.get(syms["leg_a"].upper()), book.get(syms["leg_b"].upper())
+        if not a or not b:
+            return None
+        return {"leg_a": a, "leg_b": b}
+
+    def _leg_segments() -> List[str]:
+        legs = _read_legs()
+        return [str((legs.get(lk) or {}).get("segment") or "") for lk in ("leg_a", "leg_b")]
+
+    def _session_open() -> bool:
+        """Both legs' exchanges in session (NSE/BSE 09:15–15:30; MCX 09:00–
+        23:30/23:55 IST). trading_hours.auto_from_segment: false disables it."""
+        if not bool(cfg.get("trading_hours.auto_from_segment", True)):
+            return True
+        return sessions.is_open(_leg_segments())
+
+    # ── live leg prices (book mid first, then streamed LTP, then REST) ───────
     def _leg_prices() -> Tuple[Optional[float], Optional[float]]:
         broker = active.get()
         legs = _read_legs()
         if not broker or not _have_both_legs(legs):
             return (None, None)
+        book = _leg_book()
+        if book:
+            mids = [SignalEngine._mid(book["leg_a"]), SignalEngine._mid(book["leg_b"])]
+            if all(m is not None for m in mids):
+                return (mids[0], mids[1])
         syms = {lk: legs[lk]["symbol"] for lk in ("leg_a", "leg_b")}
         px: Dict[str, float] = {}
         if hasattr(broker, "get_streamed_ltp"):
@@ -579,12 +615,23 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return (px.get(syms["leg_a"].upper()), px.get(syms["leg_b"].upper()))
 
     # ── live executor wiring (limit orders, fills, orphan recovery) ──────────
-    def _one_ltp(seg: str, sym: str) -> Optional[float]:
-        """Latest price for a single leg — stream cache first, REST fallback.
-        Used by the executor to price limit orders and amendments."""
+    def _one_ltp(seg: str, sym: str, side: Optional[str] = None) -> Optional[float]:
+        """Reference price for a single leg. With ``side`` ('buy'/'sell') and a
+        streamed book, the TOUCH for that side — the ask to buy, the bid to sell —
+        so a limit order starts at a price that can actually fill. Otherwise the
+        latest LTP (stream cache first, REST fallback)."""
         broker = active.get()
         if not broker:
             return None
+        if side and hasattr(broker, "get_streamed_book"):
+            try:
+                broker.start_price_stream([sym])
+                bk = (broker.get_streamed_book([sym]) or {}).get(sym.upper()) or {}
+                touch = bk.get("ask") if str(side).lower() == "buy" else bk.get("bid")
+                if touch:
+                    return float(touch)
+            except Exception:
+                pass
         px: Dict[str, float] = {}
         if hasattr(broker, "get_streamed_ltp"):
             try:
@@ -680,6 +727,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # non-1:1 pairs: spread = hedge_ratio × leg_a − leg_b (1 = same scale)
             "hedge_ratio": float(s.get("hedge_ratio", 1) or 1),
             "stats_update_interval_sec": float(s.get("stats_update_interval_sec", 0) or 0),
+            "max_quote_age_sec": float(s.get("max_quote_age_sec", 60) or 0),
             # window persistence (resume warm-up across a quick restart)
             "persist_window": bool(s.get("persist_window", True)),
             "resume_max_gap_min": float(s.get("resume_max_gap_min", 120) or 0),
@@ -700,7 +748,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return f"{a}|{b}" if a and b else ""
 
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
-                                 persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key)
+                                 persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key,
+                                 book_provider=_leg_book, session_provider=_session_open)
     # Auto-start so the live signal + z-score chart always collect whenever prices
     # are available — independent of connecting the broker or arming the algo. It
     # simply no-ops while no prices are returned, so this is safe at startup.
@@ -742,6 +791,24 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         lots × multiplier_b of it, so P&L = lots × multiplier_b × Δspread. Uses
         the MCX-aware price multiplier (config override, else the lot size)."""
         return _price_multiplier("leg_b")
+
+    def _algo_trading_hours() -> Dict:
+        """The algo's session window. With trading_hours.auto_from_segment (the
+        default) the open/close come from the legs' exchange — MCX closes at
+        23:30 (23:55 outside US daylight time), not NSE's 15:30 — so the
+        no-entry buffer guards the REAL close. Set it false to use the fixed
+        start/end/close values in settings."""
+        th = dict(cfg.section("trading_hours") or {})
+        if not bool(th.get("auto_from_segment", True)):
+            return th
+        span = sessions.pair_session(_leg_segments(),
+                                     datetime.now(sessions.IST).date())
+        if span is None:
+            return th
+        (oh, om), (ch, cm) = divmod(span[0], 60), divmod(span[1], 60)
+        th.update(enabled=True, start_hour=oh, start_min=om, end_hour=ch, end_min=cm,
+                  close_hour=ch, close_min=cm)
+        return th
 
     def _algo_params() -> Dict:
         s = cfg.section("signal")
@@ -839,7 +906,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "brokerage_per_lot": float(f.get("brokerage_per_lot", 20.0)),
             "slippage_per_lot": float(f.get("slippage_per_lot", 5.0)),
             "time_stop_half_lives": float(f.get("time_stop_half_lives", 3.0)),
-            "trading_hours": cfg.section("trading_hours"),
+            "trading_hours": _algo_trading_hours(),
             # no new entries within this many minutes of the exchange close
             "no_entry_buffer_min": float(cfg.get("trading_hours.no_entry_buffer_min", 20)),
         }
@@ -1174,7 +1241,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "spot_expiry": _exp_iso(legs["leg_a"]["symbol"])}
             eff = sig.get("spread")
             eff = eff if eff is not None else (hedge_ratio * la - lb)
-            fv = fairvalue.fair_value_block(acfg, la, lb, eff, hedge_ratio)
+            # Cost-of-carry fair value holds for index/stock futures, NOT for
+            # commodities: an MCX calendar is priced by storage, convenience
+            # yield and seasonality (crude is often in backwardation), so a
+            # carry "fair" would sit hundreds of points from any real level.
+            if any(sessions.is_mcx(sg) for sg in _leg_segments()):
+                fv = {}
+            else:
+                fv = fairvalue.fair_value_block(acfg, la, lb, eff, hedge_ratio)
             if fv.get("fair_value") is not None:
                 fv["fair_value"] = -fv["fair_value"]
                 fv["fair_gap"] = eff - fv["fair_value"]
@@ -1198,7 +1272,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
         signal = {
             "zscore": sig.get("zscore"), "spread": sig.get("spread"),
-            "raw_basis": (lb - la) if (la and lb) else None,
+            # Executable spreads off the book (None where a side is empty):
+            # Sell = k·bid_A − ask_B (sell A, buy B); Buy = k·ask_A − bid_B.
+            "sell_spread": sig.get("sell_spread"), "buy_spread": sig.get("buy_spread"),
+            "z_sell": sig.get("z_sell"), "z_buy": sig.get("z_buy"),
+            "book": bool(sig.get("book")),
+            "bid_a": sig.get("bid_a"), "ask_a": sig.get("ask_a"),
+            "bid_b": sig.get("bid_b"), "ask_b": sig.get("ask_b"),
+            "raw_basis": (la - lb) if (la and lb) else None,
             "spread_hedge_ratio": hedge_ratio,
             "spread_formula": f"{hedge_ratio:g}×A − B",
             "pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
@@ -1239,9 +1320,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "data_points": sig.get("samples"),
             "quote_rate_per_min": sig.get("quote_rate_per_min"),
             "lookback": _w3_config().min_samples,
+            # Warm-up progress is TIME actually sampled (gaps excluded), against
+            # the engine's own ready threshold — the same gate the algo uses.
             "history_sec": sig.get("history_sec"),
-            "min_history_sec": float(cfg.get("signal.min_signal_minutes", 120) or 120) * 60,
-            "data_ready": sig.get("zscore") is not None,
+            "min_history_sec": sig.get("min_history_sec")
+            or float(cfg.get("signal.min_signal_minutes", 120) or 120) * 60,
+            "window_sec": sig.get("window_sec"),
+            "measured_interval_sec": sig.get("measured_interval_sec"),
+            "sample_status": sig.get("sample_status") or "",
+            "data_ready": bool(sig.get("ready")),
             "degenerate": bool(sig.get("degenerate")),
             "hedge_ratio": hedge_ratio,
             "entry_threshold": float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
@@ -1267,8 +1354,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         # quote lookup momentarily returns nothing.
         px_a = la if la else sig.get("leg_a")
         px_b = lb if lb else sig.get("leg_b")
-        spot_tick = {"bid": px_a, "ask": px_a, "last": px_a} if px_a else None
-        futures_tick = {"bid": px_b, "ask": px_b, "last": px_b} if px_b else None
+        # Real bid/ask from the book where the feed carries it — never the LTP
+        # copied into both sides, which reads as a zero-width market.
+        spot_tick = ({"bid": sig.get("bid_a"), "ask": sig.get("ask_a"), "last": px_a}
+                     if px_a else None)
+        futures_tick = ({"bid": sig.get("bid_b"), "ask": sig.get("ask_b"), "last": px_b}
+                        if px_b else None)
         return jsonify({
             "position": st.get("position") or "NONE",
             "open_trade": open_trade,
@@ -1812,7 +1903,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # Arrow spread = hedge_ratio*leg_a − leg_b; use it when the signal
             # window isn't warm yet so the card still reads.
             eff_spread = spread if spread is not None else (hedge_ratio * la - lb)
-            fv = fairvalue.fair_value_block(asset_cfg, la, lb, eff_spread, hedge_ratio)
+            # No carry fair value for commodities (see the status endpoint).
+            fv = ({} if any(sessions.is_mcx(sg) for sg in _leg_segments())
+                  else fairvalue.fair_value_block(asset_cfg, la, lb, eff_spread, hedge_ratio))
             # fairvalue uses the reference's futures−spot convention (leg_b−leg_a);
             # Arrow's spread is leg_a−leg_b (the exact negative). Flip the sign so
             # the card's fair value and gap are in the SAME convention as the

@@ -291,9 +291,10 @@ class ArrowAutoTrader:
         gross = Δspread × lots × lot_size — the spread is in ₹/unit so it must be
         scaled by the contract's unit count. The reference is the actual ENTRY
         FILL spread (which already embeds entry slippage); the current side is
-        the live MID spread, so the EXIT's own slippage is NOT pre-deducted —
-        the live figure is a touch rosier than the eventual realized P&L, and ₹
-        targets should be set with a little margin. Fees are the flat round-trip
+        the EXECUTABLE closing spread (sell_spread for a LONG, buy_spread for a
+        SHORT) when the feed carries a book, so the exit's bid/ask cost IS
+        already in the figure; on an LTP-only feed it is the last-trade spread
+        and ₹ targets need a little margin. Fees are the flat round-trip
         brokerage (2 legs × entry+exit), matching the trade-log convention.
         LONG profits when the spread rises; SHORT when it falls."""
         pos = self._pos
@@ -574,6 +575,21 @@ class ArrowAutoTrader:
             self._set_snap(snap)
             return
 
+        # EXECUTABLE sides. With a book, selling the spread is judged on
+        # sell_spread (k·bid_A − ask_B) and buying it on buy_spread
+        # (k·ask_A − bid_B) — the prices the orders would actually meet. With
+        # no book at all (LTP-only feed) both fall back to the mid/LTP z. With a
+        # PARTIAL book the missing side is None: it cannot be traded.
+        z_mid, spread_mid = z, sig.get("spread")
+        has_book = any(sig.get(k) is not None for k in ("bid_a", "ask_a", "bid_b", "ask_b"))
+        if has_book:
+            z_sell, z_buy = sig.get("z_sell"), sig.get("z_buy")
+            sp_sell, sp_buy = sig.get("sell_spread"), sig.get("buy_spread")
+        else:
+            z_sell = z_buy = z
+            sp_sell = sp_buy = spread_mid
+        snap.update(z_sell=z_sell, z_buy=z_buy, sell_spread=sp_sell, buy_spread=sp_buy)
+
         entry_z = float(p.get("entry_zscore", sig.get("entry_zscore", 2.0)))
         exit_z  = float(p.get("exit_zscore", sig.get("exit_zscore", 0.0)))
         stop_z  = float(p.get("stop_zscore", sig.get("stop_zscore", 4.0)))
@@ -587,10 +603,12 @@ class ArrowAutoTrader:
 
         # Confirmation ticks: require N consecutive ticks beyond the threshold
         # before an entry fires (filters out single-tick spikes).
+        # SHORT counts on the SELL side reaching +entry, LONG on the BUY side
+        # reaching −entry — each on the price that side can actually trade at.
         confirm = max(1, int(p.get("confirmation_ticks", 1)))
-        if z >= entry_z:
+        if z_sell is not None and z_sell >= entry_z:
             self._consec_above += 1; self._consec_below = 0
-        elif z <= -entry_z:
+        elif z_buy is not None and z_buy <= -entry_z:
             self._consec_below += 1; self._consec_above = 0
         else:
             self._consec_above = self._consec_below = 0
@@ -600,7 +618,16 @@ class ArrowAutoTrader:
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
-            want_dir = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            if z_sell is not None and z_sell >= entry_z:
+                want_dir = "SHORT_SPREAD"
+            elif z_buy is not None and z_buy <= -entry_z:
+                want_dir = "LONG_SPREAD"
+            else:
+                want_dir = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            # From here on, z / spread are the side we would TRADE on.
+            z_side = z_sell if want_dir == "SHORT_SPREAD" else z_buy
+            z = z_side if z_side is not None else z_mid
+            sp_side = sp_sell if want_dir == "SHORT_SPREAD" else sp_buy
             # z-reset: clear a post-stop block once z has recovered toward the
             # mean — a LONG block (entered deep-negative) clears when z ≥ −exit_z;
             # a SHORT block when z ≤ +exit_z (robust when exit_z = 0).
@@ -674,7 +701,12 @@ class ArrowAutoTrader:
                         extra = f" (P_win={wp*100:.0f}% EV=₹{ev:.0f})"
                     snap["status"] = f"blocked: {reason}{extra}"
                 else:
-                    refused = self._enter(direction, eff_lots, z, sig.get("spread", 0.0))
+                    refused = self._enter(
+                        direction, eff_lots, z,
+                        sp_side if sp_side is not None else (spread_mid or 0.0),
+                        mid_spread=spread_mid,
+                        z_key=("z_sell" if direction == "SHORT_SPREAD" else "z_buy")
+                        if has_book else "zscore")
                     snap["status"] = refused or f"ENTRY {direction} (z={z:.2f}, {eff_lots} lot(s))"
             elif abs(z) >= entry_z:
                 c = max(self._consec_above, self._consec_below)
@@ -682,6 +714,14 @@ class ArrowAutoTrader:
             else:
                 snap["status"] = "flat — watching"
         else:
+            # A position is closed on the OPPOSITE side it was opened on: a
+            # LONG (bought) spread is closed by SELLING it, a SHORT by BUYING
+            # it. Reversion, stops and the live P&L all read that side.
+            if self._pos["direction"] == "LONG_SPREAD":
+                z_close, sp_close = z_sell, sp_sell
+            else:
+                z_close, sp_close = z_buy, sp_buy
+            z = z_close if z_close is not None else z_mid
             entry_z_sign = self._pos["entry_z"]
             # revert through exit_z back toward the mean
             reverted = (z >= exit_z) if entry_z_sign < 0 else (z <= exit_z)
@@ -689,7 +729,7 @@ class ArrowAutoTrader:
             min_hold_sec = float(p.get("min_hold_sec", 0.0))
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
-            spread_now = sig.get("spread")
+            spread_now = sp_close if sp_close is not None else spread_mid
 
             # ── live mark-to-market net P&L on the open position (₹) ──────────
             net_pnl = self._live_net_pnl(spread_now, p)
@@ -871,7 +911,8 @@ class ArrowAutoTrader:
         self._set_snap(snap)
 
     # ── actions (reuse the proven Arrow order path) ──────────────────────────
-    def _enter(self, direction: str, lots: int, z: float, spread: float) -> Optional[str]:
+    def _enter(self, direction: str, lots: int, z: float, spread: float,
+               mid_spread: Optional[float] = None, z_key: str = "zscore") -> Optional[str]:
         # Stale-signal guard: re-sample the live signal at the moment of entry
         # and refuse if the fill-time z has diverged from the DECISION z beyond
         # a configurable threshold (so a live entry can't fire on a signal that
@@ -880,7 +921,7 @@ class ArrowAutoTrader:
         p = self._params()
         max_div = float(p.get("max_entry_z_divergence", 0) or 0)
         if max_div > 0:
-            fill_z = (self._signal() or {}).get("zscore")
+            fill_z = (self._signal() or {}).get(z_key)
             if fill_z is None or abs(float(fill_z) - z) > max_div:
                 shown = "n/a" if fill_z is None else f"{float(fill_z):.2f}"
                 msg = (f"stale signal: decision z={z:.2f} vs fill z={shown} "
@@ -903,9 +944,12 @@ class ArrowAutoTrader:
                 la = lb = None
             k = float(p.get("hedge_ratio", 1.0) or 1.0)
             live_spread = (k * float(la) - float(lb)) if (la is not None and lb is not None) else None
-            if live_spread is None or abs(live_spread - spread) > max_sdiv:
+            # Compare like with like: the live MID spread against the decision
+            # MID spread (the decision's executable spread sits half a book away).
+            ref = mid_spread if mid_spread is not None else spread
+            if live_spread is None or abs(live_spread - ref) > max_sdiv:
                 shown = "n/a" if live_spread is None else f"{live_spread:.1f}"
-                msg = (f"stale signal: decision spread={spread:.1f} vs live={shown} "
+                msg = (f"stale signal: decision spread={ref:.1f} vs live={shown} "
                        f"(Δ>{max_sdiv:.1f}) — entry refused")
                 self._consec_above = self._consec_below = 0
                 self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
