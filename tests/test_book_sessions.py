@@ -63,3 +63,44 @@ def test_executor_prices_off_the_touch_for_its_side():
     ex2 = SpreadExecutor(broker_fn=lambda: None, price_fn=lambda seg, sym: 100.0,
                          params_fn=dict)
     assert ex2._px(SimpleNamespace(segment="mcx_fo", symbol="X", side="buy")) == 100.0
+
+
+def test_margin_route_is_discovered_and_remembered(arrow_broker):
+    """MCX contracts refuse the trading symbol under some exchange values;
+    the first combination Arrow answers is used, and cached."""
+    from pyarrow_client import Exchange
+    calls = []
+
+    def order_margin(ex, ident, qty, prod, ot, tt, price):
+        name = getattr(ex, "value", ex)
+        calls.append((name, ident))
+        if name == "MCX" and ident == "4242":
+            return {"data": {"requiredMargin": 65000.0}, "status": "success"}
+        raise RuntimeError("invalid trading symbol")
+
+    baskets = []
+    arrow_broker._client.order_margin = order_margin
+    arrow_broker._client.basket_margin = lambda orders: (baskets.append(orders) or
+                                                         {"data": {"requiredMargin": 30000.0}})
+    arrow_broker._sym_token = {"CRUDEOIL19OCT26F": 4242, "CRUDEOIL18DEC26F": 4242}
+    legs = [{"segment": "mcx_fo", "symbol": "CRUDEOIL19OCT26F", "side": "buy", "quantity": 100, "price": 9110},
+            {"segment": "mcx_fo", "symbol": "CRUDEOIL18DEC26F", "side": "sell", "quantity": 100, "price": 8523}]
+    res = arrow_broker.get_pair_margin(legs)
+    assert res["error"] is None
+    assert res["basket"]["total"] == 30000.0
+    assert [l["total"] for l in res["legs"]] == [65000.0, 65000.0]
+    assert baskets[0][0]["exchange"] == "MCX" and baskets[0][0]["symbol"] == "4242"
+    n = len(calls)
+    arrow_broker.get_pair_margin(legs)
+    assert len(calls) == n + 2          # cached route: one call per leg
+
+
+def test_margin_route_reports_every_refusal(arrow_broker):
+    def order_margin(*a, **k):
+        raise RuntimeError("invalid trading symbol")
+    arrow_broker._client.order_margin = order_margin
+    arrow_broker._sym_token = {}
+    res = arrow_broker.get_pair_margin([{"segment": "mcx_fo", "symbol": "X", "side": "buy",
+                                         "quantity": 1, "price": 1}])
+    assert res["basket"] is None
+    assert "MCXFO/symbol" in res["error"] and "invalid trading symbol" in res["error"]

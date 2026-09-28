@@ -13,7 +13,7 @@ import pytest
 
 # ── Fake pyarrow_client SDK ──────────────────────────────────────────────────
 class Exchange(enum.Enum):
-    NSE = "NSE"; NFO = "NFO"; BSE = "BSE"; BFO = "BFO"; MCX = "MCX"; INDEX = "INDEX"
+    NSE = "NSE"; NFO = "NFO"; BSE = "BSE"; BFO = "BFO"; MCX = "MCX"; MCXFO = "MCXFO"; NCD = "NCD"; INDEX = "INDEX"
 
 
 class OrderType(enum.Enum):

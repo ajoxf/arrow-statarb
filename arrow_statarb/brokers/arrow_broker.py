@@ -1421,7 +1421,7 @@ class ArrowBroker(BaseBroker):
     #: Keys a margin response has been seen to carry its total under, most
     #: specific first. Arrow's margin routes are undocumented beyond the SDK
     #: signature, so the reader is tolerant and says None rather than guess.
-    _MARGIN_TOTAL_KEYS = ("finalMargin", "totalMargin", "requiredMargin",
+    _MARGIN_TOTAL_KEYS = ("requiredMargin", "finalMargin", "totalMargin",
                           "marginRequired", "total", "margin", "initialMargin")
 
     @classmethod
@@ -1453,10 +1453,19 @@ class ArrowBroker(BaseBroker):
                 "benefit": _f("marginBenefit", "spreadBenefit", "benefit")}
 
     def _margin_exchanges(self, segment: str):
-        """Exchange enums to try for a margin request. The SDK says MCX margin
-        requests prefer MCXFO; the order path uses MCX. Try both."""
+        """Exchange values to try for a margin request, most likely first.
+
+        Arrow's routing codes are not consistent across routes: CRUDEOIL
+        futures are filed in the master as NSECO, QUOTE under MCXFO, and the
+        order path sends MCX. The SDK says MCX margin requests prefer MCXFO.
+        So for a commodity leg every plausible value is tried once and the
+        one Arrow accepts is remembered."""
         wire = _SEGMENT_MAP.get(segment.lower(), segment.upper())
-        names = ["MCXFO", "MCX"] if wire == "MCX" else [wire]
+        seg = segment.upper()
+        if wire == "MCX" or "CO" in seg or "MCX" in seg:
+            names = ["MCXFO", "MCX", "NSE", "NCD"]
+        else:
+            names = [wire]
         out = []
         for n in names:
             try:
@@ -1465,14 +1474,66 @@ class ArrowBroker(BaseBroker):
                 continue
         return out
 
+    @staticmethod
+    def _wire(enum_value) -> str:
+        """The value an enum puts on the wire ('MCXFO', 'LMT', 'B', 'M')."""
+        return str(getattr(enum_value, "value", enum_value))
+
+    @staticmethod
+    def _limit_type():
+        ot = getattr(OrderType, "LIMIT", None)
+        if ot is None:
+            try:
+                ot = OrderType("LMT")
+            except ValueError:
+                ot = OrderType.MARKET
+        return ot
+
+    def _margin_route(self, segment: str, symbol: str, prod_enum, tt, qty, price):
+        """(exchange, identifier, first answer) for one contract's margin
+        request, or (None, None, errors). Tries each exchange value with the
+        trading symbol, then with the numeric token; the first combination
+        Arrow answers is cached per symbol so later calls go straight to it."""
+        cache = getattr(self, "_margin_routes", None)
+        if cache is None:
+            cache = self._margin_routes = {}
+        key = (segment.lower(), symbol.upper())
+        tok = self._sym_token.get(symbol.upper())
+        combos = []
+        if key in cache:
+            combos.append(cache[key])
+        for ex in self._margin_exchanges(segment):
+            combos.append((ex, symbol))
+            if tok:
+                combos.append((ex, str(int(tok))))
+        errors = []
+        for ex, ident in combos:
+            try:
+                raw = self._client.order_margin(ex, ident, int(qty), prod_enum,
+                                                self._limit_type(), tt, float(price or 0))
+            except Exception as exc:
+                errors.append(f"{self._wire(ex)}/{'token' if ident != symbol else 'symbol'}: "
+                              f"{getattr(exc, 'message', None) or exc}")
+                continue
+            fig = self._margin_figures(raw)
+            if fig.get("total") is not None:
+                if cache.get(key) != (ex, ident):
+                    cache[key] = (ex, ident)
+                    logger.info("ArrowBroker: margin for {} answers under exchange={} "
+                                "with the {}", symbol, self._wire(ex),
+                                "token" if ident != symbol else "trading symbol")
+                return ex, ident, fig
+            errors.append(f"{self._wire(ex)}/{'token' if ident != symbol else 'symbol'}: no margin figure")
+        return None, None, errors
+
     def get_pair_margin(self, legs: List[Dict], product: str = "NRML") -> Dict:
-        """Margin for a spread, both legs TOGETHER (so an exchange calendar-
-        spread benefit is included) and each leg alone for comparison.
+        """Margin for a spread: each leg alone, and both legs TOGETHER (so an
+        exchange calendar-spread benefit is included).
 
         ``legs`` = [{segment, symbol, side ('buy'/'sell'), quantity (units),
-        price}]. Returns {basket: {...}, legs: [{...}, ...], error}. Figures are
-        None where Arrow did not answer — never estimated from notional."""
-        out: Dict = {"basket": None, "legs": [], "error": None}
+        price}]. Returns {basket: {...}|None, legs: [{...}], error}. Figures
+        are None where Arrow did not answer — never estimated from notional."""
+        out: Dict = {"basket": None, "legs": [], "routes": [], "error": None}
         if not self.connected or not self._client:
             out["error"] = "not connected"
             return out
@@ -1481,43 +1542,45 @@ class ArrowBroker(BaseBroker):
             prod_enum = ProductType(prod_wire)
         except ValueError:
             prod_enum = ProductType.NRML
-        basket_last_err = None
-        for pick in range(2):                 # 0: first exchange spelling, 1: fallback
-            orders, legs_out = [], []
-            usable = True
-            for lg in legs:
-                exchanges = self._margin_exchanges(lg["segment"])
-                if not exchanges:
-                    usable = False
-                    break
-                ex = exchanges[min(pick, len(exchanges) - 1)]
-                tt = TransactionType.BUY if lg["side"].lower() == "buy" else TransactionType.SELL
-                price = float(lg.get("price") or 0)
-                orders.append({"exchange": str(ex), "symbol": lg["symbol"],
-                               "quantity": str(int(lg["quantity"])),
-                               "product": str(prod_enum), "order": str(OrderType.LIMIT),
-                               "transactionType": str(tt), "price": str(price)})
-                try:
-                    one = self._client.order_margin(ex, lg["symbol"], int(lg["quantity"]),
-                                                    prod_enum, OrderType.LIMIT, tt, price)
-                    legs_out.append(self._margin_figures(one))
-                except Exception as exc:
-                    legs_out.append({"total": None, "span": None, "exposure": None,
-                                     "benefit": None, "error": self._format_error(exc)})
-            if not usable:
-                out["error"] = "unknown exchange segment"
-                return out
-            try:
-                basket = self._margin_figures(self._client.basket_margin(orders))
-            except Exception as exc:
-                basket, basket_last_err = None, self._format_error(exc)
-            if basket and basket.get("total") is not None:
-                out.update(basket=basket, legs=legs_out, error=None)
-                return out
-            out["legs"] = legs_out
-            if not any(len(self._margin_exchanges(lg["segment"])) > 1 for lg in legs):
-                break
-        out["error"] = basket_last_err or "Arrow returned no margin figure"
+        orders, problems = [], []
+        order_wire = {lg["segment"]: _SEGMENT_MAP.get(lg["segment"].lower(),
+                                                      lg["segment"].upper()) for lg in legs}
+        for lg in legs:
+            tt = TransactionType.BUY if lg["side"].lower() == "buy" else TransactionType.SELL
+            ex, ident, fig = self._margin_route(lg["segment"], lg["symbol"], prod_enum, tt,
+                                                lg["quantity"], lg.get("price"))
+            if ex is None:
+                out["legs"].append({"total": None, "span": None, "exposure": None,
+                                    "benefit": None})
+                problems.append(f"{lg['symbol']} — " + "; ".join(fig[:4]))
+                continue
+            out["legs"].append(fig)
+            out["routes"].append({
+                "symbol": lg["symbol"], "exchange": self._wire(ex),
+                "identifier": "token" if ident != lg["symbol"] else "trading symbol",
+                # What ORDERS send today. A mismatch is worth checking with one
+                # watched test lot before trading live.
+                "order_exchange": order_wire[lg["segment"]],
+                "matches_orders": (self._wire(ex) == order_wire[lg["segment"]]
+                                   and ident == lg["symbol"]),
+            })
+            orders.append({"exchange": self._wire(ex), "symbol": ident,
+                           "quantity": str(int(lg["quantity"])),
+                           "product": self._wire(prod_enum),
+                           "order": self._wire(self._limit_type()),
+                           "transactionType": self._wire(tt),
+                           "price": str(float(lg.get("price") or 0))})
+        if problems:
+            out["error"] = "no accepted symbol/exchange for " + " | ".join(problems)
+            return out
+        try:
+            basket = self._margin_figures(self._client.basket_margin(orders))
+            if basket.get("total") is not None:
+                out["basket"] = basket
+            else:
+                out["error"] = "basket margin answered without a figure"
+        except Exception as exc:
+            out["error"] = "basket: " + self._format_error(exc)
         return out
 
     # ── Token (for symbol lookup — Arrow uses symbols directly) ───────────────

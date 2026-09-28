@@ -3301,8 +3301,18 @@ function updateFilterStatus(elementId, passed, value) {
                 const errEl = document.getElementById('pm-error');
                 if (errEl) {
                     const e = pr.error;
-                    errEl.style.display = e ? '' : 'none';
-                    errEl.textContent = e ? 'Arrow margin calculator: ' + e : '';
+                    // Which exchange value / identifier Arrow accepted, and
+                    // whether ORDERS use the same — a mismatch means orders
+                    // may be refused the same way; check with one test lot.
+                    const routes = pr.routes || [];
+                    const odd = routes.filter(r => !r.matches_orders);
+                    let txt = e ? 'Arrow margin calculator: ' + e : '';
+                    if (!e && odd.length) txt = 'Margin answered as ' + odd.map(r =>
+                        r.symbol + ' → ' + r.exchange + ' / ' + r.identifier).join(', ')
+                        + ', but orders are sent as ' + odd[0].order_exchange
+                        + ' / trading symbol. Verify with one test lot before going live.';
+                    errEl.style.display = txt ? '' : 'none';
+                    errEl.textContent = txt;
                 }
             })
             .catch(err => console.log('Margin error:', err));

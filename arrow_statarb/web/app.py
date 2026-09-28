@@ -1531,7 +1531,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         la, lb = _leg_prices()
         key = (legs["leg_a"]["symbol"], legs["leg_b"]["symbol"], lots)
         now = time.time()
-        if _margin_cache["key"] == key and now - _margin_cache["at"] < 60:
+        # 60 s for a good answer; 5 min after a refusal, so an unaccepted
+        # symbol does not cost a round of margin calls every poll.
+        ttl = 300 if (_margin_cache.get("value") or {}).get("error") else 60
+        if _margin_cache["key"] == key and now - _margin_cache["at"] < ttl:
             pair = _margin_cache["value"]
         else:
             spec = []
@@ -1559,6 +1562,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                    if basket is not None and len(outright) == 2
                                    and all(v is not None for v in outright) else None),
                 "error": res.get("error"),
+                "routes": res.get("routes") or [],
             }
             _margin_cache.update(key=key, at=now, value=pair)
         if pair and pair.get("basket_total") is not None and avail is not None:
