@@ -603,12 +603,23 @@ class ArrowAutoTrader:
 
         # Confirmation ticks: require N consecutive ticks beyond the threshold
         # before an entry fires (filters out single-tick spikes).
+        # Trade direction (Settings): which side may OPEN a position.
+        #   sell_only — High → Low: only SHORT the spread (enter on the sell price)
+        #   buy_only  — Low → High: only go LONG (enter on the buy price)
+        #   both      — either
+        # It gates ENTRIES only. Exits always run, so a position can never be
+        # left without a way out by changing this setting while it is open.
+        td = str(p.get("trade_direction", "both") or "both").lower()
+        zs_entry = z_sell if td != "buy_only" else None
+        zb_entry = z_buy if td != "sell_only" else None
+        snap["trade_direction"] = td
+
         # SHORT counts on the SELL side reaching +entry, LONG on the BUY side
         # reaching −entry — each on the price that side can actually trade at.
         confirm = max(1, int(p.get("confirmation_ticks", 1)))
-        if z_sell is not None and z_sell >= entry_z:
+        if zs_entry is not None and zs_entry >= entry_z:
             self._consec_above += 1; self._consec_below = 0
-        elif z_buy is not None and z_buy <= -entry_z:
+        elif zb_entry is not None and zb_entry <= -entry_z:
             self._consec_below += 1; self._consec_above = 0
         else:
             self._consec_above = self._consec_below = 0
@@ -618,12 +629,19 @@ class ArrowAutoTrader:
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
-            if z_sell is not None and z_sell >= entry_z:
+            if zs_entry is not None and zs_entry >= entry_z:
                 want_dir = "SHORT_SPREAD"
-            elif z_buy is not None and z_buy <= -entry_z:
+            elif zb_entry is not None and zb_entry <= -entry_z:
                 want_dir = "LONG_SPREAD"
             else:
                 want_dir = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            # The side this setting switched off is past its threshold: say so,
+            # rather than "flat — watching", so a missed trade is explained.
+            off_side = None
+            if td == "buy_only" and z_sell is not None and z_sell >= entry_z:
+                off_side = f"sell spread at z {z_sell:+.2f} — SHORT entries are off (Buy spread only)"
+            elif td == "sell_only" and z_buy is not None and z_buy <= -entry_z:
+                off_side = f"buy spread at z {z_buy:+.2f} — LONG entries are off (Sell spread only)"
             # From here on, z / spread are the side we would TRADE on.
             z_side = z_sell if want_dir == "SHORT_SPREAD" else z_buy
             z = z_side if z_side is not None else z_mid
@@ -708,9 +726,11 @@ class ArrowAutoTrader:
                         z_key=("z_sell" if direction == "SHORT_SPREAD" else "z_buy")
                         if has_book else "zscore")
                     snap["status"] = refused or f"ENTRY {direction} (z={z:.2f}, {eff_lots} lot(s))"
-            elif abs(z) >= entry_z:
+            elif abs(z) >= entry_z and not off_side:
                 c = max(self._consec_above, self._consec_below)
                 snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
+            elif off_side:
+                snap["status"] = off_side
             else:
                 snap["status"] = "flat — watching"
         else:

@@ -952,3 +952,47 @@ def test_ltp_only_feed_falls_back_to_the_mid_z():
     state["sig"] = s
     algo._tick()
     assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+# ── trade direction: which side may OPEN a position ──────────────────────────
+
+def test_sell_only_never_goes_long():
+    algo, state, calls = _make({"trade_direction": "sell_only"})
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1)
+    for _ in range(3):
+        algo._tick()
+    assert calls["execute"] == []
+    assert "LONG entries are off" in algo.get_state()["status"]
+    state["sig"] = _book_sig(2.6, z_sell=2.1, z_buy=3.0)
+    algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+
+
+def test_buy_only_never_goes_short():
+    algo, state, calls = _make({"trade_direction": "buy_only"})
+    state["sig"] = _book_sig(2.6, z_sell=2.1, z_buy=3.0)
+    for _ in range(3):
+        algo._tick()
+    assert calls["execute"] == []
+    assert "SHORT entries are off" in algo.get_state()["status"]
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1)
+    algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]
+
+
+def test_direction_setting_never_blocks_an_EXIT():
+    """Switch to buy-only while SHORT: the short must still be closed."""
+    algo, state, calls = _make({"trade_direction": "both"})
+    state["sig"] = _book_sig(2.6, z_sell=2.1, z_buy=3.0); algo._tick()
+    assert calls["execute"] == [("SHORT_SPREAD", 1)]
+    live = dict(algo._params())
+    live["trade_direction"] = "buy_only"       # changed in Settings mid-trade
+    algo._params = lambda: live
+    state["sig"] = _book_sig(-0.2, z_sell=-0.6, z_buy=-0.1); algo._tick()
+    assert calls["close"] == [("SHORT_SPREAD", 1)]
+
+
+def test_both_is_the_default():
+    algo, state, calls = _make()
+    state["sig"] = _book_sig(-2.6, z_sell=-3.0, z_buy=-2.1); algo._tick()
+    assert calls["execute"] == [("LONG_SPREAD", 1)]

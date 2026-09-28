@@ -750,3 +750,24 @@ def test_algo_state_reports_mode_and_lots(tmp_path):
     app, _broker = _app(tmp_path)
     st = app.test_client().get("/api/algo/state").get_json()
     assert st["running"] is False and st["mode"] == "dry_run" and st["lots"] == 1
+
+
+def test_trade_direction_setting_round_trip_and_reaches_the_algo(tmp_path):
+    app, _broker = _app(tmp_path)
+    c = app.test_client()
+    assert c.get("/api/settings").get_json()["signal"]["trade_direction"] == "both"
+    r = c.post("/api/settings", json={"signal": {"trade_direction": "sell_only"}})
+    assert r.status_code == 200
+    assert c.get("/api/settings").get_json()["signal"]["trade_direction"] == "sell_only"
+    sig = c.get("/api/engine/status").get_json()["signal"]
+    assert sig["trade_direction"] == "sell_only"
+    algo = app.extensions["arrow"]["algo"]
+    assert algo._params()["trade_direction"] == "sell_only"
+
+
+def test_trade_direction_rejects_unknown_values(tmp_path):
+    app, _broker = _app(tmp_path)
+    c = app.test_client()
+    r = c.post("/api/settings", json={"signal": {"trade_direction": "sideways"}})
+    assert r.status_code == 400
+    assert c.get("/api/settings").get_json()["signal"]["trade_direction"] == "both"

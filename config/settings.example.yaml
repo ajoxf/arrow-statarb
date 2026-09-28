@@ -105,6 +105,12 @@ signal:
                              # leg_b is the CONTRACT leg (its lot size denominates
                              # P&L); leg_a is sized to match leg_b's exposure × k.
   confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+  trade_direction: both       # which side may OPEN a trade (exits never restricted):
+                              #   both      — either
+                              #   sell_only — High → Low: SHORT the spread on the
+                              #               sell price (Bid A − Ask B) only
+                              #   buy_only  — Low → High: LONG the spread on the
+                              #               buy price (Ask A − Bid B) only
   max_entry_z_divergence: 1.0 # stale-signal guard: refuse an algo entry if the
                               # z re-sampled at order time has moved more than
                               # this from the decision z. 0 = disabled.

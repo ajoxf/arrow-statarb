@@ -59,6 +59,15 @@
                         <div class="form-text">spread = k × leg_a − leg_b, to put two differently-priced legs on one scale. <strong>1 = same-scale</strong> (calendar / cash-future). For an ETF vs its future, set k ≈ future ÷ ETF (~90). leg_b is the contract leg. Auto-derive reads live prices.</div>
                     </div>
                     <div class="col-md-6">
+                        <label class="form-label fw-semibold">Trade direction</label>
+                        <select class="form-select" id="s-trade-direction">
+                            <option value="both">Both</option>
+                            <option value="sell_only">High → Low only (Sell spread)</option>
+                            <option value="buy_only">Low → High only (Buy spread)</option>
+                        </select>
+                        <div class="form-text">Which side the algo may <strong>open</strong> a trade on. High → Low sells the spread (sell A at its bid, buy B at its ask) when the sell price's z ≥ +entry; Low → High buys it when the buy price's z ≤ −entry. <strong>Exits are never restricted</strong> — an open position is always closed normally.</div>
+                    </div>
+                    <div class="col-md-6">
                         <label class="form-label">Confirmation Ticks</label>
                         <input type="number" class="form-control" id="s-confirm">
                         <div class="form-text">Consecutive ticks above threshold before entry</div>
@@ -848,6 +857,7 @@
         _set('s-exit', s.signal.exit_zscore);
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
+        _set('s-trade-direction', s.signal.trade_direction || 'both');
         _set('s-zdiv', s.signal.max_entry_z_divergence);
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
@@ -1007,6 +1017,7 @@
                 exit_zscore: +document.getElementById('s-exit').value,
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
+                trade_direction: document.getElementById('s-trade-direction').value,
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
                 max_entry_spread_divergence: +document.getElementById('s-sdiv').value,
                 max_entry_zscore: +document.getElementById('s-zmax').value,

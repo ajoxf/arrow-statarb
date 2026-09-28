@@ -792,6 +792,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         the MCX-aware price multiplier (config override, else the lot size)."""
         return _price_multiplier("leg_b")
 
+    #: Which side may OPEN a position. Exits are never restricted.
+    TRADE_DIRECTIONS = ("both", "sell_only", "buy_only")
+
+    def _trade_direction() -> str:
+        v = str(cfg.get("signal.trade_direction", "both") or "both").lower()
+        return v if v in TRADE_DIRECTIONS else "both"
+
     def _algo_trading_hours() -> Dict:
         """The algo's session window. With trading_hours.auto_from_segment (the
         default) the open/close come from the legs' exchange — MCX closes at
@@ -833,6 +840,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
+            "trade_direction": _trade_direction(),
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
             "max_entry_spread_divergence": float(s.get("max_entry_spread_divergence", 0) or 0),
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
@@ -1330,6 +1338,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "degenerate": bool(sig.get("degenerate")),
             "hedge_ratio": hedge_ratio,
             "entry_threshold": float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
+            "trade_direction": _trade_direction(),
             "current_position": st.get("position") or "NONE",
         }
 
@@ -2550,6 +2559,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "exit_zscore": s.get("exit_zscore", 0.0),
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
+                    "trade_direction": _trade_direction(),
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
                     "max_entry_spread_divergence": s.get("max_entry_spread_divergence", 0),
                     "max_entry_zscore": s.get("max_entry_zscore", 0),
@@ -2614,6 +2624,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         sd = data.get("signal") or {}
         if "persist_window" in sd:
             sig["persist_window"] = bool(sd["persist_window"])
+        if "trade_direction" in sd:
+            td = str(sd["trade_direction"] or "").lower()
+            if td not in TRADE_DIRECTIONS:
+                return jsonify({"success": False,
+                                "error": f"trade_direction must be one of {', '.join(TRADE_DIRECTIONS)}"}), 400
+            sig["trade_direction"] = td
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
                      ("resume_max_gap_min", 120), ("persist_interval_sec", 30),

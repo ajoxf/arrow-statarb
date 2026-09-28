@@ -2182,23 +2182,32 @@
         // The tile lights up when ITS price is past the entry threshold — the
         // condition the algo acts on (a SHORT on the sell price, a LONG on the buy).
         const entryZ = Number(data.entry_threshold || data.entry_zscore || 2);
+        // Trade direction (Settings): a side switched off cannot OPEN a trade.
+        const td = data.trade_direction || 'both';
+        const sideOn = { sell: td !== 'buy_only', buy: td !== 'sell_only' };
         const _fmtSide = (side, v, z, armed) => {
+            armed = armed && sideOn[side];
             const ve = document.getElementById(side + '-spread-value');
             const ze = document.getElementById(side + '-spread-z');
             const tile = document.getElementById(side + '-spread-tile');
             if (ve) ve.textContent = (v != null && isFinite(v)) ? Number(v).toFixed(2) : '—';
             if (ze) {
                 ze.textContent = (z != null && isFinite(z))
-                    ? (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ' : '—';
+                    ? (z >= 0 ? '+' : '') + Number(z).toFixed(2) : '—';
                 ze.className = 'font-monospace fw-bold ' + (armed
                     ? (side === 'sell' ? 'price-down' : 'price-up') : '');
             }
             // The threshold this side is judged against: SHORT when the sell
             // z reaches +entry, LONG when the buy z reaches −entry.
             const en = document.getElementById(side + '-spread-entry');
-            if (en) en.textContent = side === 'sell'
-                ? 'short at ≥ +' + entryZ.toFixed(2) + 'σ'
-                : 'long at ≤ −' + entryZ.toFixed(2) + 'σ';
+            if (en) {
+                en.textContent = !sideOn[side]
+                    ? 'entries OFF (' + (side === 'sell' ? 'Buy' : 'Sell') + ' spread only)'
+                    : side === 'sell' ? 'short at ≥ +' + entryZ.toFixed(2)
+                                      : 'long at ≤ −' + entryZ.toFixed(2);
+                en.className = 'font-monospace ' + (sideOn[side] ? 'text-secondary' : 'text-warning fw-bold');
+            }
+            if (tile) tile.style.opacity = sideOn[side] ? '1' : '0.55';
             if (tile) tile.style.borderColor = armed
                 ? (side === 'sell' ? 'var(--accent-red, #dc3545)' : 'var(--accent-green, #198754)')
                 : 'transparent';
