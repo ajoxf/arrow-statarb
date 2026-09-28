@@ -938,3 +938,31 @@ def test_algo_state_reports_the_lock(tmp_path):
     st = c.get("/api/algo/state").get_json()
     assert "algo is ON" in st["manual_block"]
     algo.stop()
+
+
+def test_ladder_endpoint_derives_sizes_and_marks_the_position(tmp_path):
+    import time as _t
+    app, broker, c, algo = _lock_app(tmp_path)
+    now = _t.time()
+    depth = lambda bids, asks: ([{"type": "bid", "price": p, "volume": v} for p, v in bids]
+                                + [{"type": "ask", "price": p, "volume": v} for p, v in asks])
+    books = {"NIFTY30JUN26F": {"bid": 110.0, "ask": 111.0, "ltp": 110.5, "ts": now,
+                               "depth": depth([(110.0, 150)], [(111.0, 300)])},
+             "NIFTY28JUL26F": {"bid": 10.0, "ask": 11.0, "ltp": 10.5, "ts": now,
+                               "depth": depth([(10.0, 225)], [(11.0, 75)])}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push(110.5, 10.5, ts=now - 3 + i)
+    eng._book = {"leg_a": books["NIFTY30JUN26F"], "leg_b": books["NIFTY28JUL26F"]}
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["sell_spread"] == 99.0 and d["buy_spread"] == 101.0      # 110−11, 111−10
+    rows = {r["level"]: r for r in d["rows"]}
+    # 75 units per lot: buy = min(300, 225)/75 = 3 clips; sell = min(150, 75)/75 = 1
+    assert rows[101.0]["is_best_ask"] and rows[101.0]["ask_size"] == 3
+    assert rows[99.0]["is_best_bid"] and rows[99.0]["bid_size"] == 1
+    assert d["manual_block"] is None and d["markers"] is None
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    d = c.get("/api/ladder?increment=1").get_json()
+    assert d["position"]["owner"] == "manual" and d["markers"]["break_even"] is not None

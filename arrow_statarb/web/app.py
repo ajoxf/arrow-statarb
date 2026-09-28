@@ -44,6 +44,7 @@ from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core import beta_monitor
 from arrow_statarb.core import sessions
+from arrow_statarb.core import spread_ladder
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
@@ -1700,6 +1701,77 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "available": funds.get("available"),
             "used_margin": funds.get("used"),
         })
+
+    @app.route("/api/ladder", methods=["GET"])
+    def api_ladder():
+        """The spread ladder (spread = k × A − B), sizes derived from both legs'
+        five-level books, plus the position markers and the MANUAL/ALGO lock.
+        Rows are HIGHEST price first; the best ASK row is the BUY spread, the
+        best BID row the SELL spread."""
+        legs = _read_legs()
+        out: Dict[str, Any] = {"rows": [], "sell_spread": None, "buy_spread": None,
+                               "increment": None, "markers": None,
+                               "manual_block": _manual_blocked(),
+                               "position": None, "error": None}
+        if not _have_both_legs(legs):
+            out["error"] = "Assign both legs in Setup first."
+            return jsonify(out)
+        sig = signal_engine.get_signal() or {}
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        book = _leg_book() or {}
+        da = (book.get("leg_a") or {}).get("depth")
+        db = (book.get("leg_b") or {}).get("depth")
+        # units per clip: one ladder "Qty" = the lots one spread order sends
+        try:
+            per = {sym: q * _resolve_lot_size(seg, sym)
+                   for seg, sym, _side, q in _order_legs("LONG_SPREAD", 1)}
+        except Exception:
+            per = {}
+        ua = per.get(legs["leg_a"]["symbol"])
+        ub = per.get(legs["leg_b"]["symbol"])
+        broker = active.get()
+        ticks = []
+        for lk, mult in (("leg_a", k), ("leg_b", 1.0)):
+            try:
+                t = float(broker.resolve_tick_size(legs[lk]["segment"], legs[lk]["symbol"])) \
+                    if broker and hasattr(broker, "resolve_tick_size") else 0.0
+            except Exception:
+                t = 0.0
+            if t > 0:
+                ticks.append(t * mult)
+        inc = float(request.args.get("increment") or 0) or (max(ticks) if ticks
+              else float(cfg.get("execution.price_tick_size", 0.05) or 0.05))
+        count = max(5, min(81, int(request.args.get("count", 25) or 25)))
+        sell, buy = sig.get("sell_spread"), sig.get("buy_spread")
+        op = _open_position_view()
+        anchor = None
+        if op:
+            _p = _algo_params()
+            if op["owner"] == "algo":
+                st = arrow_algo.get_state() or {}
+                lv = st.get("spread_levels")
+            else:
+                j = op["journal"]
+                lv = arrow_algo._spread_levels(_p, 0.0, 0.0, pos={
+                    "direction": j["direction"], "lots": j["lots"],
+                    "entry_spread": j.get("entry_spread"),
+                    "entry_fill_spread": j.get("entry_spread"),
+                    "entry_leg_a": j.get("leg_a_price"), "entry_leg_b": j.get("leg_b_price")})
+            out["markers"] = lv
+            out["position"] = {"owner": op["owner"], "direction": op["direction"],
+                               "lots": op["lots"]}
+        out.update(
+            rows=spread_ladder.build(da, db, k, ua, ub, sell, buy, inc, count, anchor),
+            sell_spread=sell, buy_spread=buy, z_sell=sig.get("z_sell"), z_buy=sig.get("z_buy"),
+            increment=inc, book=bool(da and db),
+            entry_threshold=float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
+            trade_direction=_trade_direction(),
+            lots=int(float(cfg.get("risk.lots_per_trade", 1) or 1)),
+            legs=[legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]])
+        if not out["rows"]:
+            out["error"] = ("No Sell/Buy spread yet — waiting for both legs' bid and ask."
+                            if sell is None or buy is None else "Cannot build the ladder.")
+        return jsonify(out)
 
     _margin_cache: Dict[str, Any] = {"key": None, "at": 0.0, "value": None}
 

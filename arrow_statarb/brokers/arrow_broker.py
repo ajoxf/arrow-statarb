@@ -967,6 +967,25 @@ class ArrowBroker(BaseBroker):
                 prices.append(pr / 100.0)
         return pick(prices) if prices else None
 
+    @staticmethod
+    def _depth_levels(bids, asks) -> Optional[List[Dict]]:
+        out = []
+        for side, rows in (("bid", bids), ("ask", asks)):
+            lv = []
+            for r in rows or []:
+                g = r if isinstance(r, dict) else {"price": getattr(r, "price", None),
+                                                   "quantity": getattr(r, "quantity", None)}
+                try:
+                    pr = float(g.get("price") or 0) / 100.0
+                    q = float(g.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pr > 0 and q > 0:
+                    lv.append({"type": side, "price": pr, "volume": q})
+            lv.sort(key=lambda x: -x["price"] if side == "bid" else x["price"])
+            out.extend(lv)
+        return out or None
+
     def _ingest_tick(self, tick) -> None:
         """One DataStream tick → the LTP cache and the top-of-book cache.
         Prices arrive as integers in PAISE (1 rupee = 100 paise). A tick that
@@ -988,6 +1007,10 @@ class ArrowBroker(BaseBroker):
             "bid": bid if has_depth else prev.get("bid"),
             "ask": ask if has_depth else prev.get("ask"),
             "ltp": ltp if ltp > 0 else prev.get("ltp"),
+            # All five levels a side, for the spread ladder's derived sizes:
+            # [{type: 'bid'|'ask', price (rupees), volume}], bids best (highest)
+            # first then asks best (lowest) first. Empty levels are dropped.
+            "depth": self._depth_levels(bids, asks) if has_depth else prev.get("depth"),
             "ts": time.time(),
         }
         if book["bid"] is not None and book["ask"] is not None and book["bid"] > book["ask"]:
