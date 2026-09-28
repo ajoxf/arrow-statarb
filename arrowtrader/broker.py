@@ -443,18 +443,21 @@ class ArrowSession:
     SEGMENT_ROUTES = (('/mcx', 'mcx_fo'),)
 
     def _extra_segment_rows(self, have):
-        """Rows for segments `/all` did not carry, from their own routes.
+        """Rows from each segment's own route, ALWAYS asked for.
 
-        Asked for where `/all` came back with no FUTURES for the
-        segment — not merely no rows.
+        "Does `/all` already have this segment's futures?" was the
+        condition, and it is the wrong question twice over. First it was
+        "any row at all", which one option satisfied. Then it was "any
+        future", which one FAR-DATED future satisfies: a live `/all`
+        was seen carrying CRUDEOIL from Jun-2027 onwards and not one of
+        the months in between, so `/mcx` was never asked and the
+        picker offered next year's contracts as the front month. No
+        test on `/all` can tell a complete segment from a partial one,
+        so the route is asked every time and the two are merged.
 
-        THE DIFFERENCE IS THE WHOLE POINT. Testing "did `/all` mention
-        this segment at all" is satisfied by a single option, so a
-        master carrying MCX's entire option chain and not one future
-        looks complete, `/mcx` is never asked, and the contracts this
-        terminal actually trades never arrive. What the operator sees
-        is an empty futures list on a segment the page has just called
-        ready.
+        Duplicates cost nothing: the Master keeps the FIRST row for a
+        trading symbol, so a contract in both keeps its `/all` row, and
+        the count below is only what `/mcx` ADDED.
 
         A route that is not there is still not an error: it means this
         account's `/all` is the whole story.
@@ -465,23 +468,12 @@ class ArrowSession:
         if not callable(get) or routes is None:
             return extra
         root = getattr(routes, '_root_url', '') or ''
-        seen = set()
-        for row in have:
-            exch = str(instr.field(row, 'ExchSeg', 'exch_seg', 'exchseg')
-                       or '').strip().upper()
-            if not exch:
-                continue
-            symbol = instr.field(row, 'TradingSymbol', 'trading_symbol',
-                                 'tsym')
-            kind = instr.classify(
-                exch, instr.field(row, 'OptionType', 'option_type',
-                                  'optiontype'),
-                symbol, instr.field(row, 'StrikePrice', 'strike'))
-            if kind == 'future':
-                seen.add(exch)
+        held = {str(instr.field(row, 'TradingSymbol', 'trading_symbol',
+                                'tsym') or '').strip().upper()
+                for row in have}
         for route, key in self.SEGMENT_ROUTES:
             segment = self.segments.get(key)
-            if segment is None or seen & set(segment.spellings()):
+            if segment is None:
                 continue
             try:
                 found = instr.parse_master(get(root + route))
@@ -492,11 +484,16 @@ class ArrowSession:
                 logging.info('Arrow: %s carries no extra instruments (%s)',
                              route, error)
                 continue
+            new = [row for row in found
+                   if str(instr.field(row, 'TradingSymbol', 'trading_symbol',
+                                      'tsym') or '').strip().upper()
+                   not in held]
+            logging.info('Arrow: %s answered %d %s contracts, %d of them '
+                         'not on /all', route, len(found), segment.label,
+                         len(new))
             if found:
-                logging.info('Arrow: %s added %d %s contracts that /all did '
-                             'not carry', route, len(found), segment.label)
-                self.master_sources[route] = len(found)
-                extra.extend(found)
+                self.master_sources[route] = len(new)
+            extra.extend(new)
         return extra
 
     def shutdown(self):

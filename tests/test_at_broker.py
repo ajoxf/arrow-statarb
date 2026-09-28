@@ -202,20 +202,50 @@ def test_MCX_is_fetched_when_all_has_its_OPTIONS_but_NO_FUTURES(
     assert built.master.lot_size('GOLD05DEC25F') == 100
 
 
-def test_the_extra_route_is_NOT_asked_for_when_all_already_has_it(
+def test_MCX_is_fetched_when_all_has_only_the_FAR_months(
         arrow_sdk, monkeypatch):
-    """The control. `/all` on a live account is ~223k rows and the
-    commodity rows are in it or they are not; asking a second time for
-    something already held is a slower connect for nothing."""
+    """The case that shipped. A live `/all` carried CRUDEOIL from
+    Jun-2027 onwards and none of the nearer months; one far future was
+    enough to call MCX complete, `/mcx` was never asked, and the picker
+    offered next year's contract as the front month."""
     from arrowtrader.broker import ArrowSession
     from arrowtrader.segments import SegmentTable
-    asked = []
-    monkeypatch.setattr(F.FakeArrowClient, '_get',
-                        lambda self, url, **kw: asked.append(url) or [])
+    far_only = [row for row in F.MASTER
+                if row['TradingSymbol'] != 'GOLD05DEC25F']
+    assert any(row['ExchSeg'] == 'MCXFO' and
+               row['TradingSymbol'].endswith('F') for row in far_only), (
+        'the fixture must still carry an MCX future, or it proves nothing')
+    monkeypatch.setattr(F.FakeArrowClient, 'get_instruments',
+                        lambda self: list(far_only))
+    monkeypatch.setattr(
+        F.FakeArrowClient, 'mcx_rows',
+        [row for row in F.MASTER if row['ExchSeg'] == 'MCXFO'])
     built = ArrowSession(F.Account(), SegmentTable())
     assert built.initialize() is True
-    assert asked == []
-    assert built.master_sources == {'/all': 7}
+    assert built.master.lot_size('GOLD05DEC25F') == 100
+    gold = [c.trading_symbol for c in
+            built.master.contracts('mcx_fo', 'GOLD', 'future')]
+    assert gold[0] == 'GOLD05DEC25F', gold
+    # Only what /all lacked is counted, and nothing is held twice.
+    assert built.master_sources['/mcx'] == 1
+    assert built.master.rows == len(F.MASTER)
+
+
+def test_rows_on_BOTH_routes_keep_their_all_row_and_count_once(
+        arrow_sdk, monkeypatch):
+    """Asking every time must not double the master or re-point a
+    contract `/all` already described."""
+    from arrowtrader.broker import ArrowSession
+    from arrowtrader.segments import SegmentTable
+    monkeypatch.setattr(
+        F.FakeArrowClient, 'mcx_rows',
+        [dict(row, LotSize='999') for row in F.MASTER
+         if row['ExchSeg'] == 'MCXFO'])
+    built = ArrowSession(F.Account(), SegmentTable())
+    assert built.initialize() is True
+    assert built.master_sources == {'/all': 7, '/mcx': 0}
+    assert built.master.rows == 7
+    assert built.master.lot_size('GOLD05DEC25F') == 100
 
 
 def test_a_broker_with_NO_such_route_still_connects(arrow_sdk, monkeypatch):
