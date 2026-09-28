@@ -349,8 +349,10 @@
                             <div class="metric-label mb-1" style="font-size:0.7rem; letter-spacing:0.04em;">
                                 <strong>SELL SPREAD</strong> <span class="text-secondary">Bid A − Ask B</span></div>
                             <div class="font-monospace fw-bold price-down" id="sell-spread-value" style="font-size: 1.9rem; line-height:1.1;">&mdash;</div>
-                            <div class="font-monospace mt-1" style="font-size: 0.95rem;">
-                                <span id="sell-spread-z" class="text-secondary">&mdash;</span>
+                            <div class="mt-2 pt-1" style="border-top: 1px solid var(--border-color);">
+                                <div class="metric-label" style="font-size:0.62rem; letter-spacing:0.04em;">Z-SCORE</div>
+                                <div class="font-monospace fw-bold" id="sell-spread-z" style="font-size: 1.6rem; line-height:1.1;">&mdash;</div>
+                                <div class="text-secondary font-monospace" id="sell-spread-entry" style="font-size: 0.65rem;"></div>
                             </div>
                             <div id="sell-spread-note" class="text-secondary" style="font-size: 0.62rem;">short entry · long exit</div>
                         </div>
@@ -361,8 +363,10 @@
                             <div class="metric-label mb-1" style="font-size:0.7rem; letter-spacing:0.04em;">
                                 <strong>BUY SPREAD</strong> <span class="text-secondary">Ask A − Bid B</span></div>
                             <div class="font-monospace fw-bold price-up" id="buy-spread-value" style="font-size: 1.9rem; line-height:1.1;">&mdash;</div>
-                            <div class="font-monospace mt-1" style="font-size: 0.95rem;">
-                                <span id="buy-spread-z" class="text-secondary">&mdash;</span>
+                            <div class="mt-2 pt-1" style="border-top: 1px solid var(--border-color);">
+                                <div class="metric-label" style="font-size:0.62rem; letter-spacing:0.04em;">Z-SCORE</div>
+                                <div class="font-monospace fw-bold" id="buy-spread-z" style="font-size: 1.6rem; line-height:1.1;">&mdash;</div>
+                                <div class="text-secondary font-monospace" id="buy-spread-entry" style="font-size: 0.65rem;"></div>
                             </div>
                             <div id="buy-spread-note" class="text-secondary" style="font-size: 0.62rem;">long entry · short exit</div>
                         </div>
@@ -2185,10 +2189,16 @@
             if (ve) ve.textContent = (v != null && isFinite(v)) ? Number(v).toFixed(2) : '—';
             if (ze) {
                 ze.textContent = (z != null && isFinite(z))
-                    ? 'z ' + (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ' : 'z —';
-                ze.className = armed ? 'fw-bold ' + (side === 'sell' ? 'price-down' : 'price-up')
-                                     : 'text-secondary';
+                    ? (z >= 0 ? '+' : '') + Number(z).toFixed(2) + 'σ' : '—';
+                ze.className = 'font-monospace fw-bold ' + (armed
+                    ? (side === 'sell' ? 'price-down' : 'price-up') : '');
             }
+            // The threshold this side is judged against: SHORT when the sell
+            // z reaches +entry, LONG when the buy z reaches −entry.
+            const en = document.getElementById(side + '-spread-entry');
+            if (en) en.textContent = side === 'sell'
+                ? 'short at ≥ +' + entryZ.toFixed(2) + 'σ'
+                : 'long at ≤ −' + entryZ.toFixed(2) + 'σ';
             if (tile) tile.style.borderColor = armed
                 ? (side === 'sell' ? 'var(--accent-red, #dc3545)' : 'var(--accent-green, #198754)')
                 : 'transparent';
