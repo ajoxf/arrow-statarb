@@ -2254,6 +2254,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_algo_state():
         st = arrow_algo.get_state()
         st["dry_run"] = _is_dry_run()
+        # The shared Algo control on every page reads these three to say
+        # exactly what "ON" means: routing mode and the size it will trade.
+        st["mode"] = _mode()
+        st["lots"] = int(_algo_lots["lots"])
         return jsonify(st)
 
     @app.route("/api/reconcile", methods=["GET"])

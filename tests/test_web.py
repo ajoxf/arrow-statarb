@@ -727,3 +727,21 @@ def test_status_publishes_executable_spreads_and_real_readiness(tmp_path):
     # 4 s sampled of a 2 h warm-up is NOT ready, even though a z exists
     assert sig["zscore"] is not None and sig["data_ready"] is False
     assert sig["history_sec"] == 4.0
+
+
+def test_every_page_has_the_one_shared_algo_control(tmp_path):
+    """One Algo on/off control, identical on every page — no page-specific
+    switches that can disagree about whether the algo is running."""
+    app, _broker = _app(tmp_path)
+    c = app.test_client()
+    for page in ("/", "/settings", "/analysis", "/dashboard", "/dashboard-legacy"):
+        html = c.get(page).get_data(as_text=True)
+        assert html.count('id="algo-ctl"') == 1, page
+        for old in ('id="algoSwitch"', 'id="nav-algo-btn"', 'id="algo-toggle"'):
+            assert old not in html, (page, old)
+
+
+def test_algo_state_reports_mode_and_lots(tmp_path):
+    app, _broker = _app(tmp_path)
+    st = app.test_client().get("/api/algo/state").get_json()
+    assert st["running"] is False and st["mode"] == "dry_run" and st["lots"] == 1

@@ -360,12 +360,10 @@
                 <span id="algo-mode-badge" class="badge bg-warning text-dark">DRY-RUN</span>
             </div>
             <div class="card-body">
-                <div class="form-check form-switch d-flex justify-content-between align-items-center m-0">
-                    <span><label class="form-check-label fw-bold" for="algo-toggle">Algorithm Active</label>
-                        <div class="small text-secondary">Executes trades automatically on signals</div></span>
-                    <span class="d-flex align-items-center">
-                        <input class="form-check-input me-2" type="checkbox" id="algo-toggle" role="switch">
-                        <span id="algo-status" class="text-muted">OFF</span></span>
+                <div class="d-flex justify-content-between align-items-center m-0">
+                    <span><span class="fw-bold">Algorithm</span>
+                        <div class="small text-secondary">Turn it on or off with the ALGO button in the top bar — the same control on every page.</div></span>
+                    <span id="algo-status" class="text-muted fw-bold">OFF</span>
                 </div>
                 <div class="font-monospace small mt-2" id="algo-state-line">idle</div>
                 <hr>
@@ -1059,22 +1057,12 @@
     }
 
     // ── Algorithm toggle + state ─────────────────────────────────────────────
-    document.getElementById('algo-toggle').addEventListener('change', async function () {
-        const enabled = this.checked;
-        const ep = enabled ? '/api/algo/start' : '/api/algo/stop';
-        const body = enabled ? JSON.stringify({ lots: parseInt(document.getElementById('mt-lots').value) || 1 }) : null;
-        try {
-            const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body }).then(x=>x.json());
-            if (enabled && !r.success) { this.checked=false; uiToast('Could not start algo: ' + (r.error||'unknown'), 'danger'); return; }
-            log('Algorithm ' + (enabled?'STARTED':'STOPPED'), 'log-warning');
-        } catch (e) { this.checked=false; uiToast('Algo toggle failed: ' + e, 'danger'); }
-    });
     let _lastAlgoStatus = '';
     async function pollAlgoState() {
         try {
             const s = await fetch('/api/algo/state').then(r => r.json());
-            const tog = document.getElementById('algo-toggle'), stEl = document.getElementById('algo-status');
-            tog.checked = !!s.running; stEl.textContent = s.running?'ON':'OFF';
+            const stEl = document.getElementById('algo-status');
+            stEl.textContent = s.running?'ON':'OFF';
             stEl.className = s.running?'text-success':'text-muted';
             const el = document.getElementById('algo-state-line');
             if (!s.running) { el.textContent = 'idle'; }
