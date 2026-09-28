@@ -357,7 +357,7 @@
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span><i class="bi bi-robot me-2"></i>Algorithm Control</span>
-                <span id="algo-mode-badge" class="badge bg-warning text-dark">DRY-RUN</span>
+                <span id="algo-mode-badge" class="badge" data-mode-badge>MODE ?</span>
             </div>
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center m-0">
@@ -849,7 +849,6 @@
             const meta = m === 'live' ? ['bg-danger', 'LIVE', 'LIVE mode — real orders are transmitted to Arrow']
                 : m === 'live_sim' ? ['bg-info text-dark', 'LIVE-SIM', 'Live-Sim — the real executor runs against a simulated broker (no real orders)']
                 : ['bg-warning text-dark', 'DRY-RUN', 'Dry-run mode — signals fire but no real orders are placed'];
-            b.className = 'badge ' + meta[0]; b.textContent = meta[1];
             document.getElementById('mode-help').textContent = meta[2];
             // Offer the two non-current modes; hide the active one.
             document.getElementById('to-live').classList.toggle('d-none', m === 'live');

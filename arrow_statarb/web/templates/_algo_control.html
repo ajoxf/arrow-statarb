@@ -11,6 +11,8 @@
     open and unmanaged, and says so.
   - The browser tab title is prefixed with the state.
 #}
+<span id="mode-ctl" class="badge mode-ctl mode-ctl-unknown" data-mode-badge
+      title="Order-routing mode, as the server reports it (checked every 2 s)">MODE ?</span>
 <button type="button" id="algo-ctl" class="btn btn-sm algo-ctl algo-ctl-unknown"
         onclick="AlgoCtl.click()" title="Algo state, as the server reports it (checked every 2 s)">
     <span class="algo-ctl-dot"></span>
@@ -43,6 +45,15 @@
     .algo-ctl-on .algo-ctl-dot, .algo-ctl-on-live .algo-ctl-dot { animation: algo-ctl-pulse 1.2s infinite; }
     .algo-ctl-unknown { color: #000; border-color: #ffc107; background: #ffc107; }
     .algo-ctl-busy    { opacity: 0.6; pointer-events: none; }
+    /* Red top stripe on EVERY page while the server says LIVE (set by AlgoCtl). */
+    body.mode-live::before { content: ''; display: block; position: fixed; top: 0; left: 0; right: 0;
+                             height: 3px; background: #dc3545; z-index: 9999; }
+    body.mode-live .navbar { border-bottom: 2px solid #dc3545 !important; }
+    .mode-ctl { font-size: 0.75rem; letter-spacing: 0.04em; padding: 0.4em 0.7em; }
+    .mode-ctl-live     { background: #dc3545 !important; color: #fff !important; }
+    .mode-ctl-live_sim { background: #0dcaf0 !important; color: #000 !important; }
+    .mode-ctl-dry_run  { background: #ffc107 !important; color: #000 !important; }
+    .mode-ctl-unknown  { background: #6c757d !important; color: #fff !important; }
     @keyframes algo-ctl-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
 </style>
 
@@ -59,7 +70,33 @@ const AlgoCtl = (function () {
         alert(msg);
     }
 
+    const MODE_HELP = {
+        live: 'LIVE — real orders are sent to Arrow',
+        live_sim: 'LIVE-SIM — real prices, simulated broker: no real orders',
+        dry_run: 'DRY-RUN — signals only: no orders of any kind',
+    };
+
+    // Every mode display on the page reads the SAME server answer as the
+    // Algo button: [data-mode-badge] gets the label, [data-live-only] is
+    // shown only while the mode is LIVE.
+    function renderMode() {
+        const m = state ? state.mode : null;
+        const label = m ? (MODE_LABEL[m] || String(m).toUpperCase()) : 'MODE ?';
+        document.querySelectorAll('[data-mode-badge]').forEach(el => {
+            el.textContent = label;
+            el.classList.remove('mode-ctl-live', 'mode-ctl-live_sim', 'mode-ctl-dry_run', 'mode-ctl-unknown',
+                                'bg-secondary', 'bg-warning', 'bg-info', 'bg-danger', 'bg-success', 'text-dark');
+            el.classList.add('badge', 'mode-ctl-' + (m || 'unknown'));
+            el.title = m ? MODE_HELP[m] || label : 'Cannot reach the server — mode UNKNOWN';
+        });
+        document.body.classList.toggle('mode-live', m === 'live');
+        document.querySelectorAll('[data-live-only]').forEach(el => {
+            el.classList.toggle('d-none', m !== 'live');
+        });
+    }
+
     function render() {
+        renderMode();
         const btn = document.getElementById('algo-ctl');
         const txt = document.getElementById('algo-ctl-text');
         if (!btn || !txt) return;

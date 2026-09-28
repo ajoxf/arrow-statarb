@@ -1488,6 +1488,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return jsonify({
             "exchange": "Arrow",
             "is_demo": _mode() != "live",
+            "mode": _mode(),
             "has_api_keys": bool(has_keys),
             "has_adapters": connected,
             "connected": connected,

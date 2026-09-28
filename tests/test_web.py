@@ -737,6 +737,11 @@ def test_every_page_has_the_one_shared_algo_control(tmp_path):
     for page in ("/", "/settings", "/analysis", "/dashboard", "/dashboard-legacy"):
         html = c.get(page).get_data(as_text=True)
         assert html.count('id="algo-ctl"') == 1, page
+        # the mode badge is the shared one, filled from the server — never
+        # a label baked in when the page was served
+        assert html.count('id="mode-ctl"') == 1, page
+        assert "PAPER" not in html and "DEMO SERVER" not in html, page
+        assert 'class="mode-live"' not in html, page
         for old in ('id="algoSwitch"', 'id="nav-algo-btn"', 'id="algo-toggle"'):
             assert old not in html, (page, old)
 

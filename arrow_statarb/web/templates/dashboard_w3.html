@@ -78,19 +78,17 @@
 </div>
 
 <!-- Live Trading Warning Banner (only shown when actually trading real money) -->
-{% if not config.paper_trading and not is_demo %}
-<div class="alert mb-3" id="live-trading-banner" style="background:#1a0000;border:2px solid #dc3545;color:#fff;">
+<div class="alert mb-3 d-none" id="live-trading-banner" data-live-only style="background:#1a0000;border:2px solid #dc3545;color:#fff;">
     <div class="d-flex align-items-center">
         <i class="bi bi-exclamation-octagon-fill me-2 text-danger" style="font-size:1.4rem;"></i>
         <div>
             <strong class="text-danger">LIVE TRADING — REAL FUNDS AT RISK</strong>
             <div style="font-size:0.82rem;color:#ccc;">
-                Orders execute against real markets. Verify position size, leverage, and stop-loss before enabling the algo.
+                Orders go to Arrow for real. Check the lots, the pair's units per lot and the available margin before starting the algo.
             </div>
         </div>
     </div>
 </div>
-{% endif %}
 
 <!-- Data Feed Interruption Banner -->
 <div class="alert mb-3 d-none" id="feed-stale-banner"
@@ -840,9 +838,7 @@
             <div class="card-body py-2" style="font-size: 0.8rem;">
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-secondary">Mode:</span>
-                    <span id="paper-mode" class="badge {% if config.paper_trading %}bg-warning{% elif is_demo %}bg-info{% else %}bg-danger{% endif %}" style="font-size: 0.7rem;">
-                        {% if config.paper_trading %}PAPER{% elif is_demo %}DEMO SERVER{% else %}LIVE{% endif %}
-                    </span>
+                    <span id="paper-mode" class="badge" data-mode-badge style="font-size: 0.7rem;">MODE ?</span>
                 </div>
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-secondary">Asset:</span>
@@ -3265,8 +3261,9 @@ function updateFilterStatus(elementId, passed, value) {
             .then(data => {
                 const exchangeEl = document.getElementById('exchange-name');
                 if (exchangeEl) {
-                    let status = data.exchange + (data.is_demo ? ' · paper' : ' · live');
-                    exchangeEl.style.color = data.is_demo ? 'var(--accent-blue)' : 'var(--accent-green)';
+                    const _ml = {live: 'LIVE', live_sim: 'LIVE-SIM', dry_run: 'DRY-RUN'}[data.mode] || 'MODE ?';
+                    let status = data.exchange + ' · ' + _ml;
+                    exchangeEl.style.color = data.mode === 'live' ? 'var(--accent-red, #dc3545)' : 'var(--accent-blue)';
                     if (!data.has_api_keys) status += ' — no credentials';
                     else if (!data.connected) status += ' — not connected';
                     exchangeEl.textContent = status;
