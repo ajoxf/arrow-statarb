@@ -415,14 +415,22 @@
     var rows = d.rows || [];
     var tb = $('tbody', body);
     var dig = d.increment && d.increment < 1 ? 2 : 0;
-    var marks = {};
+    var marks = {}, markTips = {};
     var m = d.markers;
-    if (m) {
+    if (m && rows.length) {
+      // A level off the visible ladder is NOT drawn at the edge price as if it
+      // were there: it goes on the edge row with an arrow (↑ above, ↓ below).
+      var top = rows[0].level, bottom = rows[rows.length - 1].level;
+      var half = (d.increment || 0) / 2;
       [['entry', 'ENTRY'], ['break_even', 'BE'], ['take_profit', 'TP'], ['stop', 'SL']].forEach(function (p) {
-        var lv = nearestRow(rows, m[p[0]]);
-        if (lv != null && m[p[0]] != null) {
-          marks[lv] = (marks[lv] ? marks[lv] + ' ' : '') + p[1];
-        }
+        var v = m[p[0]];
+        if (v == null) { return; }
+        var lv, tag = p[1];
+        if (v > top + half) { lv = top; tag += '↑'; }
+        else if (v < bottom - half) { lv = bottom; tag += '↓'; }
+        else { lv = nearestRow(rows, v); }
+        marks[lv] = (marks[lv] ? marks[lv] + ' ' : '') + tag;
+        markTips[lv] = (markTips[lv] ? markTips[lv] + ' · ' : '') + p[1] + ' ' + num(v, 2);
       });
     }
     var sell = d.sell_spread, buy = d.buy_spread;
@@ -439,7 +447,7 @@
       var bidTxt = r.bid_size != null ? r.bid_size : (r.is_best_bid ? '▲' : '');
       var askTxt = r.ask_size != null ? r.ask_size : (r.is_best_ask ? '▼' : '');
       return '<tr class="' + cls.join(' ') + '">' +
-        '<td class="work' + (mk ? ' mark ' + mkCls : '') + '">' + esc(mk) + '</td>' +
+        '<td class="work' + (mk ? ' mark ' + mkCls : '') + '"' + (mk ? ' title="' + esc(markTips[r.level]) + '"' : '') + '>' + esc(mk) + '</td>' +
         '<td class="' + (bidCell ? 'bid' : '') + (r.is_best_bid ? ' has-qty clickable' : '') + '"' +
           (r.is_best_bid ? ' title="SELL the spread here (Bid A − Ask B)' + (direction === 'buy_only' ? ' — note: the ALGO only buys; this is manual' : '') + '"' : '') + '>' +
           (bidCell ? bidTxt : '') + '</td>' +
