@@ -293,7 +293,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return [(sa, ya, "buy", qa), (sb, yb, "sell", qb)]
         return [(sa, ya, "sell", qa), (sb, yb, "buy", qb)]
 
-    def _spread_order(legs, label: str, verify_flat: bool = False) -> Dict:
+    def _spread_order(legs, label: str, verify_flat: bool = False,
+                      source: str = "manual") -> Dict:
         """Execute both legs according to the current mode:
           dry_run   → simulated, nothing leaves the process;
           live_sim  → real SpreadExecutor against a SimBroker (no real orders);
@@ -331,7 +332,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             leg_orders.append(LegOrder(segment=seg, symbol=sym, side=side,
                                        units=qty * lot_size, token=tok))
         res = executor.execute(leg_orders, label=label, verify_flat=verify_flat)
-        execution_log.record(res, label, mode)        # telemetry
+        execution_log.record(res, label, mode, source=source)        # telemetry
         return res
 
     def _current_spread() -> Optional[float]:
@@ -457,14 +458,79 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     logger.critical("clip: could not unwind %s after error", fsym)
             return {"success": False, "results": results, "error": str(exc)}
 
-    def _place(legs, label: str, verify_flat: bool = False) -> Dict:
+    def _place(legs, label: str, verify_flat: bool = False, source: str = "manual") -> Dict:
         """Route to the clip engine or the legacy SpreadExecutor per settings."""
         if _engine_mode() == "clip":
             return _clip_spread_order(legs, label)
-        return _spread_order(legs, label, verify_flat=verify_flat)
+        return _spread_order(legs, label, verify_flat=verify_flat, source=source)
+
+    # ── MANUAL / ALGO lock (whole account) ───────────────────────────────────
+    # One account, one pair, one position at a time, and exactly one owner:
+    #   • while the algo is ON, no manual order of any kind is accepted;
+    #   • while a MANUAL position is open — or a manual order is executing —
+    #     the algo cannot be started and cannot enter.
+    # Enforced HERE, where every order passes, not only by greying out buttons.
+    _manual_busy = threading.Lock()      # held for the life of a manual order
+
+    def _open_position_view() -> Optional[Dict]:
+        """The one open position, with its OWNER: the algo's in-memory position
+        first (it is authoritative while it exists), else the journal's open
+        record. None when flat."""
+        st = arrow_algo.get_state() or {}
+        pos = st.get("position")
+        if isinstance(pos, dict) and pos.get("direction"):
+            return {"owner": "algo", "direction": pos["direction"],
+                    "lots": int(pos.get("lots", 1) or 1), "algo_pos": pos}
+        op = trade_log.open_position()
+        if op and op.get("direction"):
+            return {"owner": op.get("source") or "manual", "direction": op["direction"],
+                    "lots": int(op.get("lots", 1) or 1), "journal": op}
+        return None
+
+    def _manual_blocked() -> Optional[str]:
+        if arrow_algo.running:
+            return ("The algo is ON — manual orders are not allowed. "
+                    "Turn the algo OFF first.")
+        return None
+
+    def _algo_blocked() -> Optional[str]:
+        """Why the algo may not start / enter now, or None."""
+        if _manual_busy.locked():
+            return "A manual order is being executed — wait for it to finish."
+        op = _open_position_view()
+        if op and op["owner"] != "algo":
+            return (f"A MANUAL {op['direction'].replace('_', ' ')} position "
+                    f"({op['lots']} lot(s)) is open — close it before starting the algo.")
+        return None
 
     def _spread_execute(direction: str, lots: int, source: str = "manual",
                         z: Optional[float] = None, spread: Optional[float] = None) -> Dict:
+        if source == "algo":
+            why = _algo_blocked()
+            if why:
+                return {"success": False, "error": why}
+            return _spread_execute_unlocked(direction, lots, source, z, spread)
+        why = _manual_blocked()
+        if why:
+            return {"success": False, "error": why}
+        op = _open_position_view()
+        if op:
+            return {"success": False,
+                    "error": (f"A {op['owner'].upper()} {op['direction'].replace('_', ' ')} "
+                              f"position is already open — close it first "
+                              f"(one position at a time).")}
+        if not _manual_busy.acquire(blocking=False):
+            return {"success": False, "error": "Another manual order is still executing."}
+        try:
+            if arrow_algo.running:          # re-check under the lock
+                return {"success": False, "error": _manual_blocked()}
+            return _spread_execute_unlocked(direction, lots, source, z, spread)
+        finally:
+            _manual_busy.release()
+
+    def _spread_execute_unlocked(direction: str, lots: int, source: str = "manual",
+                                 z: Optional[float] = None,
+                                 spread: Optional[float] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -472,7 +538,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(direction, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _place(legs, "Order", verify_flat=True)
+        res = _place(legs, "Order", verify_flat=True, source=source)
         if res.get("success"):
             m = _trade_meta(res)
             # Hand the actual executed fill spread back to the caller (the algo
@@ -520,13 +586,42 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 detail=res.get("error", "entry unwound — slippage over budget"))
         return res
 
-    def _spread_close(direction: str, lots: int, source: str = "manual",
-                      reason: str = "", z: Optional[float] = None,
-                      spread: Optional[float] = None,
-                      peak_pnl: Optional[float] = None,
-                      trough_pnl: Optional[float] = None,
-                      peak_min: Optional[float] = None,
-                      trough_min: Optional[float] = None) -> Dict:
+    def _spread_close(direction: str, lots: int, source: str = "manual", **kw) -> Dict:
+        """Close — through the MANUAL/ALGO lock. The algo's own exits pass
+        straight through; a manual close is refused while the algo is ON, and
+        must match the position actually open (a 'close' of a position that is
+        not there would OPEN the opposite one)."""
+        if source == "algo":
+            return _spread_close_unlocked(direction, lots, source, **kw)
+        why = _manual_blocked()
+        if why:
+            return {"success": False, "error": why}
+        op = _open_position_view()
+        if not op:
+            return {"success": False, "error": "No open position to close."}
+        if op["direction"] != direction:
+            return {"success": False,
+                    "error": (f"The open position is {op['direction'].replace('_', ' ')}, "
+                              f"not {direction.replace('_', ' ')} — nothing was sent.")}
+        if lots > op["lots"]:
+            return {"success": False,
+                    "error": f"Only {op['lots']} lot(s) are open — cannot close {lots}."}
+        if not _manual_busy.acquire(blocking=False):
+            return {"success": False, "error": "Another manual order is still executing."}
+        try:
+            if arrow_algo.running:
+                return {"success": False, "error": _manual_blocked()}
+            return _spread_close_unlocked(direction, lots, source, **kw)
+        finally:
+            _manual_busy.release()
+
+    def _spread_close_unlocked(direction: str, lots: int, source: str = "manual",
+                               reason: str = "", z: Optional[float] = None,
+                               spread: Optional[float] = None,
+                               peak_pnl: Optional[float] = None,
+                               trough_pnl: Optional[float] = None,
+                               peak_min: Optional[float] = None,
+                               trough_min: Optional[float] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -535,7 +630,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(close_dir, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _place(legs, "Close")
+        res = _place(legs, "Close", source=source)
         if res.get("success"):
             m = _trade_meta(res)
             rec = trade_log.record(action="CLOSE", direction=direction, lots=lots,
@@ -954,8 +1049,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # engine manages (and can exit) a position it didn't open this run.
     try:
         _open = trade_log.open_position()
-        if _open:
+        # Only a position the ALGO opened is handed back to the algo. A manual
+        # position stays manual across a restart — shown, valued and closable
+        # by hand, never managed (or exited) by the algo.
+        if _open and _open.get("source") == "algo":
             arrow_algo.restore_position(_open)
+        elif _open:
+            logger.warning("Open MANUAL {} position ({} lot(s)) found at startup — "
+                           "left for you to manage; the algo cannot start until it is "
+                           "closed", _open.get("direction"), _open.get("lots"))
     except Exception as exc:        # never block startup on recovery
         logger.warning("Position recovery skipped — {}", exc)
 
@@ -1401,7 +1503,45 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 "exit_gate_floor_usd": ((st.get("spread_levels") or {}).get("gate_release")
                                         and float(cfg.get("exits.reversion_gate_inr", 0) or 0)) or None,
                 "is_open": True, "is_paper": _mode() != "live",
+                "owner": "ALGO",
             }
+        else:
+            # A MANUAL position: nothing manages it, but it is valued with the
+            # algo's own formulas (same fees, same closing side) so a manual and
+            # an algo trade read identically on screen. Only BE is a level — no
+            # target or stop fires on a manual position.
+            _op = trade_log.open_position()
+            if _op and _op.get("direction") and (_op.get("source") or "manual") != "algo":
+                _mp = {"direction": _op["direction"], "lots": int(_op.get("lots", 1) or 1),
+                       "entry_spread": _op.get("entry_spread"),
+                       "entry_fill_spread": _op.get("entry_spread"),
+                       "entry_leg_a": _op.get("leg_a_price"),
+                       "entry_leg_b": _op.get("leg_b_price"),
+                       "entry_time": _op.get("ts")}
+                pos_label = "LONG" if _mp["direction"] == "LONG_SPREAD" else "SHORT"
+                signal["current_position"] = pos_label
+                _p = _algo_params()
+                _close_px = (sig.get("sell_spread") if _mp["direction"] == "LONG_SPREAD"
+                             else sig.get("buy_spread"))
+                if _close_px is None:
+                    _close_px = sig.get("spread")
+                _net = arrow_algo._live_net_pnl(_close_px, _p, pos=_mp)
+                _lv = arrow_algo._spread_levels(_p, 0.0, 0.0, pos=_mp)
+                open_trade = {
+                    "position_type": pos_label, "owner": "MANUAL",
+                    "quantity": _mp["lots"], "entry_spread": _mp["entry_spread"],
+                    "entry_zscore": _op.get("zscore"),
+                    "entry_spot_price": _mp["entry_leg_a"],
+                    "entry_futures_price": _mp["entry_leg_b"],
+                    "entry_time": (datetime.fromtimestamp(float(_op["ts"]), timezone.utc)
+                                   .replace(tzinfo=None).isoformat(timespec="seconds")
+                                   if _op.get("ts") else None),
+                    "pnl_usd": round(_net, 2) if _net is not None else None,
+                    "unrealized_pnl": round(_net, 2) if _net is not None else None,
+                    "spread_levels": _lv,
+                    "exit_target_usd": None, "exit_stop_usd": None,
+                    "is_open": True, "is_paper": _mode() != "live",
+                }
 
         # Prefer the live per-leg price; fall back to the signal's last sampled
         # leg price so the tiles keep showing a number if the point-in-time
@@ -1688,16 +1828,15 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # ── W3 action buttons (Arrow-appropriate or safe no-ops) ─────────────────
     @app.route("/api/engine/close-position", methods=["POST"])
     def api_engine_close_position_w3():
-        st = arrow_algo.get_state() or {}
-        pos = st.get("position")
-        if not st.get("in_position") or not isinstance(pos, dict) \
-                or pos.get("direction") not in ("LONG_SPREAD", "SHORT_SPREAD"):
+        # Whatever is open — the algo's position or a manual one — closed at
+        # its OWN direction and size, through the MANUAL/ALGO lock (refused
+        # while the algo is ON). The record says what is held; reading the
+        # record as a string once sent every close as a SHORT close, which on
+        # a LONG bought a second spread instead of closing it.
+        op = _open_position_view()
+        if not op or op["direction"] not in ("LONG_SPREAD", "SHORT_SPREAD"):
             return jsonify({"success": False, "error": "No open position"})
-        # The position RECORD says what is held. Comparing the record to a
-        # string never matched, so every close was sent as a SHORT close — on
-        # a LONG that BOUGHT a second spread instead of closing it — and at
-        # 1 lot whatever the size.
-        res = _spread_close(pos["direction"], int(pos.get("lots", 1) or 1), source="manual")
+        res = _spread_close(op["direction"], op["lots"], source="manual")
         return jsonify({"success": bool(res.get("success", res.get("ok", False))), **res})
 
     @app.route("/api/engine/sync-position", methods=["POST"])
@@ -2287,6 +2426,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # ── algo control ─────────────────────────────────────────────────────────
     @app.route("/api/algo/start", methods=["POST"])
     def api_algo_start():
+        why = _algo_blocked()
+        if why:
+            return jsonify({"success": False, "error": why})
         if not active.get():
             return jsonify({"success": False, "error": "No broker connected — connect Arrow first"})
         if not _have_both_legs(_read_legs()):
@@ -2326,6 +2468,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         # exactly what "ON" means: routing mode and the size it will trade.
         st["mode"] = _mode()
         st["lots"] = int(_algo_lots["lots"])
+        # The MANUAL/ALGO lock, for every screen to show the same answer.
+        op = _open_position_view()
+        st["position_owner"] = (op or {}).get("owner")
+        st["manual_block"] = _manual_blocked()
+        st["algo_block"] = None if st.get("running") else _algo_blocked()
         return jsonify(st)
 
     @app.route("/api/reconcile", methods=["GET"])

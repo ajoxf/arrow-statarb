@@ -93,7 +93,7 @@ class ExecutionLog:
             logger.warning("ExecutionLog: could not persist — {}", exc)
 
     # ── recording ─────────────────────────────────────────────────────────────
-    def record(self, res: Dict, label: str, mode: str) -> Dict:
+    def record(self, res: Dict, label: str, mode: str, source: str = "manual") -> Dict:
         legs = []
         for r in (res.get("results") or []):
             sp, spp = _slippage(r.get("side"), r.get("ref_price"), r.get("avg_price"))
@@ -131,6 +131,8 @@ class ExecutionLog:
             "ts": time.time(), "time": time.strftime("%H:%M:%S"),
             "date": time.strftime("%Y-%m-%d"),
             "label": label, "mode": mode,
+            # WHO placed it: "algo" or "manual" — every order is tagged.
+            "source": "algo" if str(source).lower() == "algo" else "manual",
             "success": bool(res.get("success")),
             "orphan": bool(res.get("orphan")),
             "recovered": bool(res.get("recovered")),

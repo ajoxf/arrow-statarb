@@ -284,7 +284,8 @@ class ArrowAutoTrader:
             enabled=bool(p.get("enable_probability_filter", True)),
         )
 
-    def _live_net_pnl(self, cur_spread: Optional[float], p: Dict) -> Optional[float]:
+    def _live_net_pnl(self, cur_spread: Optional[float], p: Dict,
+                      pos: Optional[Dict] = None) -> Optional[float]:
         """Live mark-to-market net P&L (₹) of the open position, or None when it
         cannot be computed yet (flat, or no current price).
 
@@ -297,7 +298,7 @@ class ArrowAutoTrader:
         and ₹ targets need a little margin. Fees are the flat round-trip
         brokerage (2 legs × entry+exit), matching the trade-log convention.
         LONG profits when the spread rises; SHORT when it falls."""
-        pos = self._pos
+        pos = pos if pos is not None else self._pos
         if not pos or cur_spread is None:
             return None
         entry = pos.get("entry_fill_spread")
@@ -310,7 +311,7 @@ class ArrowAutoTrader:
         change = ((cur_spread - entry) if pos["direction"] == "LONG_SPREAD"
                   else (entry - cur_spread))
         gross = change * lots * lot_mult
-        net = gross - self._position_fees(p)
+        net = gross - self._position_fees(p, pos)
         # Capital-Gains / Income Tax: a haircut on POSITIVE net profit only
         # (losses aren't taxed) — so break-even and the profit gates account for
         # tax, not just transaction costs. Approximation: applied per-trade.
@@ -319,18 +320,20 @@ class ArrowAutoTrader:
             net -= cgt_pct * net
         return net
 
-    def _position_fees(self, p: Dict) -> float:
+    def _position_fees(self, p: Dict, pos: Optional[Dict] = None) -> float:
         """Round-trip fees (₹) of the open position, EXCLUDING slippage (already
         embedded in the entry FILL spread). With use_segment_costs on, the
         per-segment Indian stack; else brokerage + STT + catch-all 'other'.
         Notional off the CONTRACT leg (leg_b), the scale the spread is in.
         The ONE fee figure behind both the live net P&L and the BE/TP/SL
         spread levels, so the two can never disagree."""
-        pos = self._pos or {}
+        pos = (pos if pos is not None else self._pos) or {}
         lots = max(1, int(pos.get("lots", 1)))
         lot_mult = float(p.get("lot_multiplier", 1.0) or 1.0)
         if bool(p.get("use_segment_costs", False)):
-            return self._segment_round_trip_cost(p, lots, lot_mult, None, None,
+            rb = pos.get("entry_leg_b") or pos.get("entry_leg_a")
+            ra = pos.get("entry_leg_a") or rb
+            return self._segment_round_trip_cost(p, lots, lot_mult, ra, rb,
                                                  include_slippage=False)
         rt_fees = float(p.get("brokerage_per_lot", 20.0) or 0) * lots * 4.0
         ref = pos.get("entry_leg_b") or pos.get("entry_leg_a")
@@ -341,7 +344,7 @@ class ArrowAutoTrader:
         return rt_fees
 
     def _spread_levels(self, p: Dict, profit_target: float,
-                       dollar_stop: float) -> Optional[Dict]:
+                       dollar_stop: float, pos: Optional[Dict] = None) -> Optional[Dict]:
         """BE / TP / SL (and EX) of the open position as SPREAD prices — the
         levels the closing-side spread must reach for each ₹ exit to fire.
 
@@ -350,7 +353,7 @@ class ArrowAutoTrader:
         so  BE: net = 0 · TP: net after tax = target · SL: net = −stop.
         X is compared against the CLOSING side: the sell spread for a LONG,
         the buy spread for a SHORT. A level whose exit is off is None."""
-        pos = self._pos
+        pos = pos if pos is not None else self._pos
         if not pos:
             return None
         E = pos.get("entry_fill_spread")
@@ -361,7 +364,7 @@ class ArrowAutoTrader:
             return None
         E = float(E)
         d = 1.0 if pos["direction"] == "LONG_SPREAD" else -1.0
-        fees = self._position_fees(p)
+        fees = self._position_fees(p, pos)
         cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
         keep = (1.0 - cgt) if 0 <= cgt < 1 else 1.0
         lvl = lambda net_gross: round(E + d * net_gross / oz, 2)
