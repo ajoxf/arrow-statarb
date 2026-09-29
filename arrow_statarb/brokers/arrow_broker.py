@@ -1603,8 +1603,8 @@ class ArrowBroker(BaseBroker):
         return None
 
     def get_candles(self, segment: str, symbol: str, timeframe: str,
-                    from_ts: float, to_ts: float) -> List[Tuple[float, float]]:
-        """[(candle_start_epoch_s, close_in_rupees)] oldest first, from Arrow's
+                    from_ts: float, to_ts: float) -> List[Tuple[float, float, float, float, float]]:
+        """[(candle_start_epoch_s, open, high, low, close)] in rupees, oldest first, from Arrow's
         historical host. Read-only. Raises with Arrow's reason on failure.
 
         Arrow quotes candle prices in PAISE; the scale is confirmed against the
@@ -1627,7 +1627,7 @@ class ArrowBroker(BaseBroker):
         if ck in cache:
             exchanges = [cache[ck]] + [e for e in exchanges if e != cache[ck]]
         chunk = self._CANDLE_CHUNK_DAYS.get(timeframe, 15) * 86400.0
-        rows: Dict[float, float] = {}
+        rows: Dict[float, Tuple[float, float, float, float]] = {}
         errors: List[str] = []
         for ex in exchanges:
             rows.clear()
@@ -1649,10 +1649,15 @@ class ArrowBroker(BaseBroker):
                         if isinstance(r, dict):
                             ts = self._candle_ts(r.get("time") or r.get("timestamp") or r.get("t"))
                             close = r.get("close", r.get("c"))
+                            o, h, lo = (r.get("open", r.get("o")), r.get("high", r.get("h")),
+                                        r.get("low", r.get("l")))
                         else:
-                            ts, close = self._candle_ts(r[0]), r[4]
+                            ts, o, h, lo, close = self._candle_ts(r[0]), r[1], r[2], r[3], r[4]
                         if ts is not None and close is not None and float(close) > 0:
-                            rows[ts] = float(close)
+                            c = float(close)
+                            ohl = [float(x) if x not in (None, "") and float(x) > 0 else c
+                                   for x in (o, h, lo)]
+                            rows[ts] = (ohl[0], max(ohl[1], c, ohl[0]), min(ohl[2], c, ohl[0]), c)
                     except (IndexError, TypeError, ValueError):
                         continue
                 t0 = t1
@@ -1665,7 +1670,7 @@ class ArrowBroker(BaseBroker):
             raise RuntimeError("; ".join(errors) or "no candles")
         out = sorted(rows.items())
         # Scale: paise → rupees, confirmed against the live price when streaming.
-        last = out[-1][1]
+        last = out[-1][1][3]
         live = None
         try:
             live = (self.get_streamed_ltp([symbol]) or {}).get(symbol.upper())
@@ -1675,7 +1680,7 @@ class ArrowBroker(BaseBroker):
         if live and live > 0:
             r = last / float(live)
             div = 100.0 if 30.0 < r < 300.0 else 1.0 if 0.3 < r < 3.0 else 100.0
-        return [(t, c / div) for t, c in out]
+        return [(t, o / div, h / div, lo / div, c / div) for t, (o, h, lo, c) in out]
 
     def get_pair_margin(self, legs: List[Dict], product: str = "NRML") -> Dict:
         """Margin for a spread: each leg alone, and both legs TOGETHER (so an

@@ -901,7 +901,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     spread_candles = SpreadCandles(persist_path=SIGNAL_WINDOW_FILE.with_name("spread_candles.json"),
                                    session_open_provider=_session_open_min,
                                    history_provider=_candle_history,
-                                   key_provider=_series_key)
+                                   key_provider=_series_key,
+                                   k_provider=lambda: float(cfg.get("signal.hedge_ratio", 1) or 1))
 
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
                                  persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key,

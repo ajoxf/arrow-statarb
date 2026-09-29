@@ -103,28 +103,52 @@ def bucket_start(ts: float, tf_sec: int, session_open_min: int) -> float:
     return anchor + math.floor((ts - anchor) / tf_sec) * tf_sec
 
 
-def align_legs(a: List[Tuple[float, float]], b: List[Tuple[float, float]],
-               tf_sec: int, session_open_min: int) -> List[Tuple[float, float, float]]:
-    """Merge two legs' (ts, close) candles into [(bucket, close_a, close_b)] on
-    one grid. A bucket where only one leg traded carries the other leg's last
-    close forward (a spread chart does the same); buckets before both legs
-    have traded are dropped."""
-    def bucketed(rows):
-        out: Dict[float, float] = {}
-        for ts, c in sorted(rows):
-            if c is None or not (c > 0):
-                continue
-            out[bucket_start(float(ts), tf_sec, session_open_min)] = float(c)
-        return out
-    ba, bb = bucketed(a), bucketed(b)
+def _ohlc_row(r) -> Tuple[float, float, float, float, float]:
+    """(ts, open, high, low, close) from a (ts, close) or (ts, o, h, l, c) row."""
+    if len(r) >= 5:
+        return float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])
+    c = float(r[1])
+    return float(r[0]), c, c, c, c
+
+
+def align_legs(a: List[Tuple], b: List[Tuple], tf_sec: int, session_open_min: int,
+               k: float = 1.0) -> List[Tuple[float, float, float, float, float, float]]:
+    """Merge two legs' candles into the SPREAD's candles on one grid:
+    [(bucket, close_a, close_b, open, high, low)] — open/high/low of k·A − B.
+
+    Rows are (ts, close) or (ts, open, high, low, close). A leg that did not
+    trade in a source candle carries its last close forward (flat), as a spread
+    chart does. The spread's open/high/low per source candle are the legs'
+    open/high/low combined the way TradingView builds a spread symbol
+    (k·A_x − B_x for each of o/h/l/c), widened to contain open and close.
+    Source candles are then rolled up into ``tf_sec`` buckets (first open,
+    highest high, lowest low, last close) — how 1 H / 4 H come from 15 min."""
+    ra = {t: (o, h, l, c) for t, o, h, l, c in (_ohlc_row(r) for r in a) if c > 0}
+    rb = {t: (o, h, l, c) for t, o, h, l, c in (_ohlc_row(r) for r in b) if c > 0}
     last_a = last_b = None
-    merged = []
-    for t in sorted(set(ba) | set(bb)):
-        last_a = ba.get(t, last_a)
-        last_b = bb.get(t, last_b)
-        if last_a is not None and last_b is not None:
-            merged.append((t, last_a, last_b))
-    return merged
+    out: Dict[float, List[float]] = {}
+    order: List[float] = []
+    for t in sorted(set(ra) | set(rb)):
+        pa = ra.get(t) or ((last_a[3],) * 4 if last_a else None)
+        pb = rb.get(t) or ((last_b[3],) * 4 if last_b else None)
+        if pa is not None:
+            last_a = pa
+        if pb is not None:
+            last_b = pb
+        if pa is None or pb is None:
+            continue
+        sp = [k * pa[i] - pb[i] for i in range(4)]
+        so, sc = sp[0], sp[3]
+        hi, lo = max(sp), min(sp)
+        bkt = bucket_start(t, tf_sec, session_open_min)
+        cur = out.get(bkt)
+        if cur is None:
+            out[bkt] = [pa[3], pb[3], so, hi, lo]
+            order.append(bkt)
+        else:
+            cur[0], cur[1] = pa[3], pb[3]
+            cur[3], cur[4] = max(cur[3], hi), min(cur[4], lo)
+    return [(t, *out[t]) for t in order]
 
 
 HistoryFn = Callable[[str, float, float], Optional[Dict[str, List[Tuple[float, float]]]]]
@@ -138,14 +162,18 @@ class SpreadCandles:
                  session_open_provider: Optional[Callable[[], int]] = None,
                  history_provider: Optional[HistoryFn] = None,
                  key_provider: Optional[Callable[[], str]] = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 k_provider: Optional[Callable[[], float]] = None):
         self._path = Path(persist_path) if persist_path else None
         self._open_min = session_open_provider or (lambda: 9 * 60)
         self._history = history_provider
         self._key_fn = key_provider or (lambda: "")
         self._clock = clock
+        self._k = k_provider or (lambda: 1.0)
         self._lock = threading.RLock()
-        # tf → {bucket_start: [close_a, close_b]}
+        # tf → {bucket_start: [close_a, close_b, open, high, low, k]} — the
+        # spread's open/high/low for hedge ratio k (a candle saved under another
+        # k shows as its close only); the close is always k·close_a − close_b.
         self._bars: Dict[str, Dict[float, List[float]]] = {tf: {} for tf in TIMEFRAMES}
         self._key: Optional[str] = None
         self._dirty = False
@@ -177,17 +205,30 @@ class SpreadCandles:
             self._dirty = True
 
     # ── live ticks ────────────────────────────────────────────────────────────
-    def update(self, ts: float, ltp_a: Optional[float], ltp_b: Optional[float]) -> None:
+    def update(self, ts: float, ltp_a: Optional[float], ltp_b: Optional[float],
+               k: Optional[float] = None) -> None:
         """Fold one pair of last-traded prices into the current candle of every
-        timeframe (the latest price is that candle's close)."""
+        timeframe: the latest price is its close, and the spread's high / low
+        widen to every price seen while the candle is open."""
         if not ltp_a or not ltp_b or ltp_a <= 0 or ltp_b <= 0:
             return
+        k = float(k if k is not None else (self._k() or 1.0))
+        a, b = float(ltp_a), float(ltp_b)
+        sp = k * a - b
         om = self._open_min()
         with self._lock:
             self._check_key()
             for tf, sec in TIMEFRAMES.items():
                 bars = self._bars[tf]
-                bars[bucket_start(ts, sec, om)] = [float(ltp_a), float(ltp_b)]
+                bkt = bucket_start(ts, sec, om)
+                bar = bars.get(bkt)
+                if bar is not None and len(bar) >= 6 and bar[5] == k:
+                    bars[bkt] = [a, b, bar[2], max(bar[3], sp), min(bar[4], sp), k]
+                elif bar is not None:              # a close-only bar: it opened at its close
+                    o = k * bar[0] - bar[1]
+                    bars[bkt] = [a, b, o, max(o, sp), min(o, sp), k]
+                else:
+                    bars[bkt] = [a, b, sp, sp, sp, k]
                 if len(bars) > MAX_BARS:
                     for t in sorted(bars)[:len(bars) - MAX_BARS]:
                         del bars[t]
@@ -200,7 +241,22 @@ class SpreadCandles:
         tf = normalise_tf(tf)
         with self._lock:
             rows = sorted(self._bars[tf].items())
-        return [(t, k * a - b) for t, (a, b) in rows]
+        return [(t, k * bar[0] - bar[1]) for t, bar in rows]
+
+    def ohlc(self, tf: str, k: float = 1.0) -> List[Tuple[float, float, float, float, float]]:
+        """[(bucket_start, open, high, low, close)] of the spread, oldest first."""
+        tf = normalise_tf(tf)
+        with self._lock:
+            rows = sorted(self._bars[tf].items())
+        out = []
+        for t, bar in rows:
+            c = k * bar[0] - bar[1]
+            if len(bar) >= 6 and abs(bar[5] - k) < 1e-12:
+                o = bar[2]
+                out.append((t, o, max(bar[3], o, c), min(bar[4], o, c), c))
+            else:
+                out.append((t, c, c, c, c))
+        return out
 
     def bands(self, tf: str, length: int, k: float = 1.0) -> Dict:
         """EMA basis and σ of the spread on ``tf`` with the current candle
@@ -240,19 +296,16 @@ class SpreadCandles:
         """Chart data: closes with the EMA / σ at each candle (current included)."""
         tf = normalise_tf(tf)
         n = max(2, int(length))
-        rows = self.closes(tf, k)
-        closes = [c for _, c in rows]
+        rows = self.ohlc(tf, k)
+        closes = [r[4] for r in rows]
         alpha = 2.0 / (n + 1.0)
         pts, ema = [], None
-        for i, (t, c) in enumerate(rows):
-            if i + 1 < n:
-                pts.append({"t": t, "close": c, "mean": None, "std": None})
-                continue
-            if ema is None:
-                ema = sum(closes[:n]) / n
-            else:
-                ema = alpha * c + (1.0 - alpha) * ema
-            pts.append({"t": t, "close": c, "mean": ema, "std": pine_stdev(closes[:i + 1], n)})
+        for i, (t, o, h, l, c) in enumerate(rows):
+            pt = {"t": t, "open": o, "high": h, "low": l, "close": c, "mean": None, "std": None}
+            if i + 1 >= n:
+                ema = sum(closes[:n]) / n if ema is None else alpha * c + (1.0 - alpha) * ema
+                pt.update(mean=ema, std=pine_stdev(closes[:i + 1], n))
+            pts.append(pt)
         return {"timeframe": tf, "length": n, "points": pts[-last:]}
 
     # ── back-fill ─────────────────────────────────────────────────────────────
@@ -301,14 +354,15 @@ class SpreadCandles:
                                    "at": now}
                 logger.warning("Candles: {} history unavailable — {}", tf, self.status[tf]["detail"])
                 continue
-            merged = align_legs(got["a"], got["b"], sec, om)
+            k_now = float(self._k() or 1.0)
+            merged = align_legs(got["a"], got["b"], sec, om, k_now)
             with self._lock:
                 bars = self._bars[tf]
                 current = bucket_start(now, sec, om)
-                for t, ca, cb in merged:
+                for t, ca, cb, so, sh, sl in merged:
                     if t == current and t in bars:
                         continue                      # the live candle keeps live prices
-                    bars[t] = [ca, cb]
+                    bars[t] = [ca, cb, so, sh, sl, k_now]
                 for t in sorted(bars)[:max(0, len(bars) - MAX_BARS)]:
                     del bars[t]
                 self._ema_cache.clear()
@@ -331,7 +385,7 @@ class SpreadCandles:
             data = {"key": self._key,
                     "grid": GRID_VERSION,
                     "saved_at": now,
-                    "bars": {tf: [[t, a, b] for t, (a, b) in sorted(bars.items())]
+                    "bars": {tf: [[t, *bar] for t, bar in sorted(bars.items())]
                              for tf, bars in self._bars.items()}}
             self._dirty = False
             self._last_save = now
@@ -368,7 +422,7 @@ class SpreadCandles:
             if old_grid and tf in BUILT_FROM:
                 continue                  # saved on Arrow's :15 hour grid — rebuilt instead
             if tf in self._bars:
-                self._bars[tf] = {float(t): [float(a), float(b)] for t, a, b in rows}
+                self._bars[tf] = {float(r[0]): [float(x) for x in r[1:]] for r in rows if len(r) >= 3}
         n = {tf: len(b) for tf, b in self._bars.items()}
         logger.info("Candles: restored from disk — {}", n)
         for tf, cnt in n.items():
