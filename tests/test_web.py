@@ -938,3 +938,27 @@ def test_algo_state_reports_the_lock(tmp_path):
     st = c.get("/api/algo/state").get_json()
     assert "algo is ON" in st["manual_block"]
     algo.stop()
+
+
+def test_resaving_the_same_pair_keeps_the_collected_window(tmp_path):
+    """Saving Setup with the SAME legs must not wipe hours of samples and
+    restart the warm-up; a real change of leg or ratio does restart it."""
+    import time as _t
+    app, broker = _app(tmp_path)
+    c = app.test_client()
+    eng = app.extensions["arrow"]["signal"]
+    now = _t.time()
+    for i in range(50):
+        eng.push(110.0 + i % 3, 10.0, ts=now - 50 + i)
+    same = {"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 1},
+            "leg_b": {"mapping_id": "nse_fo|NIFTY28JUL26F", "ratio": 1}}
+    assert c.post("/api/leg-assignments", json=same).get_json()["success"]
+    assert len(eng._samples) == 50
+    other = {"leg_b": {"mapping_id": "nse_fo|NIFTY25AUG26F", "ratio": 1}}
+    assert c.post("/api/leg-assignments", json=other).get_json()["success"]
+    assert len(eng._samples) == 0
+    for i in range(5):
+        eng.push(110.0, 10.0, ts=now + i)
+    assert c.post("/api/leg-assignments",
+                  json={"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 2}}).get_json()["success"]
+    assert len(eng._samples) == 0          # a ratio change is a new spread

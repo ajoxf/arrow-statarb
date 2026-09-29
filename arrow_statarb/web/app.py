@@ -2039,6 +2039,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             if LEG_ASSIGNMENTS_FILE.exists():
                 with open(LEG_ASSIGNMENTS_FILE) as f:
                     assigns = yaml.safe_load(f) or {}
+            before = {lk: dict(assigns.get(lk) or {}) for lk in ("leg_a", "leg_b")}
             for lk in ("leg_a", "leg_b"):
                 if lk in data and (data[lk] or {}).get("mapping_id"):
                     assigns[lk] = {"mapping_id": data[lk]["mapping_id"],
@@ -2046,8 +2047,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             LEG_ASSIGNMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(LEG_ASSIGNMENTS_FILE, "w") as f:
                 yaml.dump(assigns, f, default_flow_style=False)
-            signal_engine.reset()   # legs changed → start the window fresh
-            logger.info("Leg assignments saved: {}", assigns)
+            # Start the window fresh ONLY when a leg or its ratio really
+            # changed: re-saving the same pair must not throw away hours of
+            # collected data (and restart the warm-up).
+            def _norm(e):
+                return (str((e or {}).get("mapping_id") or ""),
+                        float((e or {}).get("ratio", 1.0) or 1.0))
+            changed = any(_norm(before[lk]) != _norm(assigns.get(lk)) for lk in ("leg_a", "leg_b"))
+            if changed:
+                signal_engine.reset()
+            logger.info("Leg assignments saved: {} ({})", assigns,
+                        "pair changed — lookback window restarted" if changed
+                        else "same pair — collected data kept")
             return jsonify({"success": True})
         except Exception as exc:
             logger.error("Error saving leg assignments: {}", exc)
