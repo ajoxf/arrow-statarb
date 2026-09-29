@@ -14,7 +14,7 @@
   'use strict';
 
   var DASH = '—';
-  var LAYOUT_KEY = 'nexus-desk-layout-v1';
+  var LAYOUT_KEY = 'nexus-desk-layout-v2';   // v2: Bollinger Bands window in the default set
   var PREF_KEY = 'nexus-desk-prefs-v1';
 
   // ── tiny helpers ───────────────────────────────────────────────────────
@@ -138,7 +138,8 @@
     {id: 'ladder', title: 'Ladder · A − B', x: 8, y: 8, w: 360, h: 640, flush: true},
     {id: 'signal', title: 'Signal & Position', x: 376, y: 8, w: 470, h: 360},
     {id: 'stats', title: 'Statistics & Filters', x: 854, y: 8, w: 330, h: 360},
-    {id: 'charts', title: 'Z-Score & Spread', x: 376, y: 376, w: 470, h: 272},
+    {id: 'bands', title: 'Bollinger Bands · spread', x: 376, y: 376, w: 470, h: 272},
+    {id: 'charts', title: 'Z-Score & Spread', x: 376, y: 376, w: 470, h: 272, closed: true},
     {id: 'margin', title: 'Margin', x: 1192, y: 8, w: 300, h: 300},
     {id: 'fills', title: 'Fills & Slippage', x: 8, y: 656, w: 838, h: 250, flush: true},
     {id: 'trades', title: 'Trades', x: 854, y: 376, w: 638, h: 272, flush: true},
@@ -623,6 +624,75 @@
     $('.st-algo', body).textContent = (a.running ? 'ON · ' : 'OFF · ') + (a.status || DASH);
   };
 
+  // BOLLINGER BANDS ------------------------------------------------------------
+  // The spread's candles with the TradingView BB (EMA basis): close, EMA(N),
+  // EMA ± entry·σ — the current candle included and marked. The timeframe
+  // picker is a VIEW; the badge says which bands the algo actually trades.
+  var bandsChart = null;
+  BUILD.bands = function (body) {
+    body.innerHTML =
+      '<div class="bb-bar" style="display:flex;gap:6px;align-items:center;font-size:10px;height:20px">' +
+      '  <select class="bb-tf" style="font-size:10px"><option value="">algo timeframe</option>' +
+      '    <option value="5m">5 min</option><option value="15m">15 min</option>' +
+      '    <option value="1h">1 hour</option><option value="4h">4 hours</option></select>' +
+      '  <select class="bb-last" style="font-size:10px"><option value="40">40 candles</option>' +
+      '    <option value="80">80 candles</option><option value="150">150 candles</option>' +
+      '    <option value="300">300 candles</option></select>' +
+      '  <span class="pill bb-src" style="margin-left:auto">—</span></div>' +
+      '<div style="height:calc(100% - 40px)"><canvas class="bb-c"></canvas></div>' +
+      '<div class="bb-note muted" style="font-size:10px;height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis"></div>';
+    var tf = $('.bb-tf', body), last = $('.bb-last', body);
+    tf.value = prefs.bbTf || '';
+    last.value = String(prefs.bbLast || 80);
+    tf.onchange = function () { prefs.bbTf = tf.value; save(PREF_KEY, prefs); REFRESH.bands(); };
+    last.onchange = function () { prefs.bbLast = Number(last.value); save(PREF_KEY, prefs); REFRESH.bands(); };
+    if (!window.Chart) { $('.bb-c', body).parentNode.innerHTML = '<div class="muted">Charts unavailable.</div>'; return; }
+    bandsChart = new Chart($('.bb-c', body), {type: 'line', data: {labels: [], datasets: [
+      {label: 'Spread', data: [], borderColor: '#6a4fa3', borderWidth: 1.5, pointRadius: 0},
+      {label: 'EMA', data: [], borderColor: '#e07b00', borderWidth: 1.2, pointRadius: 0},
+      {label: 'Upper', data: [], borderColor: '#1f7ac2', borderWidth: 1, borderDash: [4, 3], pointRadius: 0},
+      {label: 'Lower', data: [], borderColor: '#1f7ac2', borderWidth: 1, borderDash: [4, 3], pointRadius: 0},
+      {label: 'Entry', data: [], borderColor: '#1b7a35', borderWidth: 1, borderDash: [2, 2], pointRadius: 0, hidden: false}]},
+      options: {animation: false, responsive: true, maintainAspectRatio: false,
+                plugins: {legend: {display: true, labels: {boxWidth: 8, font: {size: 9}}}},
+                scales: {x: {ticks: {maxTicksLimit: 5, font: {size: 9}}}, y: {ticks: {font: {size: 9}}}}}});
+  };
+  REFRESH.bands = function () {
+    if (!W.bands || !bandsChart) { return Promise.resolve(); }
+    var body = W.bands.body;
+    var q = '/api/candles?last=' + (prefs.bbLast || 80) + (prefs.bbTf ? '&tf=' + prefs.bbTf : '');
+    return getJSON(q).then(function (d) {
+      var pts = d.points || [], e = Number(d.entry_zscore || 2);
+      var fmt = function (t) {
+        return new Date(t * 1000).toLocaleString('en-IN', {timeZone: 'Asia/Kolkata', day: '2-digit',
+          month: 'short', hour: '2-digit', minute: '2-digit', hour12: false});
+      };
+      var entry = null, t = S.status && S.status.open_trade;
+      if (t) { entry = Number(t.entry_spread != null ? t.entry_spread : t.entry_price); }
+      bandsChart.data.labels = pts.map(function (p) { return fmt(p.t); });
+      bandsChart.data.datasets[0].data = pts.map(function (p) { return p.close; });
+      bandsChart.data.datasets[0].pointRadius = pts.map(function (_, i) { return i === pts.length - 1 ? 3 : 0; });
+      bandsChart.data.datasets[1].data = pts.map(function (p) { return p.mean; });
+      bandsChart.data.datasets[2].data = pts.map(function (p) { return p.mean == null ? null : p.mean + e * p.std; });
+      bandsChart.data.datasets[3].data = pts.map(function (p) { return p.mean == null ? null : p.mean - e * p.std; });
+      bandsChart.data.datasets[4].data = pts.map(function () { return isFinite(entry) ? entry : null; });
+      bandsChart.update('none');
+      var algoTf = (S.status && S.status.signal && S.status.signal.band_timeframe) || d.timeframe;
+      var src = $('.bb-src', body), onCandles = d.band_source === 'candles';
+      src.textContent = onCandles ? 'ALGO USES CANDLES · ' + algoTf : 'ALGO USES TICKS';
+      src.className = 'pill bb-src ' + (onCandles && d.timeframe === algoTf ? 'ok' : '');
+      src.title = onCandles ? (d.timeframe === algoTf ? 'These are the bands the algo trades on.'
+                                                     : 'The algo trades the ' + algoTf + ' bands — this is a view of ' + d.label + '.')
+                            : 'The algo uses the tick window. Settings → Signal Parameters → Band source.';
+      var b = d.bands || {}, st = (d.status || {})[d.timeframe] || {}, lp = pts[pts.length - 1];
+      $('.bb-note', body).textContent = d.label + ' · BB(' + d.length + ', EMA) ±' + e + 'σ · ' +
+        (b.ready ? 'EMA ' + num(b.mean, 2) + ' · σ ' + num(b.std, 2) : 'need ' + d.length + ' candles (' + (b.count || 0) + ')') +
+        (lp ? ' · now ' + num(lp.close, 2) + ' @ ' + fmt(lp.t) : '') +
+        ' · history ' + (st.state || 'pending') + ' · ' + new Date().toLocaleTimeString('en-IN', {hour12: false});
+      $('.bb-note', body).title = st.detail || '';
+    }).catch(function () {});
+  };
+
   // CHARTS ---------------------------------------------------------------------
   var charts = {};
   BUILD.charts = function (body) {
@@ -672,7 +742,10 @@
       charts.s.update('none');
     }).catch(function () {});
   };
-  function resizeCharts() { Object.keys(charts).forEach(function (k) { try { charts[k].resize(); } catch (e) {} }); }
+  function resizeCharts() {
+    Object.keys(charts).forEach(function (k) { try { charts[k].resize(); } catch (e) {} });
+    if (bandsChart) { try { bandsChart.resize(); } catch (e) {} }
+  }
 
   // MARGIN ---------------------------------------------------------------------
   BUILD.margin = function (body) { body.innerHTML = '<div class="kv mg-acc"></div><div class="sec">Pair margin</div><div class="kv mg-pair"></div><div class="muted mg-err" style="margin-top:4px"></div>'; };
@@ -798,6 +871,7 @@
   setInterval(pollAlgo, 2000);
   setInterval(function () { REFRESH.ladder(); }, 700);
   setInterval(function () { REFRESH.charts(); }, 2000);
+  setInterval(function () { REFRESH.bands(); }, 3000);
   setInterval(function () { REFRESH.margin(); }, 15000);
   setInterval(function () { REFRESH.fills(); REFRESH.trades(); }, 10000);
   setInterval(renderBanners, 1000);
@@ -811,5 +885,6 @@
   renderTabs();
   refreshAll();
   REFRESH.charts();
+  REFRESH.bands();
   REFRESH.orders(true);
 })();
