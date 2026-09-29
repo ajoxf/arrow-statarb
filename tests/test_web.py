@@ -1030,3 +1030,27 @@ def test_spread_history_can_plot_only_the_recent_seconds(tmp_path):
     assert len(full["spreads"]) == 100
     assert 10 <= len(recent["spreads"]) <= 11
     assert recent["zscores"][-1] == full["zscores"][-1]
+
+
+def test_resaving_the_same_pair_keeps_the_collected_window(tmp_path):
+    """Saving Setup with the SAME legs must not wipe hours of samples and
+    restart the warm-up; a real change of leg or ratio does restart it."""
+    import time as _t
+    app, broker = _app(tmp_path)
+    c = app.test_client()
+    eng = app.extensions["arrow"]["signal"]
+    now = _t.time()
+    for i in range(50):
+        eng.push(110.0 + i % 3, 10.0, ts=now - 50 + i)
+    same = {"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 1},
+            "leg_b": {"mapping_id": "nse_fo|NIFTY28JUL26F", "ratio": 1}}
+    assert c.post("/api/leg-assignments", json=same).get_json()["success"]
+    assert len(eng._samples) == 50
+    other = {"leg_b": {"mapping_id": "nse_fo|NIFTY25AUG26F", "ratio": 1}}
+    assert c.post("/api/leg-assignments", json=other).get_json()["success"]
+    assert len(eng._samples) == 0
+    for i in range(5):
+        eng.push(110.0, 10.0, ts=now + i)
+    assert c.post("/api/leg-assignments",
+                  json={"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 2}}).get_json()["success"]
+    assert len(eng._samples) == 0          # a ratio change is a new spread
