@@ -1014,3 +1014,19 @@ def test_desk_trades_report_who_opened_and_who_closed(tmp_path):
     t = d["trips"][0]
     assert t["entry_source"] == "manual" and t["exit_source"] == "manual"
     assert t["exit_spread"] is not None
+
+
+def test_spread_history_can_plot_only_the_recent_seconds(tmp_path):
+    """The desk chart shows the last N s at full detail (a 2 h window squeezed
+    into 240 points barely moves); z still uses the WHOLE window's stats."""
+    import time as _t
+    app, broker, c, algo = _lock_app(tmp_path)
+    eng = app.extensions["arrow"]["signal"]
+    now = _t.time()
+    for i in range(100):
+        eng.push(110.0 + (i % 5), 10.0, ts=now - 100 + i)
+    full = c.get("/api/spread-history?n=1000").get_json()
+    recent = c.get("/api/spread-history?n=1000&sec=10").get_json()
+    assert len(full["spreads"]) == 100
+    assert 10 <= len(recent["spreads"]) <= 11
+    assert recent["zscores"][-1] == full["zscores"][-1]

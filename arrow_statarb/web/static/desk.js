@@ -42,10 +42,26 @@
   function clock(t) {
     return t ? new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}) : DASH;
   }
-  function getJSON(url) {
-    return fetch(url, {cache: 'no-store'}).then(function (r) {
+  // Background polling must never starve the page. A browser opens only ~6
+  // connections to one server; if polls pile up behind a slow endpoint, every
+  // click and even a plain link waits behind them. So: a poll whose previous
+  // request is still out is skipped, polls use at most 4 connections (the
+  // rest stay free for what YOU click), and a request is cut off at 10 s.
+  var inflight = {}, inflightN = 0, POLL_MAX = 4, slowUntil = 0;
+  function getJSON(url, userAsked) {
+    var key = url.split('?')[0];
+    if (!userAsked && (inflight[key] || inflightN >= POLL_MAX)) {
+      return Promise.reject(new Error('skipped: a request is still pending'));
+    }
+    var counted = !userAsked;
+    inflight[key] = true; if (counted) { inflightN++; }
+    var ctl = window.AbortController ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) { ctl.abort(); } slowUntil = Date.now() + 15000; }, 10000);
+    return fetch(url, {cache: 'no-store', signal: ctl ? ctl.signal : undefined}).then(function (r) {
       if (!r.ok) { throw new Error('HTTP ' + r.status); }
       return r.json();
+    }).finally(function () {
+      clearTimeout(timer); inflight[key] = false; if (counted) { inflightN--; }
     });
   }
   function postJSON(url, body) {
@@ -275,7 +291,10 @@
       REFRESH.signal && W.signal && REFRESH.signal();
       REFRESH.stats && W.stats && REFRESH.stats();
       renderBanners();
-    }).catch(function () {
+    }).catch(function (e) {
+      // A skipped poll is not a dead engine; only a snapshot older than 5 s is.
+      if (S.statusAt && Date.now() - S.statusAt < 5000) { return; }
+      if (/^skipped/.test(String(e && e.message)) && S.statusAt) { return; }
       var b = $('#engine-banner');
       b.textContent = 'The engine is not answering — prices and positions on this screen are NOT live.';
       b.classList.remove('hidden');
@@ -302,8 +321,11 @@
     var st = S.status;
     var fresh = S.statusAt && Date.now() - S.statusAt < 5000;
     var feed = st && st.signal && st.signal.book;
-    lb.className = 'link ' + (!fresh ? 'bad' : feed ? 'ok' : 'warn');
-    lb.textContent = !fresh ? 'engine down' : feed ? 'book live' : 'no book';
+    var slow = Date.now() < slowUntil;
+    lb.className = 'link ' + (!fresh ? 'bad' : slow ? 'warn' : feed ? 'ok' : 'warn');
+    lb.textContent = !fresh ? 'engine down' : slow ? 'server slow' : feed ? 'book live' : 'no book';
+    lb.title = slow ? 'A request took over 10 s and was cut off — the server is slow to answer.'
+                    : 'Arrow connection and price feed';
     $('#loop-stat').textContent = S.statusAt ? ((Date.now() - S.statusAt) / 1000).toFixed(1) + 's' : DASH;
   }
 
@@ -604,8 +626,16 @@
   // CHARTS ---------------------------------------------------------------------
   var charts = {};
   BUILD.charts = function (body) {
-    body.innerHTML = '<div style="height:48%"><canvas class="c-z"></canvas></div>' +
-                     '<div style="height:48%;margin-top:2%"><canvas class="c-s"></canvas></div>';
+    body.innerHTML = '<div class="ch-bar muted" style="font-size:10px;height:18px">Show last ' +
+                     '<select class="ch-range" style="font-size:10px">' +
+                     '<option value="300">5 min</option><option value="900">15 min</option>' +
+                     '<option value="3600">1 hour</option><option value="0">whole window</option></select>' +
+                     ' <span class="ch-note"></span></div>' +
+                     '<div style="height:calc(48% - 9px)"><canvas class="c-z"></canvas></div>' +
+                     '<div style="height:calc(48% - 9px);margin-top:1%"><canvas class="c-s"></canvas></div>';
+    var rng = $('.ch-range', body);
+    rng.value = String(prefs.chartSec != null ? prefs.chartSec : 900);
+    rng.onchange = function () { prefs.chartSec = Number(rng.value); save(PREF_KEY, prefs); REFRESH.charts(); };
     if (!window.Chart) { body.innerHTML = '<div class="muted">Charts unavailable.</div>'; return; }
     function base() {
       return {animation: false, responsive: true, maintainAspectRatio: false,
@@ -621,7 +651,10 @@
   };
   REFRESH.charts = function () {
     if (!W.charts || !charts.z) { return Promise.resolve(); }
-    return getJSON('/api/spread-history?n=240').then(function (d) {
+    var sec = prefs.chartSec != null ? prefs.chartSec : 900;
+    return getJSON('/api/spread-history?n=600' + (sec ? '&sec=' + sec : '')).then(function (d) {
+      var note = $('.ch-note', W.charts.body);
+      if (note) { note.textContent = '· updated ' + new Date().toLocaleTimeString(); }
       var z = d.zscores || [], s = d.spreads || [];
       var e = Number(((S.status || {}).signal || {}).entry_threshold || 2);
       var lab = z.map(function (_, i) { return i; });
@@ -739,7 +772,7 @@
   REFRESH.orders = function (force) {
     if (!W.orders || !force) { return Promise.resolve(); }
     var body = W.orders.body;
-    return getJSON('/api/exchange-orders').then(function (d) {
+    return getJSON('/api/exchange-orders', true).then(function (d) {
       $('.ol-note', body).textContent = d.note || ((d.orders || []).length + ' order(s) today');
       $('tbody', body).innerHTML = (d.orders || []).map(function (o) {
         var side = String(o.side || '').toUpperCase();
@@ -758,14 +791,13 @@
     pollAlgo();
     pollStatus();
     REFRESH.ladder();
-    REFRESH.margin();
-    REFRESH.fills();
-    REFRESH.trades();
+    // the slower windows a moment later, so start-up never queues behind them
+    setTimeout(function () { REFRESH.margin(); REFRESH.fills(); REFRESH.trades(); }, 1200);
   }
   setInterval(pollStatus, 1000);
   setInterval(pollAlgo, 2000);
   setInterval(function () { REFRESH.ladder(); }, 700);
-  setInterval(function () { REFRESH.charts(); }, 5000);
+  setInterval(function () { REFRESH.charts(); }, 2000);
   setInterval(function () { REFRESH.margin(); }, 15000);
   setInterval(function () { REFRESH.fills(); REFRESH.trades(); }, 10000);
   setInterval(renderBanners, 1000);

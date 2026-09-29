@@ -1290,7 +1290,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         """The trading desktop — Arrow Trader's window frame and ladder style,
         driven entirely by THIS engine's endpoints, so every figure and every
         rule is the same code as the dashboard."""
-        return render_template("desk.html")
+        # A version stamp on the desk's own files: an update is never hidden
+        # behind a browser's cached copy of the old script.
+        here = Path(__file__).parent / "static"
+        ver = 0
+        for f in (here / "desk.js", here / "desk.css", _AT_STATIC / "ladder.css"):
+            try:
+                ver = max(ver, int(f.stat().st_mtime))
+            except OSError:
+                pass
+        resp = app.make_response(render_template("desk.html", ver=ver))
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.route("/desk-assets/<path:name>")
     def desk_assets(name):
@@ -1655,7 +1666,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             n = max(2, min(1000, int(request.args.get("n", 100))))
         except (TypeError, ValueError):
             n = 100
-        series = signal_engine.get_series(max_points=n) or {}
+        try:
+            sec = float(request.args.get("sec") or 0) or None   # plot only the last N s
+        except (TypeError, ValueError):
+            sec = None
+        series = signal_engine.get_series(max_points=n, last_sec=sec) or {}
         pts = series.get("points", [])
         return jsonify({
             "zscores": [p.get("z") for p in pts],

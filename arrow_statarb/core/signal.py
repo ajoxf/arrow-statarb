@@ -645,7 +645,7 @@ class SignalEngine:
         out["regime_detail"] = reg
         return out
 
-    def get_series(self, max_points: int = 200) -> Dict:
+    def get_series(self, max_points: int = 200, last_sec: Optional[float] = None) -> Dict:
         """Recent spread + per-sample z series for the dashboard charts.
 
         z is computed against the window's CURRENT mean/std (one consistent
@@ -660,6 +660,12 @@ class SignalEngine:
                     "stop_zscore": self._p()["stop_zscore"]}
 
         spreads = [s[3] for s in samples]
+        # mean/std always come from the WHOLE window (what the algo trades on);
+        # ``last_sec`` only trims which samples are PLOTTED.
+        if last_sec and last_sec > 0:
+            cut = samples[-1][0] - float(last_sec)
+            recent = [x for x in samples if x[0] >= cut]
+            samples = recent or samples[-1:]
         # The SAME mean/std the live signal uses (cached per the stats-update
         # interval), so the chart's z matches the traded z exactly.
         cache = self._stats_cache
