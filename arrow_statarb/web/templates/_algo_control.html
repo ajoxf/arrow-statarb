@@ -118,7 +118,9 @@ const AlgoCtl = (function () {
             btn.classList.add('algo-ctl-off');
             label = 'ALGO OFF';
             prefix = '○ ALGO OFF';
-            btn.title = 'The algo is STOPPED — it will not open or close anything. Click to start it.';
+            btn.title = state.algo_block
+                ? 'The algo is STOPPED and cannot start: ' + state.algo_block
+                : 'The algo is STOPPED — it will not open or close anything. Click to start it.';
         }
         txt.textContent = label;
         document.title = prefix + ' · ' + baseTitle;
