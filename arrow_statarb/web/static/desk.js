@@ -600,10 +600,20 @@
     var bar = $('.st-bar', body);
     bar.classList.toggle('ready', !!g.data_ready);
     bar.firstChild.style.width = (g.data_ready ? 100 : pct) + '%';
-    $('.st-warm', body).textContent = g.data_ready
-      ? 'Ready — ' + Math.floor(have / 60) + ' min sampled'
-      : Math.floor(have / 60) + ' of ' + Math.round(need / 60) + ' min sampled' +
-        (g.sample_status ? ' · not sampling: ' + g.sample_status : '');
+    var TFS = {'5m': 300, '15m': 900, '1h': 3600, '4h': 14400};
+    if (g.band_source === 'candles') {
+      // candle mode: the gate is N candles of the chosen timeframe
+      var sec = TFS[g.band_timeframe] || 900;
+      var hc = Math.round(have / sec), nc = Math.round(need / sec);
+      $('.st-warm', body).textContent = (g.data_ready
+        ? 'Ready — ' + hc + ' candles (' + g.band_timeframe + ', need ' + nc + ')'
+        : hc + ' of ' + nc + ' candles (' + g.band_timeframe + ') — loading history');
+    } else {
+      $('.st-warm', body).textContent = g.data_ready
+        ? 'Ready — ' + Math.floor(have / 60) + ' min sampled'
+        : Math.floor(have / 60) + ' of ' + Math.round(need / 60) + ' min sampled' +
+          (g.sample_status ? ' · not sampling: ' + g.sample_status : '');
+    }
     $('.st-kv', body).innerHTML =
       '<span>Mean</span><span>' + num(g.spread_mean, 2) + '</span>' +
       '<span>Std dev (σ)</span><span>' + num(g.spread_std, 3) + '</span>' +
@@ -647,15 +657,12 @@
     tf.onchange = function () { prefs.bbTf = tf.value; save(PREF_KEY, prefs); REFRESH.bands(); };
     last.onchange = function () { prefs.bbLast = Number(last.value); save(PREF_KEY, prefs); REFRESH.bands(); };
     if (!window.Chart) { $('.bb-c', body).parentNode.innerHTML = '<div class="muted">Charts unavailable.</div>'; return; }
-    bandsChart = new Chart($('.bb-c', body), {type: 'line', data: {labels: [], datasets: [
-      {label: 'Spread', data: [], borderColor: '#6a4fa3', borderWidth: 1.5, pointRadius: 0},
-      {label: 'EMA', data: [], borderColor: '#e07b00', borderWidth: 1.2, pointRadius: 0},
-      {label: 'Upper', data: [], borderColor: '#1f7ac2', borderWidth: 1, borderDash: [4, 3], pointRadius: 0},
-      {label: 'Lower', data: [], borderColor: '#1f7ac2', borderWidth: 1, borderDash: [4, 3], pointRadius: 0},
-      {label: 'Entry', data: [], borderColor: '#1b7a35', borderWidth: 1, borderDash: [2, 2], pointRadius: 0, hidden: false}]},
-      options: {animation: false, responsive: true, maintainAspectRatio: false,
-                plugins: {legend: {display: true, labels: {boxWidth: 8, font: {size: 9}}}},
-                scales: {x: {ticks: {maxTicksLimit: 5, font: {size: 9}}}, y: {ticks: {font: {size: 9}}}}}});
+    bandsChart = window.SpreadCandlesChart
+      ? new Chart($('.bb-c', body), (function () {
+          var c = SpreadCandlesChart.config({fontSize: 9, xTicks: 5, maintainAspectRatio: false});
+          return c;
+        })())
+      : null;
   };
   REFRESH.bands = function () {
     if (!W.bands || !bandsChart) { return Promise.resolve(); }
@@ -669,14 +676,7 @@
       };
       var entry = null, t = S.status && S.status.open_trade;
       if (t) { entry = Number(t.entry_spread != null ? t.entry_spread : t.entry_price); }
-      bandsChart.data.labels = pts.map(function (p) { return fmt(p.t); });
-      bandsChart.data.datasets[0].data = pts.map(function (p) { return p.close; });
-      bandsChart.data.datasets[0].pointRadius = pts.map(function (_, i) { return i === pts.length - 1 ? 3 : 0; });
-      bandsChart.data.datasets[1].data = pts.map(function (p) { return p.mean; });
-      bandsChart.data.datasets[2].data = pts.map(function (p) { return p.mean == null ? null : p.mean + e * p.std; });
-      bandsChart.data.datasets[3].data = pts.map(function (p) { return p.mean == null ? null : p.mean - e * p.std; });
-      bandsChart.data.datasets[4].data = pts.map(function () { return isFinite(entry) ? entry : null; });
-      bandsChart.update('none');
+      SpreadCandlesChart.set(bandsChart, pts, e, (entry != null && isFinite(entry)) ? entry : null, fmt);
       var algoTf = (S.status && S.status.signal && S.status.signal.band_timeframe) || d.timeframe;
       var src = $('.bb-src', body), onCandles = d.band_source === 'candles';
       src.textContent = onCandles ? 'ALGO USES CANDLES · ' + algoTf : 'ALGO USES TICKS';
