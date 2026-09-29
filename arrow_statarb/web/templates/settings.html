@@ -1209,4 +1209,85 @@
 
     loadSettings();
 </script>
+{% if request.args.get('embed') %}
+<!-- ── Compact layout for the desk's Settings window ─────────────────────
+     Same fields, same ids, same save — only the layout changes: cards flow
+     in columns with no gaps, each field is one line (label | input), the
+     help text moves into an ⓘ tooltip on the label, the Save bar and a
+     section index stay pinned at the top. -->
+<style>
+  body.embedded { font-size: 0.78rem; }
+  body.embedded .container-fluid { padding: 0 8px 8px !important; }
+  body.embedded h3 { display: none; }
+  #set-top { position: sticky; top: 0; z-index: 20; background: #f0f0f0; padding: 5px 0 4px;
+             border-bottom: 1px solid #c8c8c8; margin-bottom: 6px; }
+  #set-top .btn { padding: 2px 10px; font-size: 0.76rem; }
+  #set-index { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+  #set-index a { font-size: 0.68rem; padding: 1px 6px; border: 1px solid #b8b8b8; border-radius: 2px;
+                 background: #fff; color: #333; text-decoration: none; white-space: nowrap; }
+  #set-index a:hover { background: #e3eefa; }
+  body.embedded #set-cards { display: block; column-width: 400px; column-gap: 8px; margin: 0; }
+  body.embedded #set-cards > [class*="col-"] { width: 100%; padding: 0; margin: 0 0 8px;
+                                               break-inside: avoid; display: inline-block; }
+  body.embedded .card { height: auto !important; border-radius: 2px; }
+  body.embedded .card-header { padding: 3px 8px; font-size: 0.76rem; font-weight: 700; background: #d9d9d9; }
+  body.embedded .card-body { padding: 5px 8px; }
+  body.embedded .card-body .row { --bs-gutter-y: 3px; --bs-gutter-x: 8px; }
+  body.embedded .card-body .row > [class*="col-"] { flex: 0 0 100%; max-width: 100%; }
+  body.embedded .fld { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: center; gap: 6px; }
+  body.embedded .fld > .form-label { margin: 0; font-size: 0.76rem; line-height: 1.2; }
+  body.embedded .fld > .form-control, body.embedded .fld > .form-select,
+  body.embedded .fld > .input-group { grid-column: 2; }
+  body.embedded .fld > .input-group { grid-column: 1 / -1; }
+  body.embedded .form-control, body.embedded .form-select, body.embedded .input-group-text,
+  body.embedded .input-group .btn { padding: 1px 6px; font-size: 0.76rem; min-height: 0; height: 24px; border-radius: 2px; }
+  body.embedded .form-check { margin: 0; min-height: 0; }
+  body.embedded .form-check-label { font-size: 0.76rem; }
+  body.embedded .form-text { display: none; }
+  body.embedded .form-text.text-warning { display: block; font-size: 0.7rem; margin: 0; }
+  body.embedded .alert { padding: 3px 6px !important; margin-bottom: 5px !important; font-size: 0.7rem; }
+  body.embedded .badge { font-size: 0.6rem; }
+  body.embedded .tip { cursor: help; color: #1f7ac2; margin-left: 3px; font-style: normal; }
+</style>
+<script>
+(function () {
+  const cards = document.querySelector('.card') && document.querySelector('.card').closest('.row');
+  if (!cards) return;
+  cards.id = 'set-cards';
+  // Help text → ⓘ tooltip on the field's label (hover to read it).
+  document.querySelectorAll('.form-text').forEach(ft => {
+    if (ft.classList.contains('text-warning')) return;
+    const box = ft.parentElement;
+    const lab = box.querySelector('.form-label, .form-check-label');
+    const txt = ft.textContent.replace(/\s+/g, ' ').trim();
+    if (lab && txt) {
+      lab.title = txt;
+      const i = document.createElement('i'); i.className = 'tip'; i.textContent = 'ⓘ'; i.title = txt;
+      lab.appendChild(i);
+    }
+  });
+  // One line per field: label left, input right.
+  document.querySelectorAll('.card-body .row > [class*="col-"]').forEach(col => {
+    if (col.querySelector(':scope > .form-label') &&
+        col.querySelector(':scope > .form-control, :scope > .form-select, :scope > .input-group')) {
+      col.classList.add('fld');
+    }
+  });
+  // Save bar + section index pinned at the top.
+  const save = document.querySelector('button[onclick="saveSettings()"]');
+  const bar = save && save.closest('.col-12');
+  const top = document.createElement('div'); top.id = 'set-top';
+  if (bar) { top.appendChild(bar.firstElementChild); bar.remove(); }
+  const idx = document.createElement('div'); idx.id = 'set-index';
+  document.querySelectorAll('#set-cards .card-header').forEach((h, n) => {
+    const card = h.closest('[class*="col-"]'); card.id = card.id || ('set-sec-' + n);
+    const a = document.createElement('a'); a.href = '#' + card.id; a.textContent = h.textContent.trim();
+    a.onclick = e => { e.preventDefault(); card.scrollIntoView({block: 'start'}); window.scrollBy(0, -top.offsetHeight - 4); };
+    idx.appendChild(a);
+  });
+  top.appendChild(idx);
+  cards.parentNode.insertBefore(top, cards);
+})();
+</script>
+{% endif %}
 {% endblock %}
