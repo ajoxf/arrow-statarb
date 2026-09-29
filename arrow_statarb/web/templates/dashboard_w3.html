@@ -512,7 +512,12 @@
         <div class="card mb-3">
             <div class="card-header py-1 d-flex align-items-center gap-2">
                 <small><i class="bi bi-bar-chart-line me-1"></i>Candle Bands <span class="text-secondary">(BB · EMA basis)</span></small>
-                <select id="cb-tf" class="form-select form-select-sm py-0 ms-auto" style="width:auto;font-size:0.72rem;">
+                <select id="cb-last" class="form-select form-select-sm py-0 ms-auto" style="width:auto;font-size:0.72rem;"
+                        title="How many candles the chart shows (the bands always use the full history)">
+                    <option value="40">40 candles</option><option value="80">80 candles</option>
+                    <option value="150">150 candles</option><option value="300">300 candles</option>
+                </select>
+                <select id="cb-tf" class="form-select form-select-sm py-0" style="width:auto;font-size:0.72rem;">
                     <option value="5m">5 min</option><option value="15m">15 min</option>
                     <option value="1h">1 hour</option><option value="4h">4 hours</option>
                 </select>
@@ -1182,9 +1187,11 @@
                   scales: {x: {ticks: {maxTicksLimit: 6, font: {size: 9}}}, y: {ticks: {font: {size: 9}}}}}
     });
     let cbTfChosen = null;
+    let cbLast = 80;
+    try { cbLast = Number(localStorage.getItem('cb-last')) || 80; } catch (e) {}
     function refreshCandleBands() {
         const sel = document.getElementById('cb-tf');
-        const q = cbTfChosen ? ('?tf=' + cbTfChosen + '&last=120') : '?last=120';
+        const q = '?last=' + cbLast + (cbTfChosen ? '&tf=' + cbTfChosen : '');
         fetch('/api/candles' + q).then(r => r.json()).then(d => {
             if (!cbTfChosen && sel) sel.value = d.timeframe;
             const e = Number(d.entry_zscore || 2);
@@ -1193,6 +1200,8 @@
                             day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false});
             candleBandChart.data.labels = pts.map(p => fmt(p.t));
             candleBandChart.data.datasets[0].data = pts.map(p => p.close);
+            // the CURRENT candle (still forming) is the last point: mark it
+            candleBandChart.data.datasets[0].pointRadius = pts.map((_, i) => i === pts.length - 1 ? 3 : 0);
             candleBandChart.data.datasets[1].data = pts.map(p => p.mean);
             candleBandChart.data.datasets[2].data = pts.map(p => p.mean == null ? null : p.mean + e * p.std);
             candleBandChart.data.datasets[3].data = pts.map(p => p.mean == null ? null : p.mean - e * p.std);
@@ -1206,7 +1215,10 @@
             const b = d.bands || {}, st = (d.status || {})[d.timeframe] || {};
             const note = document.getElementById('cb-note');
             if (note) {
-                note.textContent = `${d.label} · N=${d.length} · ${b.count || 0} candles` +
+                const lp = pts.length ? pts[pts.length - 1] : null;
+                const live = lp ? ` · current candle ${fmt(lp.t)}: ${Number(lp.close).toFixed(2)}` +
+                    ` · updated ${new Date().toLocaleTimeString('en-IN', {hour12: false})}` : '';
+                note.textContent = `${d.label} · N=${d.length} · ${b.count || 0} candles` + live +
                     (b.ready ? ` · EMA ${Number(b.mean).toFixed(2)} · σ ${Number(b.std).toFixed(2)} · bands ±${e}σ`
                              : ` · need ${d.length} candles`) +
                     ` · history: ${st.state || 'pending'}${st.detail ? ' (' + st.detail + ')' : ''}`;
@@ -1215,6 +1227,15 @@
     }
     const cbSel = document.getElementById('cb-tf');
     if (cbSel) cbSel.addEventListener('change', () => { cbTfChosen = cbSel.value; refreshCandleBands(); });
+    const cbLastSel = document.getElementById('cb-last');
+    if (cbLastSel) {
+        cbLastSel.value = String(cbLast);
+        cbLastSel.addEventListener('change', () => {
+            cbLast = Number(cbLastSel.value) || 80;
+            try { localStorage.setItem('cb-last', String(cbLast)); } catch (e) {}
+            refreshCandleBands();
+        });
+    }
     refreshCandleBands();
     setInterval(refreshCandleBands, 3000);
 
