@@ -979,3 +979,17 @@ def test_band_settings_round_trip_and_the_candles_endpoint(tmp_path):
     assert set(d["status"]) == {"5m", "15m", "1h", "4h"} and d["points"] == []
     st = c.get("/api/engine/status").get_json()
     assert st["signal"]["band_source"] == "candles" and st["signal"]["band_timeframe"] == "1h"
+
+
+def test_algo_entry_journals_its_band_timeframe_through_the_real_order_path(tmp_path):
+    """The algo's band source / timeframe must reach the journal via the app's
+    own execute path, so a restart re-adopts the position on the same bands."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    ex = algo._execute                       # the app's _spread_execute
+    res = ex("SHORT_SPREAD", 1, source="algo", z=2.6, spread=12.0,
+             band_source="candles", band_tf="1h")
+    assert res.get("success"), res
+    import arrow_statarb.web.app as appmod
+    from arrow_statarb.core.trade_log import TradeLog
+    op = TradeLog(path=appmod.TRADES_FILE).open_position()
+    assert op["source"] == "algo" and op["band_source"] == "candles" and op["band_tf"] == "1h"

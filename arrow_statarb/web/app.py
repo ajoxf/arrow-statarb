@@ -512,7 +512,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             why = _algo_blocked()
             if why:
                 return {"success": False, "error": why}
-            return _spread_execute_unlocked(direction, lots, source, z, spread)
+            return _spread_execute_unlocked(direction, lots, source, z, spread,
+                                            band_source, band_tf)
         why = _manual_blocked()
         if why:
             return {"success": False, "error": why}
