@@ -58,6 +58,47 @@
                         </div>
                         <div class="form-text">spread = k × leg_a − leg_b, to put two differently-priced legs on one scale. <strong>1 = same-scale</strong> (calendar / cash-future). For an ETF vs its future, set k ≈ future ÷ ETF (~90). leg_b is the contract leg. Auto-derive reads live prices.</div>
                     </div>
+                    <!-- ── Band source: how the mean and σ are measured ── -->
+                    <div class="col-12"><hr class="my-1">
+                        <div class="fw-semibold small mb-1">Mean &amp; bands</div>
+                        <div class="alert alert-secondary py-2 small mb-2">
+                            <strong>Ticks</strong> = the rolling window above (mean of every tick).
+                            <strong>Candles</strong> = TradingView Bollinger Bands with an <strong>EMA</strong>
+                            basis on the spread's candles: basis = EMA(N) of the closes, σ = stdev(N),
+                            bands = basis ± Entry Z × σ. The current candle is included, so the bands move
+                            as on the chart. Candles are saved to disk and back-filled from Arrow, so a
+                            restart or the overnight gap needs no warm-up. An open position keeps the
+                            bands it entered with if you change this.
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Band source</label>
+                        <select class="form-select" id="s-band-source">
+                            <option value="ticks">Ticks (rolling window)</option>
+                            <option value="candles">Candles (TradingView BB, EMA basis)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Candle timeframe</label>
+                        <select class="form-select" id="s-band-tf">
+                            <option value="5m">5 min</option>
+                            <option value="15m">15 min</option>
+                            <option value="1h">1 hour</option>
+                            <option value="4h">4 hours</option>
+                        </select>
+                        <div class="form-text">Candles line up with the exchange session (MCX from 09:00 IST — 4 H = 09:00, 13:00, 17:00, 21:00), as on TradingView.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Length N (candles)</label>
+                        <input type="number" step="1" min="2" class="form-control" id="s-band-length">
+                        <div class="form-text">BB length — 20 as on the chart. Entry Z is the band multiplier (2 = BB 2).</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Max hold (candles)</label>
+                        <input type="number" step="1" min="0" class="form-control" id="s-max-hold-candles">
+                        <div class="form-text">Candle mode's time-stop: close after this many candles of the timeframe the trade entered on (replaces the half-life time-stop and half-life gates). 0 = off.</div>
+                    </div>
+                    <div class="col-12"><div class="small text-secondary" id="s-band-status"></div><hr class="my-1"></div>
                     <div class="col-md-6">
                         <label class="form-label fw-semibold">Trade direction</label>
                         <select class="form-select" id="s-trade-direction">
@@ -858,6 +899,11 @@
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
         _set('s-trade-direction', s.signal.trade_direction || 'both');
+        _set('s-band-source', s.signal.band_source || 'ticks');
+        _set('s-band-tf', s.signal.band_timeframe || '15m');
+        _set('s-band-length', s.signal.band_length || 20);
+        _set('s-max-hold-candles', s.signal.max_hold_candles || 0);
+        refreshBandStatus();
         _set('s-zdiv', s.signal.max_entry_z_divergence);
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
         _set('s-zmax', s.signal.max_entry_zscore);
@@ -1018,6 +1064,10 @@
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
                 trade_direction: document.getElementById('s-trade-direction').value,
+                band_source: document.getElementById('s-band-source').value,
+                band_timeframe: document.getElementById('s-band-tf').value,
+                band_length: +document.getElementById('s-band-length').value,
+                max_hold_candles: +document.getElementById('s-max-hold-candles').value,
                 max_entry_z_divergence: +document.getElementById('s-zdiv').value,
                 max_entry_spread_divergence: +document.getElementById('s-sdiv').value,
                 max_entry_zscore: +document.getElementById('s-zmax').value,
@@ -1205,6 +1255,21 @@
             out.className = 'mt-3 small border rounded p-2 ' + (r.success ? 'text-success' : 'text-danger');
         } catch (e) { out.textContent = 'Error: ' + e; }
         btn.disabled = false; btn.innerHTML = '<i class="bi bi-play-circle me-1"></i>Run Unit Tests';
+    }
+
+    // What history is loaded per timeframe (so a choice is never made blind).
+    async function refreshBandStatus() {
+        const el = document.getElementById('s-band-status');
+        if (!el) return;
+        try {
+            const d = await fetch('/api/candles?last=10').then(r => r.json());
+            const lab = {'5m': '5 min', '15m': '15 min', '1h': '1 hour', '4h': '4 hours'};
+            el.innerHTML = 'Candles loaded — ' + Object.keys(lab).map(tf => {
+                const st = (d.status || {})[tf] || {}, n = (d.counts || {})[tf] || 0;
+                const mark = st.state === 'ok' ? '✓' : st.state === 'failed' ? '✗' : '…';
+                return `${lab[tf]}: <b>${n}</b> ${mark}` + (st.state === 'failed' ? ` <span class="text-danger">(${st.detail})</span>` : '');
+            }).join(' · ');
+        } catch (e) { el.textContent = ''; }
     }
 
     loadSettings();

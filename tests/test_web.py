@@ -1054,3 +1054,34 @@ def test_resaving_the_same_pair_keeps_the_collected_window(tmp_path):
     assert c.post("/api/leg-assignments",
                   json={"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 2}}).get_json()["success"]
     assert len(eng._samples) == 0          # a ratio change is a new spread
+
+
+def test_band_settings_round_trip_and_the_candles_endpoint(tmp_path):
+    app, broker = _app(tmp_path)
+    c = app.test_client()
+    r = c.post("/api/settings", json={"signal": {"band_source": "candles", "band_timeframe": "1h",
+                                                 "band_length": 20, "max_hold_candles": 8}})
+    assert r.get_json()["success"]
+    s = c.get("/api/settings").get_json()["signal"]
+    assert (s["band_source"], s["band_timeframe"], s["band_length"], s["max_hold_candles"]) == \
+        ("candles", "1h", 20, 8)
+    assert c.post("/api/settings", json={"signal": {"band_source": "bogus"}}).status_code == 400
+    d = c.get("/api/candles?tf=15m&n=20").get_json()
+    assert d["timeframe"] == "15m" and d["band_source"] == "candles"
+    assert set(d["status"]) == {"5m", "15m", "1h", "4h"} and d["points"] == []
+    st = c.get("/api/engine/status").get_json()
+    assert st["signal"]["band_source"] == "candles" and st["signal"]["band_timeframe"] == "1h"
+
+
+def test_algo_entry_journals_its_band_timeframe_through_the_real_order_path(tmp_path):
+    """The algo's band source / timeframe must reach the journal via the app's
+    own execute path, so a restart re-adopts the position on the same bands."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    ex = algo._execute                       # the app's _spread_execute
+    res = ex("SHORT_SPREAD", 1, source="algo", z=2.6, spread=12.0,
+             band_source="candles", band_tf="1h")
+    assert res.get("success"), res
+    import arrow_statarb.web.app as appmod
+    from arrow_statarb.core.trade_log import TradeLog
+    op = TradeLog(path=appmod.TRADES_FILE).open_position()
+    assert op["source"] == "algo" and op["band_source"] == "candles" and op["band_tf"] == "1h"

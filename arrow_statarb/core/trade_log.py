@@ -110,7 +110,8 @@ class TradeLog:
                capital_gains_pct: float = 0.0,
                stt_a_pct: Optional[float] = None, stt_b_pct: Optional[float] = None,
                peak_pnl: Optional[float] = None, trough_pnl: Optional[float] = None,
-               peak_min: Optional[float] = None, trough_min: Optional[float] = None) -> Dict:
+               peak_min: Optional[float] = None, trough_min: Optional[float] = None,
+               band_source: Optional[str] = None, band_tf: Optional[str] = None) -> Dict:
         """Append an OPEN or CLOSE event. On CLOSE, settle against the last
         matching OPEN to fill in spread/net P&L plus full round-trip detail
         (entry/exit z, per-leg prices, spreads, time-in-trade).
@@ -125,6 +126,8 @@ class TradeLog:
             "time": time.strftime("%H:%M:%S"),
             "action": action,          # OPEN | CLOSE
             "source": source,          # manual | algo
+            # the bands the position is managed on (kept if the setting changes)
+            "band_source": band_source, "band_tf": band_tf,
             "name": name,
             "direction": direction,
             "lots": lots,
@@ -248,7 +251,9 @@ class TradeLog:
                             "source": (rec.get("source") or "manual"),
                             "leg_a_price": rec.get("leg_a_price"),
                             "leg_b_price": rec.get("leg_b_price"),
-                            "zscore": rec.get("zscore")}
+                            "zscore": rec.get("zscore"),
+                            "band_source": rec.get("band_source") or "ticks",
+                            "band_tf": rec.get("band_tf")}
         return None
 
     def last_close_time(self, source: Optional[str] = None) -> Optional[float]:

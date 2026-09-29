@@ -197,6 +197,8 @@ class ArrowAutoTrader:
                 # P&L reference for a position re-adopted after a restart
                 "entry_fill_spread": pos.get("entry_spread"),
                 "entry_time": float(pos.get("ts") or self._clock()),
+                "band_source": pos.get("band_source") or "ticks",
+                "band_tf": pos.get("band_tf"),
                 "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes (fresh)
                 "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [],
@@ -475,7 +477,7 @@ class ArrowAutoTrader:
         # Bounds are in seconds; the signal's half_life_sec is authoritative.
         # Skipped when it can't be measured (half_life_sec = 0). 0 bound = off.
         hl_sec = float(sig.get("half_life_sec", 0) or 0)
-        if hl_sec > 0:
+        if hl_sec > 0 and sig.get("band_source") != "candles":
             hl_min = float(p.get("half_life_min_sec", 0) or 0)
             hl_max = float(p.get("half_life_max_sec", 0) or 0)
             if hl_min > 0 and hl_sec < hl_min:
@@ -600,6 +602,36 @@ class ArrowAutoTrader:
             stop = min(cands)
         return round(stop, 2), round(target, 2)
 
+    @staticmethod
+    def _accepted(fn, kw: Dict) -> Dict:
+        """The subset of ``kw`` that ``fn`` can take (all of it for **kwargs)."""
+        import inspect
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        if any(p.kind == p.VAR_KEYWORD for p in params.values()):
+            return dict(kw)
+        return {k: v for k, v in kw.items() if k in params}
+
+    def _position_bands(self, sig: Dict) -> Optional[Tuple[float, float]]:
+        """(mean, σ) the OPEN position is managed on when they differ from the
+        current setting — the bands it entered with. None = use the signal's."""
+        pos = self._pos
+        if not pos:
+            return None
+        src, tf = pos.get("band_source") or "ticks", pos.get("band_tf")
+        if src == sig.get("band_source") and (src != "candles" or tf == sig.get("band_timeframe")):
+            return None
+        if src == "candles":
+            b = (sig.get("bands") or {}).get(tf or "") or {}
+            m, sd = b.get("mean"), b.get("std")
+        else:
+            m, sd = sig.get("tick_mean"), sig.get("tick_std")
+        if m is None or not sd or sd <= 1e-12:
+            return None
+        return float(m), float(sd)
+
     def _tick(self) -> None:
         p = self._params()
         sig = self._signal() or {}
@@ -617,10 +649,18 @@ class ArrowAutoTrader:
             self._set_snap(snap)
             return
 
-        if not sig.get("ready"):
-            need = sig.get("min_signal_minutes", 0)
-            have = sig.get("span_minutes", 0)
-            snap["status"] = f"collecting signal ({have:.1f}/{need:.0f} min)"
+        # A held position is managed on the bands it ENTERED with, even if the
+        # band setting has changed since (and even if the new source is not
+        # ready) — so its readiness, not the setting's, gates the exit logic.
+        pos_bands = self._position_bands(sig)
+        if not sig.get("ready") and pos_bands is None:
+            if sig.get("band_source") == "candles":
+                snap["status"] = (f"loading candles ({sig.get('candles_have', 0)}/"
+                                  f"{sig.get('candles_need', 0)} on {sig.get('band_timeframe')})")
+            else:
+                need = sig.get("min_signal_minutes", 0)
+                have = sig.get("span_minutes", 0)
+                snap["status"] = f"collecting signal ({have:.1f}/{need:.0f} min)"
             self._set_snap(snap)
             return
 
@@ -790,6 +830,12 @@ class ArrowAutoTrader:
                 z_close, sp_close = z_sell, sp_sell
             else:
                 z_close, sp_close = z_buy, sp_buy
+            if pos_bands is not None:
+                pm, ps = pos_bands
+                if sp_close is not None:
+                    z_close = (float(sp_close) - pm) / ps
+                if spread_mid is not None:
+                    z_mid = (float(spread_mid) - pm) / ps
             z = z_close if z_close is not None else z_mid
             entry_z_sign = self._pos["entry_z"]
             # revert through exit_z back toward the mean
@@ -798,6 +844,11 @@ class ArrowAutoTrader:
             min_hold_sec = float(p.get("min_hold_sec", 0.0))
             max_hold_sec = (float(p.get("time_stop_half_lives", 3.0))
                             * half_life * sample_interval) if half_life > 0 else 0.0
+            if self._pos.get("band_source") == "candles":
+                # candle mode: max hold = N candles of the timeframe it entered on
+                from arrow_statarb.core.candles import tf_seconds
+                mhc = float(p.get("max_hold_candles", 0) or 0)
+                max_hold_sec = mhc * tf_seconds(self._pos.get("band_tf") or "15m") if mhc > 0 else 0.0
             spread_now = sp_close if sp_close is not None else spread_mid
 
             # ── live mark-to-market net P&L on the open position (₹) ──────────
@@ -1028,11 +1079,15 @@ class ArrowAutoTrader:
 
         # Pass the algo's DECISION z/spread (and source) so the journal records
         # the exact signal it acted on, not a re-sampled value at order time.
-        try:
-            res = self._execute(direction, lots, source="algo",
-                                z=round(z, 4), spread=round(spread, 4)) or {}
-        except TypeError:                        # execute_fn without the kwargs (tests)
-            res = self._execute(direction, lots) or {}
+        sig_now = self._signal() or {}
+        band_src = sig_now.get("band_source") or "ticks"
+        band_tf = sig_now.get("band_timeframe") if band_src == "candles" else None
+        # Pass only the keyword arguments execute_fn accepts — decided BEFORE
+        # the call. (Retrying on TypeError could send an order twice if the
+        # error came from inside a call that had already placed one.)
+        kw = {"source": "algo", "z": round(z, 4), "spread": round(spread, 4),
+              "band_source": band_src, "band_tf": band_tf}
+        res = self._execute(direction, lots, **self._accepted(self._execute, kw)) or {}
         if res.get("success"):
             # entry_fill_spread = the ACTUAL executed spread (avg fills), used for
             # live ₹ P&L; falls back to the decision spread when the execute path
@@ -1046,6 +1101,7 @@ class ArrowAutoTrader:
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),
                 "entry_time": self._clock(),
+                "band_source": band_src, "band_tf": band_tf,   # the bands it keeps
                 "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes
                 "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
@@ -1082,13 +1138,11 @@ class ArrowAutoTrader:
                 "trough_pnl": self._pos.get("trough_pnl"),
                 "peak_min": self._pos.get("peak_min"),
                 "trough_min": self._pos.get("trough_min")}
-        try:
-            res = self._close(self._pos["direction"], self._pos["lots"], **kw, **life) or {}
-        except TypeError:                       # close_fn without the lifecycle kwargs
-            try:
-                res = self._close(self._pos["direction"], self._pos["lots"], **kw) or {}
-            except TypeError:                   # close_fn without any extras (tests)
-                res = self._close(self._pos["direction"], self._pos["lots"]) or {}
+        # Only the kwargs close_fn accepts, decided BEFORE the one call — a
+        # retry on TypeError could close twice (i.e. open the other side) if
+        # the error came from inside a call that had already sent orders.
+        res = self._close(self._pos["direction"], self._pos["lots"],
+                          **self._accepted(self._close, {**kw, **life})) or {}
         if res.get("success"):
             closed_dir = self._pos["direction"]
             logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))
