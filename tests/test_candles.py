@@ -53,7 +53,7 @@ def test_align_legs_carries_a_quiet_leg_forward():
          (_ist(2026, 10, 5, 9, 30), 102.0)]
     b = [(_ist(2026, 10, 5, 9, 0), 90.0), (_ist(2026, 10, 5, 9, 30), 93.0)]   # no 09:15 trade
     rows = align_legs(a, b, 900, 540)
-    assert [(ca, cb) for _, ca, cb in rows] == [(100.0, 90.0), (101.0, 90.0), (102.0, 93.0)]
+    assert [(r[1], r[2]) for r in rows] == [(100.0, 90.0), (101.0, 90.0), (102.0, 93.0)]
 
 
 # ── the store: live candles, current candle included, persistence ────────────
@@ -242,7 +242,8 @@ def test_broker_candles_parse_arrow_rows_in_paise_and_remember_the_exchange(arro
     b.get_streamed_ltp = lambda syms: {"CRUDEOILM19OCT26F": 5498.0}
     t_to = _ist(2026, 10, 5, 10, 0)
     rows = b.get_candles("mcx_fo", "CRUDEOILM19OCT26F", "15m", t_to - 3 * 3600, t_to)
-    assert rows == [(_ist(2026, 10, 5, 9, 0), 5485.0), (_ist(2026, 10, 5, 9, 15), 5499.0)]
+    assert rows == [(_ist(2026, 10, 5, 9, 0), 5480.0, 5490.0, 5470.0, 5485.0),
+                    (_ist(2026, 10, 5, 9, 15), 5485.0, 5500.0, 5480.0, 5499.0)]
     assert calls[0][:3] == ("MCX", "9001", "15min") and calls[1][0] == "MCXFO"
     assert calls[1][3] == "2026-10-05T07:00:00"          # IST, yyyy-MM-ddTHH:mm:ss
     calls.clear()
@@ -256,7 +257,7 @@ def test_broker_candles_keep_rupees_when_arrow_already_sends_rupees(arrow_broker
     b._client.candle_data = lambda *a, **k: [["2026-10-05T09:00:00+0530", 5480, 5490, 5470, 5485, 1]]
     b.get_streamed_ltp = lambda syms: {"X": 5490.0}
     t = _ist(2026, 10, 5, 10, 0)
-    assert b.get_candles("mcx_fo", "X", "15m", t - 3600, t)[0][1] == 5485.0
+    assert b.get_candles("mcx_fo", "X", "15m", t - 3600, t)[0][1:] == (5480.0, 5490.0, 5470.0, 5485.0)
 
 
 def test_a_restored_position_keeps_its_candle_timeframe(tmp_path):
@@ -296,3 +297,27 @@ def test_old_saved_hourly_candles_are_dropped_and_rebuilt(tmp_path):
         "1h": [[_ist(2026, 10, 5, 9, 0), 105.0, 100.0]]}}))       # no "grid": old file
     c = SpreadCandles(persist_path=p, key_provider=lambda: "A|B")
     assert c.counts()["15m"] == 1 and c.counts()["1h"] == 0
+
+
+# ── candlesticks: the spread's open / high / low / close ─────────────────────
+def test_live_ticks_build_the_spread_candle_open_high_low_close(tmp_path):
+    c = SpreadCandles(persist_path=tmp_path / "c.json", key_provider=lambda: "A|B")
+    t0 = _ist(2026, 10, 5, 9, 0)
+    for i, a in enumerate([110.0, 115.0, 104.0, 108.0]):          # spread 10, 15, 4, 8
+        c.update(t0 + 60 * i, a, 100.0, k=1.0)
+    (t, o, h, l, cl), = c.ohlc("15m")
+    assert (o, h, l, cl) == (10.0, 15.0, 4.0, 8.0)
+    pt = c.series("15m", 2)["points"][-1]
+    assert (pt["open"], pt["high"], pt["low"], pt["close"]) == (10.0, 15.0, 4.0, 8.0)
+
+
+def test_history_ohlc_rolls_up_into_hourly_candles(tmp_path):
+    t0 = _ist(2026, 10, 5, 9, 0)
+    # four 15-min candles of leg A (o, h, l, c); leg B flat at 100
+    a = [(t0, 110, 112, 109, 111), (t0 + 900, 111, 118, 110, 117),
+         (t0 + 1800, 117, 117, 105, 106), (t0 + 2700, 106, 109, 104, 108)]
+    b = [(t0 + i * 900, 100, 100, 100, 100) for i in range(4)]
+    rows = align_legs(a, b, 3600, 540)
+    assert len(rows) == 1
+    t, ca, cb, o, h, l = rows[0]
+    assert (o, h, l, ca - cb) == (10.0, 18.0, 4.0, 8.0)      # first open, max high, min low, last close

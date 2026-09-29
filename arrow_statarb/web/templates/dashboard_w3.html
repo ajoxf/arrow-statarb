@@ -1175,17 +1175,10 @@
 
     // Candle bands — the spread's candle closes with EMA(N) and EMA ± entry·σ,
     // current candle included (what TradingView's BB with an EMA basis shows).
-    const candleBandChart = makeChart('candleBandChart', {
-        type: 'line',
-        data: {labels: [], datasets: [
-            {label: 'Spread close', data: [], borderColor: '#6f42c1', borderWidth: 1.5, pointRadius: 0, tension: 0},
-            {label: 'EMA', data: [], borderColor: '#fd7e14', borderWidth: 1.2, pointRadius: 0},
-            {label: 'Upper', data: [], borderColor: '#0d6efd', borderWidth: 1, borderDash: [4, 3], pointRadius: 0},
-            {label: 'Lower', data: [], borderColor: '#0d6efd', borderWidth: 1, borderDash: [4, 3], pointRadius: 0}]},
-        options: {animation: false, responsive: true, maintainAspectRatio: true,
-                  plugins: {legend: {display: true, labels: {boxWidth: 10, font: {size: 9}}}},
-                  scales: {x: {ticks: {maxTicksLimit: 6, font: {size: 9}}}, y: {ticks: {font: {size: 9}}}}}
-    });
+    // Candles of the spread with EMA and bands drawn on top (TradingView style).
+    const candleBandChart = makeChart('candleBandChart', window.SpreadCandlesChart
+        ? SpreadCandlesChart.config({fontSize: 9})
+        : {type: 'line', data: {labels: [], datasets: []}});
     let cbTfChosen = null;
     let cbLast = 80;
     try { cbLast = Number(localStorage.getItem('cb-last')) || 80; } catch (e) {}
@@ -1198,14 +1191,9 @@
             const pts = d.points || [];
             const fmt = t => new Date(t * 1000).toLocaleString('en-IN', {timeZone: 'Asia/Kolkata',
                             day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false});
-            candleBandChart.data.labels = pts.map(p => fmt(p.t));
-            candleBandChart.data.datasets[0].data = pts.map(p => p.close);
-            // the CURRENT candle (still forming) is the last point: mark it
-            candleBandChart.data.datasets[0].pointRadius = pts.map((_, i) => i === pts.length - 1 ? 3 : 0);
-            candleBandChart.data.datasets[1].data = pts.map(p => p.mean);
-            candleBandChart.data.datasets[2].data = pts.map(p => p.mean == null ? null : p.mean + e * p.std);
-            candleBandChart.data.datasets[3].data = pts.map(p => p.mean == null ? null : p.mean - e * p.std);
-            candleBandChart.update('none');
+            const ot = (typeof currentOpenTrade !== 'undefined') ? currentOpenTrade : null;
+            const entryLvl = ot && ot.entry_spread != null ? Number(ot.entry_spread) : null;
+            if (window.SpreadCandlesChart) SpreadCandlesChart.set(candleBandChart, pts, e, entryLvl, fmt);
             const src = document.getElementById('cb-src');
             if (src) {
                 const on = d.band_source === 'candles' && (!cbTfChosen || cbTfChosen === d.timeframe);

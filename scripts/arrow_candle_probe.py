@@ -136,7 +136,7 @@ def main() -> int:
                 continue
             live = (broker.get_streamed_ltp([sym]) or {}).get(sym.upper())
             print(f"  {sym}: {len(rows)} candles  {_t(rows[0][0])} → {_t(rows[-1][0])}  "
-                  f"last close ₹{rows[-1][1]:.2f}  (live ₹{live if live else '—'})")
+                  f"last close ₹{rows[-1][-1]:.2f}  (live ₹{live if live else '—'})")
             legs.append(rows)
         route = getattr(broker, "_candle_routes", {})
         if route:
@@ -148,7 +148,7 @@ def main() -> int:
     k = float(cfg.get("signal.hedge_ratio", 1) or 1)
     rows = got.get("15m")
     if rows:
-        closes = [k * a - b for _, a, b in rows]
+        closes = [k * r[1] - r[2] for r in rows]
         n = args.n
         ema, sd = pine_ema(closes, n), pine_stdev(closes, n)
         e = float(cfg.get("signal.entry_zscore", 2.0) or 2.0)

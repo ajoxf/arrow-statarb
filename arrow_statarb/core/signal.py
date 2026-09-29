@@ -345,7 +345,8 @@ class SignalEngine:
         ta = (book.get("leg_a") or {}).get("ltp") or la
         tb = (book.get("leg_b") or {}).get("ltp") or lb
         try:
-            self.candles.update(now, float(ta), float(tb))
+            self.candles.update(now, float(ta), float(tb),
+                                k=float(self._p().get("hedge_ratio", 1.0) or 1.0))
         except Exception as exc:                      # noqa: BLE001 — never stop sampling
             logger.debug("SignalEngine: candle update failed: {}", exc)
 
