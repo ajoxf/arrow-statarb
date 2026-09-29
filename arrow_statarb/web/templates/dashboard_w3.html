@@ -968,12 +968,9 @@
                 <div class="text-secondary mt-2" id="manual-trade-info" style="font-size:0.65rem;"></div>
                 <div class="text-secondary mt-2" style="font-size:0.62rem;">
                     <i class="bi bi-exclamation-triangle text-warning me-1"></i>
-                    A manual trade <strong>ignores the Start/Stop switch</strong> —
-                    an armed order fires even while the algo is stopped.
-                    It skips the signal gates (z, trend, cooldown, edge filter)
-                    but never the risk limits or circuit breakers. The engine's
-                    own ₹ stop stays armed alongside your Stop Loss;
-                    whichever the spread reaches first closes the trade.
+                    <strong>Manual and algo never trade together:</strong>
+                    manual orders are refused while the algo is ON, and the
+                    algo cannot start while a manual position is open.
                 </div>
             </div>
         </div>
