@@ -34,6 +34,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
+from arrow_statarb.core.candles import SpreadCandles, TIMEFRAMES, TF_LABELS, normalise_tf
 from arrow_statarb.core.algo import ArrowAutoTrader
 from arrow_statarb.core.executor import SpreadExecutor, LegOrder
 from arrow_statarb.core.execution_log import ExecutionLog
@@ -504,7 +505,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return None
 
     def _spread_execute(direction: str, lots: int, source: str = "manual",
-                        z: Optional[float] = None, spread: Optional[float] = None) -> Dict:
+                        z: Optional[float] = None, spread: Optional[float] = None,
+                        band_source: Optional[str] = None,
+                        band_tf: Optional[str] = None) -> Dict:
         if source == "algo":
             why = _algo_blocked()
             if why:
@@ -524,13 +527,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         try:
             if arrow_algo.running:          # re-check under the lock
                 return {"success": False, "error": _manual_blocked()}
-            return _spread_execute_unlocked(direction, lots, source, z, spread)
+            return _spread_execute_unlocked(direction, lots, source, z, spread,
+                                            band_source, band_tf)
         finally:
             _manual_busy.release()
 
     def _spread_execute_unlocked(direction: str, lots: int, source: str = "manual",
                                  z: Optional[float] = None,
-                                 spread: Optional[float] = None) -> Dict:
+                                 spread: Optional[float] = None,
+                                 band_source: Optional[str] = None,
+                                 band_tf: Optional[str] = None) -> Dict:
         mode = _mode()
         if mode != "live_sim" and not active.get():
             return {"success": False, "error": "No broker connected"}
@@ -566,7 +572,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                         if cfg.get("filters.stt_b_pct") is not None else None),
                              other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
                              capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
-                             name=m["name"])
+                             name=m["name"], band_source=band_source, band_tf=band_tf)
             _zt = z if z is not None else m["zscore"]
             _zx = f"{float(_zt):+.2f}" if _zt is not None else "n/a"
             telegram.notify(
@@ -855,6 +861,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "regime_efficiency_ratio_max": float(rg.get("efficiency_ratio_max", 0.6) or 0.6),
             "regime_min_zero_crossings": int(rg.get("min_zero_crossings", 4) or 4),
             "regime_vr_lag": int(rg.get("vr_lag", 5) or 5),
+            # mean/σ source: "ticks" (the rolling window) or "candles"
+            # (TradingView BB with an EMA basis on a chosen timeframe)
+            "band_source": str(s.get("band_source", "ticks") or "ticks"),
+            "band_timeframe": str(s.get("band_timeframe", "15m") or "15m"),
+            "band_length": int(s.get("band_length", 20) or 20),
         }
 
     def _series_key() -> str:
@@ -865,9 +876,58 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         b = (legs.get("leg_b") or {}).get("symbol", "")
         return f"{a}|{b}" if a and b else ""
 
+    # ── TradingView-style candle bands: candles saved to disk + broker history ──
+    def _session_open_min() -> int:
+        """Minutes after IST midnight the pair's session opens (MCX 09:00,
+        NSE 09:15) — the grid TradingView draws its candles on."""
+        span = sessions.pair_session(_leg_segments(), datetime.now(sessions.IST).date())
+        return int(span[0]) if span else 9 * 60
+
+    def _candle_history(tf: str, from_ts: float, to_ts: float):
+        broker = active.get()
+        legs = _read_legs()
+        if not broker or not hasattr(broker, "get_candles") or not _have_both_legs(legs):
+            return None
+        if hasattr(broker, "_instruments_ready") and not broker._instruments_ready.is_set():
+            raise RuntimeError("instrument master still loading")
+        out = {}
+        for lk, key in (("leg_a", "a"), ("leg_b", "b")):
+            out[key] = broker.get_candles(legs[lk]["segment"], legs[lk]["symbol"], tf,
+                                          from_ts, to_ts)
+        return out
+
+    spread_candles = SpreadCandles(persist_path=SIGNAL_WINDOW_FILE.with_name("spread_candles.json"),
+                                   session_open_provider=_session_open_min,
+                                   history_provider=_candle_history,
+                                   key_provider=_series_key)
+
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
                                  persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key,
-                                 book_provider=_leg_book, session_provider=_session_open)
+                                 book_provider=_leg_book, session_provider=_session_open,
+                                 candles=spread_candles)
+
+    def _candle_backfill_loop() -> None:
+        """Back-fill candle history once Arrow is connected and the master is
+        loaded; refresh hourly, retry a failed timeframe every 5 minutes."""
+        while True:
+            try:
+                broker = active.get()
+                ready = (broker is not None and hasattr(broker, "get_candles")
+                         and (not hasattr(broker, "_instruments_ready")
+                              or broker._instruments_ready.is_set())
+                         and _have_both_legs(_read_legs()))
+                if ready:
+                    retry = any(st.get("state") in ("pending", "failed", "restored")
+                                for st in spread_candles.status.values())
+                    if retry:
+                        spread_candles.backfill_async()
+            except Exception as exc:                  # noqa: BLE001 — keep the loop alive
+                logger.debug("candle back-fill loop: {}", exc)
+            time.sleep(300 if all(st.get("state") == "ok"
+                                  for st in spread_candles.status.values()) else 60)
+
+    if not app.config.get("TESTING"):
+        threading.Thread(target=_candle_backfill_loop, daemon=True, name="CandleBackfillLoop").start()
     # Auto-start so the live signal + z-score chart always collect whenever prices
     # are available — independent of connecting the broker or arming the algo. It
     # simply no-ops while no prices are returned, so this is safe at startup.
@@ -964,6 +1024,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "min_hold_sec": float(s.get("min_hold_sec", 0) or 0),
+            # candle band mode: max hold in candles of the position's timeframe
+            "max_hold_candles": float(s.get("max_hold_candles", 0) or 0),
             # ── dollar-P&L exit overrides (priority above the z-score exit) ──
             "dollar_stop_inr": float(xo.get("dollar_stop_inr", 0) or 0),
             "profit_target_inr": float(xo.get("profit_target_inr", 0) or 0),
@@ -1458,9 +1520,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "lookback": _w3_config().min_samples,
             # Warm-up progress is TIME actually sampled (gaps excluded), against
             # the engine's own ready threshold — the same gate the algo uses.
-            "history_sec": sig.get("history_sec"),
-            "min_history_sec": sig.get("min_history_sec")
-            or float(cfg.get("signal.min_signal_minutes", 120) or 120) * 60,
+            # In candle mode the gate is N candles: shown in the same units
+            # (candles × candle length) so the bar tracks what gates trading.
+            "history_sec": (sig.get("candles_have", 0) * TIMEFRAMES.get(sig.get("band_timeframe"), 900)
+                            if sig.get("band_source") == "candles" else sig.get("history_sec")),
+            "min_history_sec": ((sig.get("candles_need", 0) * TIMEFRAMES.get(sig.get("band_timeframe"), 900))
+                                if sig.get("band_source") == "candles" else
+                                (sig.get("min_history_sec")
+                                 or float(cfg.get("signal.min_signal_minutes", 120) or 120) * 60)),
+            "band_source": sig.get("band_source"),
+            "band_timeframe": sig.get("band_timeframe"),
+            "band_length": sig.get("band_length"),
             "window_sec": sig.get("window_sec"),
             "measured_interval_sec": sig.get("measured_interval_sec"),
             "sample_status": sig.get("sample_status") or "",
@@ -1619,6 +1689,36 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if rt.get("open"):
             rows.append(_w3_trade_row(rt["open"], True, "open"))
         return jsonify(rows[-limit:])
+
+    @app.route("/api/candles", methods=["GET"])
+    def api_candles():
+        """The spread's candles with the EMA basis and ±entry·σ bands at each
+        candle (current candle last) — the TradingView BB(N, EMA) view — plus
+        back-fill status per timeframe. ?tf=15m&n=20&last=120"""
+        s = cfg.section("signal")
+        tf = normalise_tf(request.args.get("tf") or s.get("band_timeframe", "15m"))
+        try:
+            n = max(2, int(request.args.get("n") or s.get("band_length", 20) or 20))
+            last = max(10, min(600, int(request.args.get("last", 120))))
+        except (TypeError, ValueError):
+            n, last = 20, 120
+        k = float(s.get("hedge_ratio", 1) or 1)
+        ser = spread_candles.series(tf, n, k, last=last)
+        return jsonify({
+            "timeframe": tf, "label": TF_LABELS.get(tf, tf), "length": n,
+            "band_source": str(s.get("band_source", "ticks") or "ticks"),
+            "entry_zscore": float(s.get("entry_zscore", 2.0) or 2.0),
+            "bands": spread_candles.bands(tf, n, k),
+            "points": ser["points"],
+            "counts": spread_candles.counts(),
+            "status": spread_candles.status,
+        })
+
+    @app.route("/api/candles/refresh", methods=["POST"])
+    def api_candles_refresh():
+        """Re-fetch candle history from Arrow now (read-only)."""
+        started = spread_candles.backfill_async(force=True)
+        return jsonify({"success": True, "started": started})
 
     @app.route("/api/spread-history", methods=["GET"])
     def api_spread_history_w3():
@@ -2779,6 +2879,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
                     "trade_direction": _trade_direction(),
+                    "band_source": str(s.get("band_source", "ticks") or "ticks"),
+                    "band_timeframe": normalise_tf(s.get("band_timeframe", "15m")),
+                    "band_length": int(s.get("band_length", 20) or 20),
+                    "max_hold_candles": s.get("max_hold_candles", 0),
                     "max_entry_z_divergence": s.get("max_entry_z_divergence", 0),
                     "max_entry_spread_divergence": s.get("max_entry_spread_divergence", 0),
                     "max_entry_zscore": s.get("max_entry_zscore", 0),
@@ -2849,6 +2953,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 return jsonify({"success": False,
                                 "error": f"trade_direction must be one of {', '.join(TRADE_DIRECTIONS)}"}), 400
             sig["trade_direction"] = td
+        if "band_source" in sd:
+            bs = str(sd["band_source"] or "").lower()
+            if bs not in ("ticks", "candles"):
+                return jsonify({"success": False,
+                                "error": "band_source must be 'ticks' or 'candles'"}), 400
+            sig["band_source"] = bs
+        if "band_timeframe" in sd:
+            sig["band_timeframe"] = normalise_tf(sd["band_timeframe"])
+        if "band_length" in sd:
+            sig["band_length"] = max(2, min(500, _num(sd["band_length"], 20)))
+        if "max_hold_candles" in sd:
+            sig["max_hold_candles"] = max(0.0, _num(sd["max_hold_candles"], 0.0))
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5), ("display_refresh_ms", 500),
                      ("resume_max_gap_min", 120), ("persist_interval_sec", 30),

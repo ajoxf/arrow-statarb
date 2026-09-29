@@ -30,7 +30,8 @@ from __future__ import annotations
 import re
 import threading
 import time
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -1525,6 +1526,133 @@ class ArrowBroker(BaseBroker):
                 return ex, ident, fig
             errors.append(f"{self._wire(ex)}/{'token' if ident != symbol else 'symbol'}: no margin figure")
         return None, None, errors
+
+    # ── Historical candles (for the TradingView-style candle bands) ─────────────
+    #: timeframe key → Arrow's interval name (historical-api.arrow.trade)
+    _CANDLE_INTERVALS = {"5m": "5min", "15m": "15min", "1h": "hour", "4h": "4hours"}
+    #: Arrow caps how much one request may span; ask in chunks of this many days
+    _CANDLE_CHUNK_DAYS = {"5m": 5, "15m": 15, "1h": 45, "4h": 120}
+
+    def _candle_exchanges(self, segment: str):
+        """Exchange values to try for a candle request, most likely first
+        (the candle host names MCX contracts by exchange + numeric token)."""
+        wire = _SEGMENT_MAP.get(segment.lower(), segment.upper())
+        names = ["MCX", "MCXFO"] if wire == "MCX" else [wire]
+        out = []
+        for n in names:
+            try:
+                out.append(Exchange(n))
+            except ValueError:
+                continue
+        return out
+
+    @staticmethod
+    def _parse_candle_rows(raw) -> List[List]:
+        """The candle list out of Arrow's answer, whatever wraps it."""
+        node = raw
+        for _ in range(3):
+            if isinstance(node, dict):
+                for k in ("candles", "data", "result"):
+                    if k in node:
+                        node = node[k]
+                        break
+                else:
+                    break
+        return node if isinstance(node, list) else []
+
+    @staticmethod
+    def _candle_ts(v) -> Optional[float]:
+        """Candle time → epoch seconds. Arrow sends '2026-10-19T09:15:00+0530'."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v) / (1000.0 if v > 1e11 else 1.0)
+        s = str(v).strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S"):
+            try:
+                d = datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+            return d.timestamp()
+        return None
+
+    def get_candles(self, segment: str, symbol: str, timeframe: str,
+                    from_ts: float, to_ts: float) -> List[Tuple[float, float]]:
+        """[(candle_start_epoch_s, close_in_rupees)] oldest first, from Arrow's
+        historical host. Read-only. Raises with Arrow's reason on failure.
+
+        Arrow quotes candle prices in PAISE; the scale is confirmed against the
+        live stream price when one is available (so a rupee-quoted answer is
+        not divided by 100 by mistake)."""
+        if not self.connected or not self._client:
+            raise RuntimeError("not connected")
+        interval = self._CANDLE_INTERVALS.get(timeframe)
+        if not interval:
+            raise ValueError(f"unknown timeframe {timeframe}")
+        tok = self._sym_token.get(symbol.upper())
+        if not tok:
+            raise RuntimeError(f"no instrument token for {symbol} (master not loaded yet?)")
+        ist = timezone(timedelta(hours=5, minutes=30))
+        cache = getattr(self, "_candle_routes", None)
+        if cache is None:
+            cache = self._candle_routes = {}
+        exchanges = self._candle_exchanges(segment)
+        ck = segment.lower()
+        if ck in cache:
+            exchanges = [cache[ck]] + [e for e in exchanges if e != cache[ck]]
+        chunk = self._CANDLE_CHUNK_DAYS.get(timeframe, 15) * 86400.0
+        rows: Dict[float, float] = {}
+        errors: List[str] = []
+        for ex in exchanges:
+            rows.clear()
+            ok = False
+            t0 = float(from_ts)
+            while t0 < to_ts:
+                t1 = min(float(to_ts), t0 + chunk)
+                frm = datetime.fromtimestamp(t0, ist).strftime("%Y-%m-%dT%H:%M:%S")
+                to = datetime.fromtimestamp(t1, ist).strftime("%Y-%m-%dT%H:%M:%S")
+                try:
+                    raw = self._client.candle_data(ex, str(int(tok)), interval, frm, to)
+                except Exception as exc:
+                    errors.append(f"{self._wire(ex)}: {getattr(exc, 'message', None) or exc}")
+                    ok = False
+                    break
+                ok = True
+                for r in self._parse_candle_rows(raw):
+                    try:
+                        if isinstance(r, dict):
+                            ts = self._candle_ts(r.get("time") or r.get("timestamp") or r.get("t"))
+                            close = r.get("close", r.get("c"))
+                        else:
+                            ts, close = self._candle_ts(r[0]), r[4]
+                        if ts is not None and close is not None and float(close) > 0:
+                            rows[ts] = float(close)
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                t0 = t1
+            if ok and rows:
+                cache[ck] = ex
+                break
+            if ok and not rows:
+                errors.append(f"{self._wire(ex)}: no candles in range")
+        if not rows:
+            raise RuntimeError("; ".join(errors) or "no candles")
+        out = sorted(rows.items())
+        # Scale: paise → rupees, confirmed against the live price when streaming.
+        last = out[-1][1]
+        live = None
+        try:
+            live = (self.get_streamed_ltp([symbol]) or {}).get(symbol.upper())
+        except Exception:
+            live = None
+        div = 100.0
+        if live and live > 0:
+            r = last / float(live)
+            div = 100.0 if 30.0 < r < 300.0 else 1.0 if 0.3 < r < 3.0 else 100.0
+        return [(t, c / div) for t, c in out]
 
     def get_pair_margin(self, legs: List[Dict], product: str = "NRML") -> Dict:
         """Margin for a spread: each leg alone, and both legs TOGETHER (so an
