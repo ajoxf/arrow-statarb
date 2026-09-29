@@ -14,7 +14,7 @@
   'use strict';
 
   var DASH = '—';
-  var LAYOUT_KEY = 'nexus-desk-layout-v2';   // v2: Bollinger Bands window in the default set
+  var LAYOUT_KEY = 'nexus-desk-layout-v2';   // v2: the spread candle/bands window in the default set
   var PREF_KEY = 'nexus-desk-prefs-v1';
 
   // ── tiny helpers ───────────────────────────────────────────────────────
@@ -138,7 +138,7 @@
     {id: 'ladder', title: 'Ladder · A − B', x: 8, y: 8, w: 360, h: 640, flush: true},
     {id: 'signal', title: 'Signal & Position', x: 376, y: 8, w: 470, h: 360},
     {id: 'stats', title: 'Statistics & Filters', x: 854, y: 8, w: 330, h: 360},
-    {id: 'bands', title: 'Bollinger Bands · spread', x: 376, y: 376, w: 470, h: 272},
+    {id: 'bands', title: 'Spread', x: 376, y: 376, w: 470, h: 272},
     {id: 'charts', title: 'Z-Score & Spread', x: 376, y: 376, w: 470, h: 272, closed: true},
     {id: 'margin', title: 'Margin', x: 1192, y: 8, w: 300, h: 300},
     {id: 'fills', title: 'Fills & Slippage', x: 8, y: 656, w: 838, h: 250, flush: true},
