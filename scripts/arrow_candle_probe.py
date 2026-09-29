@@ -37,7 +37,7 @@ import yaml                                                  # noqa: E402
 from arrow_statarb.config.config import Config               # noqa: E402
 from arrow_statarb.brokers.registry import create_broker     # noqa: E402
 from arrow_statarb.core import sessions                      # noqa: E402
-from arrow_statarb.core.candles import (BACKFILL_DAYS, IST, TF_LABELS, TIMEFRAMES,  # noqa: E402
+from arrow_statarb.core.candles import (BACKFILL_DAYS, BUILT_FROM, IST, TF_LABELS, TIMEFRAMES,  # noqa: E402
                                         align_legs, pine_ema, pine_stdev)
 
 SESSION_FILE = PROJECT_ROOT / "data" / "arrow_session.json"
@@ -113,9 +113,19 @@ def main() -> int:
     open_min = (sessions.pair_session([seg for seg, _ in pair],
                                       datetime.now(IST).date()) or (540, 0))[0]
     now = time.time()
-    got = {}
+    got, raw = {}, {}
     for tf in TIMEFRAMES:
         print(f"\n── {TF_LABELS[tf]} ─────────────────────────────")
+        src = BUILT_FROM.get(tf)
+        if src:
+            # 1 H / 4 H are built from 15-min candles on the 09:00 grid, as on TradingView
+            if src in raw and all(raw[src]):
+                got[tf] = align_legs(raw[src][0], raw[src][1], TIMEFRAMES[tf], open_min)
+                r = got[tf]
+                print(f"  built from {TF_LABELS[src]}: {len(r)} candles  {_t(r[0][0])} → {_t(r[-1][0])}")
+            else:
+                print(f"  cannot build: {TF_LABELS[src]} history failed")
+            continue
         legs = []
         for seg, sym in pair:
             try:
@@ -131,6 +141,7 @@ def main() -> int:
         route = getattr(broker, "_candle_routes", {})
         if route:
             print("  exchange used:", {k: str(v) for k, v in route.items()})
+        raw[tf] = legs
         if all(legs):
             got[tf] = align_legs(legs[0], legs[1], TIMEFRAMES[tf], open_min)
 

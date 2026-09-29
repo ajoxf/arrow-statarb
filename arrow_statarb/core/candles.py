@@ -43,7 +43,16 @@ TF_LABELS: Dict[str, str] = {"5m": "5 min", "15m": "15 min", "1h": "1 hour", "4h
 MAX_BARS = 600
 
 #: Calendar days of history requested per timeframe on a back-fill.
-BACKFILL_DAYS: Dict[str, int] = {"5m": 6, "15m": 14, "1h": 45, "4h": 120}
+BACKFILL_DAYS: Dict[str, int] = {"5m": 6, "15m": 60}
+
+#: 1 H and 4 H are BUILT from 15-min history, not fetched: Arrow's own hourly
+#: candles start at :15 (09:15, 10:15 …), TradingView's MCX candles at 09:00.
+#: 15-min candles sit on both grids, so re-bucketing them gives exactly the
+#: chart's 09:00-anchored hours (4 H = 09:00, 13:00, 17:00, 21:00).
+BUILT_FROM: Dict[str, str] = {"1h": "15m", "4h": "15m"}
+
+#: Saved-file grid version: 2 = 1 H / 4 H on the 09:00 grid (built from 15 min).
+GRID_VERSION = 2
 
 
 def tf_seconds(tf: str) -> int:
@@ -264,19 +273,31 @@ class SpreadCandles:
         with self._lock:
             self._check_key()
         om = self._open_min()
+        fetched: Dict[str, Tuple[Optional[Dict], str]] = {}
+
+        def fetch(src_tf: str) -> Tuple[Optional[Dict], str]:
+            if src_tf not in fetched:
+                try:
+                    got = self._history(src_tf, now - BACKFILL_DAYS[src_tf] * 86400.0, now)
+                except Exception as exc:              # noqa: BLE001 — reported, not raised
+                    fetched[src_tf] = (None, str(exc))
+                else:
+                    ok = bool(got and got.get("a") and got.get("b"))
+                    fetched[src_tf] = (got if ok else None,
+                                       "" if ok else "the broker returned no history for a leg")
+            return fetched[src_tf]
+
         for tf, sec in TIMEFRAMES.items():
             st = self.status.get(tf, {})
             if not force and st.get("state") == "ok" and now - float(st.get("at", 0)) < 3600:
                 continue
             self.status[tf] = {"state": "loading", "detail": "", "at": now}
-            try:
-                got = self._history(tf, now - BACKFILL_DAYS[tf] * 86400.0, now)
-            except Exception as exc:                  # noqa: BLE001 — reported, not raised
-                got, err = None, str(exc)
-            else:
-                err = "" if got else "the broker returned no history"
-            if not got or not got.get("a") or not got.get("b"):
-                self.status[tf] = {"state": "failed", "detail": err or "one leg returned no history",
+            src = BUILT_FROM.get(tf, tf)
+            got, err = fetch(src)
+            if not got:
+                self.status[tf] = {"state": "failed",
+                                   "detail": (f"built from {src} history, which failed: " if src != tf
+                                              else "") + (err or "no history"),
                                    "at": now}
                 logger.warning("Candles: {} history unavailable — {}", tf, self.status[tf]["detail"])
                 continue
@@ -292,7 +313,9 @@ class SpreadCandles:
                     del bars[t]
                 self._ema_cache.clear()
                 self._dirty = True
-            self.status[tf] = {"state": "ok", "detail": f"{len(merged)} candles from the broker",
+            self.status[tf] = {"state": "ok",
+                               "detail": (f"{len(merged)} candles built from Arrow's 15-min history"
+                                          if src != tf else f"{len(merged)} candles from the broker"),
                                "at": now}
             logger.info("Candles: {} back-filled — {} candles", tf, len(merged))
         self._maybe_save(force=True)
@@ -306,6 +329,7 @@ class SpreadCandles:
             return
         with self._lock:
             data = {"key": self._key,
+                    "grid": GRID_VERSION,
                     "saved_at": now,
                     "bars": {tf: [[t, a, b] for t, (a, b) in sorted(bars.items())]
                              for tf, bars in self._bars.items()}}
@@ -339,7 +363,10 @@ class SpreadCandles:
             logger.info("Candles: saved candles are for another pair — not loaded")
             return
         self._key = data.get("key") or key_now or None
+        old_grid = int(data.get("grid") or 1) < GRID_VERSION
         for tf, rows in (data.get("bars") or {}).items():
+            if old_grid and tf in BUILT_FROM:
+                continue                  # saved on Arrow's :15 hour grid — rebuilt instead
             if tf in self._bars:
                 self._bars[tf] = {float(t): [float(a), float(b)] for t, a, b in rows}
         n = {tf: len(b) for tf, b in self._bars.items()}

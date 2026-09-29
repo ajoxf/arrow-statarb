@@ -109,8 +109,13 @@ def test_backfill_fills_history_and_the_live_candle_keeps_live_prices(tmp_path):
     assert closes[-1] == 200.0                              # 12:00 candle: live price kept
     assert closes[0] == 100.0 and closes[-2] == 111.0
     assert c.status["15m"]["state"] == "ok"
-    assert c.status["1h"]["state"] == "failed"              # said plainly, not hidden
-    assert set(calls) == {"5m", "15m", "1h", "4h"}
+    assert c.status["5m"]["state"] == "failed"              # said plainly, not hidden
+    # 1 H / 4 H are BUILT from the 15-min history (one fetch), not fetched
+    assert calls.count("15m") == 1 and "1h" not in calls and "4h" not in calls
+    assert c.status["1h"]["state"] == "ok" and "15-min" in c.status["1h"]["detail"]
+    # 15-min 09:00 … 12:00 → hours 09, 10, 11, 12 (12:00 is the live candle)
+    assert [t for t, _ in c.closes("1h")] == [_ist(2026, 10, 5, h, 0) for h in (9, 10, 11, 12)]
+    assert [x for _, x in c.closes("1h")][:3] == [103.0, 107.0, 111.0]   # each hour's last 15-min close
 
 
 # ── the signal engine in candle mode ─────────────────────────────────────────
@@ -265,3 +270,29 @@ def test_a_restored_position_keeps_its_candle_timeframe(tmp_path):
                            execute_fn=lambda *a, **k: {}, close_fn=lambda *a, **k: {})
     assert algo.restore_position(op)
     assert algo._pos["band_source"] == "candles" and algo._pos["band_tf"] == "4h"
+
+
+def test_hourly_and_4h_candles_start_at_0900_like_tradingview(tmp_path):
+    """Arrow's own hourly candles start at :15; built from 15-min candles the
+    hours sit on TradingView's MCX grid (09:00, 10:00 …; 4 H 09/13/17/21)."""
+    t0 = _ist(2026, 10, 5, 9, 0)
+    q15 = [(t0 + i * 900, 100.0 + i) for i in range(56)]            # 09:00 → 22:45
+    c = SpreadCandles(persist_path=tmp_path / "c.json", key_provider=lambda: "A|B",
+                      history_provider=lambda tf, f, t: {"a": q15, "b": [(x, 50.0) for x, _ in q15]},
+                      clock=lambda: t0 + 56 * 900)
+    c._backfill(force=True)
+    hours = [datetime.fromtimestamp(t, IST).strftime("%H:%M") for t, _ in c.closes("1h")]
+    assert hours[0] == "09:00" and hours[1] == "10:00" and hours[-1] == "22:00"
+    four = [datetime.fromtimestamp(t, IST).strftime("%H:%M") for t, _ in c.closes("4h")]
+    assert four == ["09:00", "13:00", "17:00", "21:00"]
+    assert c.closes("4h")[0][1] == (100.0 + 15) - 50.0             # close of 12:45, the 4 H's last 15 min
+
+
+def test_old_saved_hourly_candles_are_dropped_and_rebuilt(tmp_path):
+    import json as _json
+    p = tmp_path / "c.json"
+    p.write_text(_json.dumps({"key": "A|B", "bars": {
+        "15m": [[_ist(2026, 10, 5, 9, 0), 101.0, 100.0]],
+        "1h": [[_ist(2026, 10, 5, 9, 0), 105.0, 100.0]]}}))       # no "grid": old file
+    c = SpreadCandles(persist_path=p, key_provider=lambda: "A|B")
+    assert c.counts()["15m"] == 1 and c.counts()["1h"] == 0
