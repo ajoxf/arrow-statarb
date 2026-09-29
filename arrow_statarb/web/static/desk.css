@@ -6,7 +6,12 @@ body.desk { margin: 0; background: var(--panel, #f0f0f0); font: 12px/1.35 Tahoma
 .d-none { display: none !important; }
 
 /* ── windows ─────────────────────────────────────────────────────────────── */
-body.desk #desktop { position: relative; min-height: calc(100vh - 70px); padding-bottom: 40px; }
+/* The page is exactly one screen tall: the desktop takes what the brand,
+ * banners and taskbar leave, and scrolls INSIDE itself. The taskbar is never
+ * pushed below the fold and nothing (a window, a toast) ever sits on it. */
+html, body.desk { height: 100%; overflow: hidden; }
+body.desk #desktop { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; }
+body.desk #taskbar { position: relative; z-index: 2030; flex: 0 0 auto; }
 body.desk .window { position: absolute; min-width: 220px; min-height: 90px; display: flex; flex-direction: column; overflow: hidden; }
 body.desk .window > .wbody { flex: 1; overflow: auto; background: #f7f7f7; padding: 6px 8px; }
 body.desk .window > .wbody.flush { padding: 0; }

@@ -70,6 +70,30 @@
   }
   window.showToast = toast;
 
+  // A script error must never leave a screen that silently ignores clicks.
+  window.addEventListener('error', function (e) {
+    toast('Page error: ' + (e.message || e) + ' — please screenshot this.', 'danger');
+  });
+
+  // The ALGO dialog is written inside the taskbar; lift it to the page so
+  // nothing around the taskbar can trap or clip it.
+  var algoModal = document.getElementById('algoCtlModal');
+  if (algoModal && algoModal.parentNode !== document.body) { document.body.appendChild(algoModal); }
+
+  // Esc, or a click on the dark backdrop, always closes an open dialog.
+  function dismissDialogs() {
+    var m = $('#modal');
+    if (m && !m.classList.contains('hidden')) { $('#modal-cancel').click(); }
+    if (algoModal && algoModal.classList.contains('show')) {
+      var x = algoModal.querySelector('[data-bs-dismiss]');
+      if (x) { x.click(); }
+    }
+  }
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { dismissDialogs(); } });
+  [$('#modal'), algoModal].forEach(function (m) {
+    if (m) { m.addEventListener('mousedown', function (e) { if (e.target === m) { dismissDialogs(); } }); }
+  });
+
   function confirmBox(title, body, confirmText) {
     var m = $('#modal');
     $('#modal-title').textContent = title;
@@ -110,6 +134,14 @@
 
   function defOf(id) { return DEFS.filter(function (d) { return d.id === id; })[0]; }
 
+  // The default layout is drawn for a ~1500 × 910 desktop; on a smaller or
+  // zoomed screen it is scaled down to fit (a moved window keeps its place).
+  function fit(d) {
+    var dk = $('#desktop');
+    var sx = Math.min(1, (dk.clientWidth - 8) / 1500), sy = Math.min(1, (dk.clientHeight - 8) / 910);
+    return {x: Math.round(d.x * sx), y: Math.round(d.y * sy), w: Math.round(d.w * sx), h: Math.round(d.h * sy)};
+  }
+
   function place(node, x, y, w, h) {
     node.style.left = Math.max(0, x) + 'px';
     node.style.top = Math.max(0, y) + 'px';
@@ -132,7 +164,8 @@
       '<div class="wbody' + (d.flush ? ' flush' : '') + '"></div><div class="grip"></div>';
     $('#desktop').appendChild(node);
     var L = layout[id] || {};
-    place(node, L.x != null ? L.x : d.x, L.y != null ? L.y : d.y, L.w || d.w, L.h || d.h);
+    var F = fit(d);
+    place(node, L.x != null ? L.x : F.x, L.y != null ? L.y : F.y, L.w || F.w, L.h || F.h);
     node.style.zIndex = L.z || ++topZ;
     topZ = Math.max(topZ, L.z || 0);
     var body = node.querySelector('.wbody');
@@ -224,8 +257,8 @@
     layout = {};
     save(LAYOUT_KEY, layout);
     Object.keys(W).forEach(function (id) {
-      var d = W[id].def;
-      place(W[id].node, d.x, d.y, d.w, d.h);
+      var F = fit(W[id].def);
+      place(W[id].node, F.x, F.y, F.w, F.h);
     });
     resizeCharts();
   };
@@ -278,9 +311,11 @@
   function applyLock() {
     var a = S.algo || {};
     var blocked = !!a.manual_block;
+    var flat = !(S.status && S.status.open_trade);
     Array.prototype.forEach.call(document.querySelectorAll('[data-manual]'), function (el) {
-      el.disabled = blocked;
-      el.title = blocked ? a.manual_block : (el.dataset.tip || '');
+      var closer = el.classList.contains('flatten') || el.classList.contains('pos-close');
+      el.disabled = blocked || (closer && flat);
+      el.title = blocked ? a.manual_block : (closer && flat) ? 'No open position' : (el.dataset.tip || '');
     });
     if (W.ladder) {
       W.ladder.node.classList.toggle('locked-manual', blocked);
@@ -572,15 +607,17 @@
     body.innerHTML = '<div style="height:48%"><canvas class="c-z"></canvas></div>' +
                      '<div style="height:48%;margin-top:2%"><canvas class="c-s"></canvas></div>';
     if (!window.Chart) { body.innerHTML = '<div class="muted">Charts unavailable.</div>'; return; }
-    var base = {animation: false, responsive: true, maintainAspectRatio: false,
-                plugins: {legend: {display: false}}, elements: {point: {radius: 0}},
-                scales: {x: {display: false}, y: {ticks: {font: {size: 10}}}}};
+    function base() {
+      return {animation: false, responsive: true, maintainAspectRatio: false,
+              plugins: {legend: {display: false}}, elements: {point: {radius: 0}},
+              scales: {x: {display: false}, y: {ticks: {font: {size: 10}}}}};
+    }
     charts.z = new Chart($('.c-z', body), {type: 'line', data: {labels: [], datasets: [
       {data: [], borderColor: '#1f7ac2', borderWidth: 1.5},
       {data: [], borderColor: '#b83232', borderDash: [4, 3], borderWidth: 1},
-      {data: [], borderColor: '#b83232', borderDash: [4, 3], borderWidth: 1}]}, options: base});
+      {data: [], borderColor: '#b83232', borderDash: [4, 3], borderWidth: 1}]}, options: base()});
     charts.s = new Chart($('.c-s', body), {type: 'line', data: {labels: [], datasets: [
-      {data: [], borderColor: '#6a4fa3', borderWidth: 1.5}]}, options: base});
+      {data: [], borderColor: '#6a4fa3', borderWidth: 1.5}]}, options: base()});
   };
   REFRESH.charts = function () {
     if (!W.charts || !charts.z) { return Promise.resolve(); }
@@ -592,6 +629,10 @@
       charts.z.data.datasets[0].data = z;
       charts.z.data.datasets[1].data = z.map(function () { return e; });
       charts.z.data.datasets[2].data = z.map(function () { return -e; });
+      // Early warm-up z's (tiny σ) can be ±15; keep the ±entry band readable.
+      var lim = e + 2.5;
+      charts.z.options.scales.y.min = -lim;
+      charts.z.options.scales.y.max = lim;
       charts.z.update('none');
       charts.s.data.labels = s.map(function (_, i) { return i; });
       charts.s.data.datasets[0].data = s;
