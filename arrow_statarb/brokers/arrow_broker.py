@@ -250,6 +250,7 @@ class ArrowBroker(BaseBroker):
                     self._client = client
                     self.connected = True
                     logger.info("ArrowBroker: reused existing session token")
+                    self._start_session_watch()
                     threading.Thread(
                         target=self._fetch_instruments, daemon=True, name="ArrowInstruments"
                     ).start()
@@ -269,6 +270,7 @@ class ArrowBroker(BaseBroker):
             self._client = client
             self.connected = True
             logger.info("ArrowBroker: authenticated — token={}", client.token[:12] + "…" if client.token else "?")
+            self._start_session_watch()
 
             threading.Thread(
                 target=self._fetch_instruments, daemon=True, name="ArrowInstruments"
@@ -279,6 +281,95 @@ class ArrowBroker(BaseBroker):
             self.last_error = self._format_error(exc)
             logger.error("ArrowBroker: connect failed — {}", exc)
             return False
+
+    # ── connection health: logged, so a disconnect can be explained ─────────
+    #: How often the Arrow session is checked with a cheap read-only call.
+    SESSION_CHECK_SEC = 300
+
+    def _watch_stream(self, ds) -> None:
+        """Hook the SDK's price-stream lifecycle into app.log and
+        ``stream_state``. The SDK reconnects by itself (and re-subscribes) —
+        with the SAME session token, so after the token expires every attempt
+        fails until it gives up. These lines are what explain a disconnect."""
+        self.stream_state = {"state": "connecting", "since": time.time(), "attempts": 0,
+                             "last_close": None, "last_error": None}
+
+        def _set(state, **kw):
+            st = dict(self.stream_state, state=state, **kw)
+            if state != self.stream_state.get("state"):
+                st["since"] = time.time()
+            self.stream_state = st
+
+        def on_connect():
+            was = self.stream_state.get("state")
+            _set("up", attempts=0)
+            if was in ("down", "reconnecting"):
+                logger.info("ArrowBroker: price stream reconnected")
+
+        def on_close(code=None, msg=None):
+            _set("down", last_close={"code": code, "reason": str(msg or ""), "at": time.time()})
+            logger.warning("ArrowBroker: price stream CLOSED by the server — code={} reason={}",
+                           code, msg or "(none given)")
+
+        def on_error(err):
+            _set(self.stream_state.get("state", "down"), last_error=str(err))
+            logger.warning("ArrowBroker: price stream error — {}", err)
+
+        def on_reconnect(attempt, delay):
+            _set("reconnecting", attempts=attempt)
+            if attempt <= 3 or attempt % 10 == 0:
+                logger.warning("ArrowBroker: price stream reconnect attempt {} (in {}s)", attempt, delay)
+
+        def on_no_reconnect():
+            _set("given_up")
+            logger.error("ArrowBroker: price stream GAVE UP reconnecting — no live prices until "
+                         "Arrow is reconnected (session token expired? check the session line above)")
+
+        ds.on_connect, ds.on_close, ds.on_error = on_connect, on_close, on_error
+        ds.on_reconnect, ds.on_no_reconnect = on_reconnect, on_no_reconnect
+
+    def _start_session_watch(self) -> None:
+        """Every few minutes ask Arrow a cheap question (user details). The
+        first failure, and the recovery, are logged with Arrow's own words —
+        an expired or revoked session shows up here. Read-only; it does not
+        log in again or change anything."""
+        self.session_state = {"ok": True, "since": time.time(), "error": None,
+                              "checked_at": None}
+        if getattr(self, "_session_watch", None) and self._session_watch.is_alive():
+            return
+
+        def loop():
+            while True:
+                time.sleep(self.SESSION_CHECK_SEC)
+                self.check_session()
+
+        self._session_watch = threading.Thread(target=loop, daemon=True, name="ArrowSessionWatch")
+        self._session_watch.start()
+
+    def check_session(self) -> bool:
+        """One read-only session check; logs only on a change of state."""
+        if not self.connected or not self._client:
+            return False
+        st = getattr(self, "session_state", None) or {"ok": True}
+        now = time.time()
+        try:
+            self._client.get_user_details()
+        except Exception as exc:                      # noqa: BLE001 — logged, never raised
+            err = getattr(exc, "message", None) or str(exc)
+            if st.get("ok", True):
+                logger.error("ArrowBroker: Arrow SESSION NOT ANSWERING — {} (token "
+                             "expired or logged in elsewhere? orders and prices will fail)", err)
+                self.session_state = {"ok": False, "since": now, "error": err, "checked_at": now}
+            else:
+                self.session_state = dict(st, error=err, checked_at=now)
+            return False
+        if not st.get("ok", True):
+            logger.info("ArrowBroker: Arrow session answering again (was down since {})",
+                        time.strftime("%H:%M:%S", time.localtime(st.get("since") or now)))
+            self.session_state = {"ok": True, "since": now, "error": None, "checked_at": now}
+        else:
+            self.session_state = dict(st, checked_at=now)
+        return True
 
     def disconnect(self) -> None:
         self.connected = False
@@ -936,6 +1027,7 @@ class ArrowBroker(BaseBroker):
                             pass
 
                     streams.data_stream.on_ticks = _on_tick
+                    self._watch_stream(streams.data_stream)
                     streams.connect_data_stream()
                     self._streams = streams
                     logger.info("ArrowBroker: price stream connected")

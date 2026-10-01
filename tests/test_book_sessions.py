@@ -104,3 +104,58 @@ def test_margin_route_reports_every_refusal(arrow_broker):
                                          "quantity": 1, "price": 1}])
     assert res["basket"] is None
     assert "MCXFO/symbol" in res["error"] and "invalid trading symbol" in res["error"]
+
+
+def test_stream_lifecycle_is_logged_and_tracked(arrow_broker):
+    """A server close, the reconnect attempts and a give-up are what explain a
+    lost connection — they must be recorded, not swallowed."""
+    from loguru import logger
+    lines = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="INFO")
+    try:
+        class DS:  # the SDK's DataStream callback surface
+            pass
+        ds = DS()
+        arrow_broker._watch_stream(ds)
+        ds.on_connect()
+        assert arrow_broker.stream_state["state"] == "up"
+        ds.on_close(1006, "token expired")
+        assert arrow_broker.stream_state["state"] == "down"
+        assert arrow_broker.stream_state["last_close"]["reason"] == "token expired"
+        ds.on_reconnect(1, 0)
+        assert arrow_broker.stream_state["state"] == "reconnecting"
+        ds.on_no_reconnect()
+        assert arrow_broker.stream_state["state"] == "given_up"
+        ds.on_connect()
+        assert arrow_broker.stream_state["state"] == "up"
+    finally:
+        logger.remove(sink)
+    text = "".join(lines)
+    assert "CLOSED by the server" in text and "token expired" in text
+    assert "reconnect attempt 1" in text and "GAVE UP" in text and "reconnected" in text
+
+
+def test_session_check_logs_an_expired_session_once_and_the_recovery(arrow_broker):
+    from loguru import logger
+    lines = []
+    sink = logger.add(lambda m: lines.append(str(m)), level="INFO")
+    state = {"fail": True}
+
+    def details():
+        if state["fail"]:
+            raise Exception("invalid session token")
+        return {"ok": True}
+
+    arrow_broker._client.get_user_details = details
+    try:
+        assert arrow_broker.check_session() is False
+        assert arrow_broker.check_session() is False          # still down: not logged twice
+        assert arrow_broker.session_state["ok"] is False
+        state["fail"] = False
+        assert arrow_broker.check_session() is True
+        assert arrow_broker.session_state["ok"] is True
+    finally:
+        logger.remove(sink)
+    text = "".join(lines)
+    assert text.count("SESSION NOT ANSWERING") == 1 and "invalid session token" in text
+    assert "answering again" in text

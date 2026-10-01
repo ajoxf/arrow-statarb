@@ -2166,6 +2166,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "instruments_ready": ready,
             "instrument_count": len(getattr(broker, "_instruments", [])),
             "lot_size_count": len(getattr(broker, "_lot_sizes", {})),
+            # connection health (also written to logs/app.log on every change)
+            "stream": getattr(broker, "stream_state", None),
+            "session": getattr(broker, "session_state", None),
         })
 
     # ── order-test scenario suite (Setup page) ────────────────────────────────
