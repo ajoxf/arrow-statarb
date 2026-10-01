@@ -2,10 +2,29 @@
 Logging configuration using loguru
 """
 
+import logging
 import sys
 from pathlib import Path
 
 from loguru import logger
+
+
+class _ToLoguru(logging.Handler):
+    """Forward a standard-library logger into loguru, so the Arrow SDK's own
+    messages (stream disconnects, reconnect attempts, socket errors) land in
+    app.log beside ours instead of only on the console — or nowhere."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(
+            level, "[{}] {}", record.name, record.getMessage())
+
+
+#: Third-party loggers worth keeping: the Arrow SDK and its websocket library.
+FORWARDED_LOGGERS = ("pyarrow_client", "websocket")
 
 
 def setup_logging(
@@ -66,5 +85,11 @@ def setup_logging(
         backtrace=True,
         diagnose=True,
     )
+
+    for name in FORWARDED_LOGGERS:
+        lg = logging.getLogger(name)
+        lg.handlers = [h for h in lg.handlers if not isinstance(h, _ToLoguru)] + [_ToLoguru()]
+        lg.setLevel(logging.INFO)
+        lg.propagate = False
 
     logger.info(f"Logging initialized (level={level}, dir={log_dir})")
