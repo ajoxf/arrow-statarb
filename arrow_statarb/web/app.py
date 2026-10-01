@@ -1542,6 +1542,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "entry_threshold": float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
             "trade_direction": _trade_direction(),
             "current_position": pos_label,
+            # the last entry the algo refused, and why (Last Signal Blocked card)
+            "last_blocked_signal": st.get("last_blocked_signal"),
         }
 
         open_trade = None
