@@ -153,6 +153,10 @@ class ArrowAutoTrader:
         self._exit_halted = False                  # ceiling hit → stop auto-exit retries
         self._exit_retry_at = 0.0                  # don't re-attempt an exit before this (backoff)
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
+        # The last entry signal that was REFUSED (by a gate, a filter, the
+        # trade-direction setting or an order-time guard) — for the
+        # dashboard's "Last Signal Blocked" card.
+        self._last_blocked: Optional[Dict] = None
         self.running = False
         self.last_error = ""
 
@@ -252,6 +256,7 @@ class ArrowAutoTrader:
                 "exit_halted": self._exit_halted,
                 "exit_retry_s": max(0.0, round(self._exit_retry_at - self._clock(), 1)),
                 "last_error": self.last_error,
+                "last_blocked_signal": dict(self._last_blocked) if self._last_blocked else None,
             }
 
     # ── loop ───────────────────────────────────────────────────────────────
@@ -822,6 +827,22 @@ class ArrowAutoTrader:
                 snap["status"] = off_side
             else:
                 snap["status"] = "flat — watching"
+            # A signal was there but no trade came of it: remember why.
+            st_txt = str(snap.get("status") or "")
+            wanted = abs(z) >= entry_z and (confirmed_long or confirmed_short)
+            if (wanted or off_side) and not st_txt.startswith(("ENTRY", "confirming")):
+                if off_side:
+                    side = "SHORT" if td == "buy_only" else "LONG"
+                    z_rec = z_sell if side == "SHORT" else z_buy
+                else:
+                    side = "LONG" if want_dir == "LONG_SPREAD" else "SHORT"
+                    z_rec = z
+                self._last_blocked = {
+                    "would_be_signal": side,
+                    "zscore": round(float(z_rec), 4) if z_rec is not None else None,
+                    "timestamp": int(self._clock() * 1000),
+                    "reason": st_txt,
+                }
         else:
             # A position is closed on the OPPOSITE side it was opened on: a
             # LONG (bought) spread is closed by SELLING it, a SHORT by BUYING

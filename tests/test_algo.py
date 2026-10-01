@@ -1038,3 +1038,34 @@ def test_spread_levels_off_when_no_rupee_exit_is_set():
     lv = algo._spread_levels(algo._params(), 0.0, 0.0)
     assert lv["take_profit"] is None and lv["stop"] is None
     assert lv["break_even"] is not None
+
+
+def test_a_refused_entry_is_remembered_for_the_last_signal_blocked_card():
+    """A signal past the threshold that a gate refuses must show on the
+    dashboard's Last Signal Blocked card — with side, z, time and reason."""
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "cooldown": 0, "lot_multiplier": 75.0, "enable_probability_filter": False,
+              "max_entry_zscore": 2.5, "trade_direction": "both"}
+    state = {"sig": _sig(3.1)}                          # beyond the entry cap → refused
+    algo = ArrowAutoTrader(signal_provider=lambda: state["sig"], params_provider=lambda: params,
+                           execute_fn=lambda *a, **k: {"success": True, "results": []},
+                           close_fn=lambda *a, **k: {"success": True, "results": []})
+    assert algo.get_state()["last_blocked_signal"] is None
+    algo._tick()
+    b = algo.get_state()["last_blocked_signal"]
+    assert b["would_be_signal"] == "SHORT" and b["zscore"] == 3.1
+    assert "entry cap" in b["reason"] and b["timestamp"] > 0
+    assert algo._pos is None
+
+
+def test_the_switched_off_side_shows_as_blocked():
+    params = {"entry_zscore": 2.0, "exit_zscore": 0.0, "stop_zscore": 4.0, "lots": 1,
+              "cooldown": 0, "lot_multiplier": 75.0, "enable_probability_filter": False,
+              "trade_direction": "sell_only"}
+    state = {"sig": _sig(-2.6)}                         # a LONG signal, but longs are off
+    algo = ArrowAutoTrader(signal_provider=lambda: state["sig"], params_provider=lambda: params,
+                           execute_fn=lambda *a, **k: {"success": True, "results": []},
+                           close_fn=lambda *a, **k: {"success": True, "results": []})
+    algo._tick()
+    b = algo.get_state()["last_blocked_signal"]
+    assert b["would_be_signal"] == "LONG" and "LONG entries are off" in b["reason"]

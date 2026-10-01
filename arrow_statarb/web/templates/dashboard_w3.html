@@ -2701,6 +2701,7 @@
             dataReady:  data.data_ready,
             dataPoints: data.history_sec,        // seconds actually sampled
             lookback:   data.min_history_sec,    // seconds needed
+            tradeDirection: data.trade_direction,
         });
     }
 
@@ -2713,6 +2714,7 @@
     let _cachedCurrentPosition = 'NONE';
     let _cachedDataReady = false;
     let _cachedDataPoints = 0;
+    let _cachedTradeDirection = 'both';
     // Notionals straight from the engine: it sizes in LOTS, so these
     // are lots x contract size x live mid rather than W3's configured
     // USD position size (which this engine never sets, leaving the
@@ -2745,6 +2747,7 @@
         if (opts.dataReady !== undefined)   _cachedDataReady = !!opts.dataReady;
         if (opts.dataPoints !== undefined)  _cachedDataPoints = opts.dataPoints || 0;
         if (opts.lookback !== undefined && opts.lookback > 0) _cachedLookback = opts.lookback;
+        if (opts.tradeDirection) _cachedTradeDirection = opts.tradeDirection;
 
         const typeEl   = document.getElementById('blocked-signal-type');
         const zEl      = document.getElementById('blocked-signal-zscore');
@@ -2812,7 +2815,12 @@
         }
         // STATE 3 — engine ready, no signal has hit threshold yet
         const t = _cachedEntryThreshold.toFixed(1);
-        reasonEl.textContent = 'Waiting for z to cross ±' + t + ' (entry threshold)';
+        reasonEl.textContent =
+            _cachedTradeDirection === 'sell_only'
+                ? 'Waiting for the Sell spread z to reach +' + t + ' (High → Low only)'
+            : _cachedTradeDirection === 'buy_only'
+                ? 'Waiting for the Buy spread z to reach −' + t + ' (Low → High only)'
+                : 'Waiting for z to cross ±' + t + ' (Sell z ≥ +' + t + ' or Buy z ≤ −' + t + ')';
         reasonEl.className = 'text-secondary';
     }
 
