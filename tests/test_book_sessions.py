@@ -182,3 +182,22 @@ def test_mcx_order_uses_the_code_the_margin_lookup_found(arrow_broker):
     b.submit_order("CRUDEOILM19NOV26F", "sell", 10, exchange_segment="mcx_fo")
     ex = b._client.placed_orders[-1]["exchange"]
     assert str(getattr(ex, "value", ex)) == "NCD"
+
+
+def test_fill_check_reads_one_order_not_the_whole_book(arrow_broker):
+    b = arrow_broker
+    calls = []
+    b._client.get_order_details = lambda oid: (calls.append(("one", oid)) or
+                                               [{"orderNo": oid, "status": "COMPLETE",
+                                                 "filledQty": "10", "avgPrice": "9850"}])
+    b._client.get_order_book = lambda: calls.append(("book",)) or []
+    st = b.get_order_status("261030")
+    assert st["status"] == "COMPLETE" and st["filled_qty"] == 10 and st["avg_price"] == 9850.0
+    assert calls == [("one", "261030")]
+
+
+def test_an_unreadable_single_order_answer_falls_back_to_the_book(arrow_broker):
+    b = arrow_broker
+    b._client.get_order_details = lambda oid: [{"orderNo": oid}]          # no status in it
+    b._client.get_order_book = lambda: [{"orderNo": "7", "status": "COMPLETE", "filledQty": "1"}]
+    assert b.get_order_status("7")["status"] == "COMPLETE"

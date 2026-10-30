@@ -1275,6 +1275,17 @@ class ArrowBroker(BaseBroker):
             logger.error("ArrowBroker: cancel order {} failed — {}", order_id, exc)
             return False
 
+    @staticmethod
+    def _order_status_from(raw) -> Optional[Dict]:
+        """The latest state record of one order out of an answer (a list of
+        states, newest last, or one record), or None if it carries no status."""
+        rec = raw[-1] if isinstance(raw, list) and raw else (raw if isinstance(raw, dict) else None)
+        if not isinstance(rec, dict):
+            return None
+        if not str(_dig(rec, "status", "orderStatus", "ordStatus", "report_type", default="")).strip():
+            return None
+        return rec
+
     def get_order_status(self, order_id: str) -> Dict:
         """Normalized fill state for one order. Tries the SDK's per-order
         history endpoints first, then falls back to scanning the order book.
@@ -1287,8 +1298,12 @@ class ArrowBroker(BaseBroker):
 
         client = self._client
         raw = None
-        for meth in ("get_order_status", "get_order_history", "single_order_history",
-                     "order_history"):
+        # ONE order first (GET /order/{id}: get_order_details in SDK 1.8) — the
+        # whole order book is downloaded only if that answer can't be read.
+        # (Every fill check used to fetch the full book: slow, and slower as
+        # the day's orders pile up.)
+        for meth in ("get_order_details", "get_order_status", "get_order_history",
+                     "single_order_history", "order_history"):
             fn = getattr(client, meth, None)
             if fn is None:
                 continue
@@ -1297,6 +1312,8 @@ class ArrowBroker(BaseBroker):
                 break
             except Exception as exc:
                 logger.debug("ArrowBroker: {}({}) failed — {}", meth, order_id, exc)
+        if raw is not None and self._order_status_from(raw) is None:
+            raw = None                       # unreadable → fall back to the order book
         if raw is None:
             fn = getattr(client, "get_order_book", None) or getattr(client, "get_orders", None)
             if fn is not None:
@@ -1308,8 +1325,7 @@ class ArrowBroker(BaseBroker):
                 except Exception as exc:
                     logger.debug("ArrowBroker: order-book scan failed — {}", exc)
 
-        # An order's history is a list of states (newest last); take the latest.
-        rec = raw[-1] if isinstance(raw, list) and raw else (raw if isinstance(raw, dict) else None)
+        rec = self._order_status_from(raw)
         if not rec:
             return unknown
 
