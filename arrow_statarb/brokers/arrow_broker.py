@@ -1808,8 +1808,9 @@ class ArrowBroker(BaseBroker):
         except ValueError:
             prod_enum = ProductType.NRML
         orders, problems = [], []
-        order_wire = {lg["segment"]: _SEGMENT_MAP.get(lg["segment"].lower(),
-                                                      lg["segment"].upper()) for lg in legs}
+        # what ORDERS are actually sent under (see _order_exchange)
+        order_wire = {lg["segment"]: self._wire(self._order_exchange(lg["segment"], lg["symbol"]))
+                      for lg in legs}
         for lg in legs:
             tt = TransactionType.BUY if lg["side"].lower() == "buy" else TransactionType.SELL
             ex, ident, fig = self._margin_route(lg["segment"], lg["symbol"], prod_enum, tt,
