@@ -159,3 +159,26 @@ def test_session_check_logs_an_expired_session_once_and_the_recovery(arrow_broke
     text = "".join(lines)
     assert text.count("SESSION NOT ANSWERING") == 1 and "invalid session token" in text
     assert "answering again" in text
+
+
+def test_mcx_orders_go_out_under_mcxfo_not_mcx(arrow_broker):
+    """Arrow answers an MCX order sent as exchange=MCX with 400 'invalid trading
+    symbol'; orders, quotes and margin for MCX futures go under MCXFO."""
+    b = arrow_broker
+    r = b.submit_order("CRUDEOILM19NOV26F", "buy", 10, exchange_segment="mcx_fo")
+    assert r["status"] == "submitted"
+    ex = b._client.placed_orders[-1]["exchange"]
+    assert str(getattr(ex, "value", ex)) == "MCXFO"
+    # NSE F&O is untouched (control)
+    b.submit_order("NIFTY30JUN26F", "sell", 75, exchange_segment="nse_fo")
+    ex = b._client.placed_orders[-1]["exchange"]
+    assert str(getattr(ex, "value", ex)) == "NFO"
+
+
+def test_mcx_order_uses_the_code_the_margin_lookup_found(arrow_broker):
+    from arrow_statarb.brokers.arrow_broker import Exchange
+    b = arrow_broker
+    b._margin_routes = {("mcx_fo", "CRUDEOILM19NOV26F"): (Exchange("NCD"), "CRUDEOILM19NOV26F")}
+    b.submit_order("CRUDEOILM19NOV26F", "sell", 10, exchange_segment="mcx_fo")
+    ex = b._client.placed_orders[-1]["exchange"]
+    assert str(getattr(ex, "value", ex)) == "NCD"
