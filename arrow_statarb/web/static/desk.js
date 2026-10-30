@@ -110,11 +110,13 @@
     if (m) { m.addEventListener('mousedown', function (e) { if (e.target === m) { dismissDialogs(); } }); }
   });
 
-  function confirmBox(title, body, confirmText) {
+  function confirmBox(title, body, confirmText, tone) {
     var m = $('#modal');
     $('#modal-title').textContent = title;
+    $('#modal-title').className = tone ? 'tone-' + tone : '';
     $('#modal-body').textContent = body;
     $('#modal-confirm').textContent = confirmText || 'Confirm';
+    $('#modal-confirm').className = 'btn ' + (tone ? 'tone-' + tone : 'danger');
     m.classList.remove('hidden');
     return new Promise(function (resolve) {
       function done(v) {
@@ -356,8 +358,9 @@
     var words = (direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread · ' + qty +
       ' lot(s) · at ~' + num(px, 2) + ' (' + (direction === 'LONG_SPREAD' ? 'Ask A − Bid B' : 'Bid A − Ask B') + ')';
     var go = prefs.confirmClicks !== false
-      ? confirmBox('Manual order', words + '\n\nTagged MANUAL. The algo cannot start while it is open.',
-                   direction === 'LONG_SPREAD' ? 'BUY' : 'SELL')
+      ? confirmBox((direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread — market',
+                   words + '\n\nTagged MANUAL. The algo cannot start while it is open.',
+                   direction === 'LONG_SPREAD' ? 'BUY' : 'SELL', direction === 'LONG_SPREAD' ? 'buy' : 'sell')
       : Promise.resolve(true);
     go.then(function (ok) {
       if (!ok) { return; }
@@ -388,10 +391,24 @@
   // Which side a click in a column sends. Default (touch): Bids = SELL (hit
   // the bid), Asks = BUY (lift the offer) — as the ladder always worked here.
   // 'join' is the classic price-ladder way: Bids = resting BUY, Asks = SELL.
+  // Default 'join': Bids (blue) = BUY, Asks (red) = SELL — red is SELL and
+  // blue is BUY everywhere on the desk. A fresh preference key, so the new
+  // default reaches everyone once; the toggle still offers the other way.
+  function clickMode() { return prefs.clickMode || 'join'; }
+
   function sideForColumn(col) {
-    var join = (prefs.clickConv || 'touch') === 'join';
+    var join = clickMode() === 'join';
     if (col === 'ask') { return join ? 'SELL' : 'BUY'; }
     return join ? 'BUY' : 'SELL';
+  }
+
+  function labelColumns(body) {
+    body = body || (W.ladder && W.ladder.body);
+    if (!body) { return; }
+    var b = $('th.c-bid', body), a = $('th.c-ask', body);
+    var bs = sideForColumn('bid'), as = sideForColumn('ask');
+    if (b) { b.innerHTML = 'Bids <span class="hdr-' + bs.toLowerCase() + '">' + bs + '</span>'; }
+    if (a) { a.innerHTML = 'Asks <span class="hdr-' + as.toLowerCase() + '">' + as + '</span>'; }
   }
 
   function placeWorking(side, level) {
@@ -404,9 +421,9 @@
                   : 'fires when the ' + (side === 'SELL' ? 'Sell' : 'Buy') + ' spread reaches ' + num(level, 2) +
                     ' (now ' + num(now, 2) + ')');
     var go = prefs.confirmClicks !== false
-      ? confirmBox(marketable ? 'Order — fires now' : 'Working order (GTC)',
+      ? confirmBox(side + ' the spread — ' + (marketable ? 'fires now' : 'working order (GTC)'),
                    words + '\n\nManual order: good till cancelled; turning the algo ON cancels it.',
-                   side)
+                   side + ' ' + qty, side === 'SELL' ? 'sell' : 'buy')
       : Promise.resolve(true);
     go.then(function (ok) {
       if (!ok) { return; }
@@ -479,8 +496,8 @@
       '  <button class="quick flatten" data-manual data-tip="Close the open position at market">CLOSE POSITION</button>' +
       '  <button class="quick wo-cancel-all" data-tip="Cancel every working order">CANCEL ALL <span class="wo-n"></span></button>' +
       '  <label class="inline-field" title="What a click in the Bids / Asks columns sends"><span>Click</span>' +
-      '    <select class="click-conv"><option value="touch">Bid SELL·Ask BUY</option>' +
-      '    <option value="join">Bid BUY·Ask SELL</option></select></label>' +
+      '    <select class="click-conv"><option value="join">Bid BUY·Ask SELL</option>' +
+      '    <option value="touch">Bid SELL·Ask BUY</option></select></label>' +
       '  <label class="inline-field qty-row"><span>Qty (lots)</span><input class="qty-in" type="number" min="1" step="1"></label>' +
       '  <label class="inline-field"><span>Increment</span><input class="inc-in" type="number" min="0" step="0.05" placeholder="tick"></label>' +
       '  <div class="centre-row"><label class="check"><input type="checkbox" class="lock-scroll"> Lock</label>' +
@@ -507,8 +524,9 @@
         ? S.ladder.rows[Math.floor(S.ladder.rows.length / 2)].level : null;
     };
     var conv = $('.click-conv', body);
-    conv.value = prefs.clickConv || 'touch';
-    conv.onchange = function () { prefs.clickConv = conv.value; save(PREF_KEY, prefs); REFRESH.ladder(); };
+    conv.value = clickMode();
+    conv.onchange = function () { prefs.clickMode = conv.value; save(PREF_KEY, prefs); labelColumns(body); REFRESH.ladder(); };
+    labelColumns(body);
     $('.wo-cancel-all', body).onclick = cancelAllWorking;
     $('tbody', body).onclick = function (e) {
       var mark = e.target.closest('td.work');
@@ -596,7 +614,7 @@
     }
     var sell = d.sell_spread, buy = d.buy_spread;
     var direction = d.trade_direction || 'both';
-    var join = (prefs.clickConv || 'touch') === 'join';
+    var join = clickMode() === 'join';
     var bidTip = join ? 'BUY (resting) at this spread price' : 'SELL at this spread price';
     var askTip = join ? 'SELL (resting) at this spread price' : 'BUY at this spread price';
     tb.innerHTML = rows.map(function (r) {

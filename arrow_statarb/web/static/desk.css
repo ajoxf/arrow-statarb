@@ -109,3 +109,14 @@ td[data-col].clickable { cursor: pointer; }
 .rail .quick.wo-cancel-all { background: linear-gradient(#f4d58d, #e0b450); color: #3a2a00; border-color: #8a6b1f; }
 .rail .click-conv { font-size: 10px; max-width: 100%; }
 .btn.wo-x { padding: 0 5px; font-size: 10px; line-height: 14px; }
+
+/* One colour language on the whole desk: RED = SELL, BLUE = BUY
+ * (Signal & Position shows the Sell spread red and the Buy spread blue). */
+body.desk .rail .quick.buy-touch { background: var(--bid-strong, #1f7ac2); }
+body.desk .rail .quick.sell-touch { background: var(--ask-strong, #b83232); }
+th.c-bid .hdr-buy, th.c-ask .hdr-buy, th .hdr-buy { color: #fff; background: var(--bid-strong, #1f7ac2); padding: 0 3px; border-radius: 2px; font-size: 9px; }
+th .hdr-sell { color: #fff; background: var(--ask-strong, #b83232); padding: 0 3px; border-radius: 2px; font-size: 9px; }
+#modal-title.tone-sell { color: var(--ask-strong, #b83232); }
+#modal-title.tone-buy { color: var(--bid-strong, #1f7ac2); }
+#modal-confirm.tone-sell { background: var(--ask-strong, #b83232); color: #fff; border-color: #7a1010; }
+#modal-confirm.tone-buy { background: var(--bid-strong, #1f7ac2); color: #fff; border-color: #0f4d7a; }
