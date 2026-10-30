@@ -34,6 +34,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
+from arrow_statarb.core.working_orders import WorkingOrders
 from arrow_statarb.core.candles import SpreadCandles, TIMEFRAMES, TF_LABELS, normalise_tf
 from arrow_statarb.core.algo import ArrowAutoTrader
 from arrow_statarb.core.executor import SpreadExecutor, LegOrder
@@ -2557,11 +2558,17 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except (ValueError, TypeError):
             pass
         signal_engine.start()   # ensure the signal is running
+        # Manual and algo never trade together: turning the algo ON cancels
+        # every working (resting) manual order first.
+        n_cancelled = working_orders.cancel_all("the algo was turned ON")
         ok = arrow_algo.start()
         logger.info("Algo start requested (lots={}, mode={})",
                     _algo_lots["lots"], "DRY-RUN" if _is_dry_run() else "LIVE")
         return jsonify({"success": True, "running": True, "already_running": not ok,
-                        "lots": _algo_lots["lots"], "dry_run": _is_dry_run()})
+                        "lots": _algo_lots["lots"], "dry_run": _is_dry_run(),
+                        "working_orders_cancelled": n_cancelled,
+                        "message": (f"{n_cancelled} working order(s) cancelled — the algo is ON"
+                                    if n_cancelled else None)})
 
     @app.route("/api/engine/toggle-algo", methods=["POST"])
     def api_engine_toggle_algo():
@@ -3401,6 +3408,99 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         emit("status", _status_payload())
 
     # Expose internals for tests (inject a fake broker, inspect the engines).
-    app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo}
+    # ── working (resting) spread orders — GTC, watch-and-fire ────────────────
+    def _wo_quotes():
+        """(sell_spread, buy_spread, fresh) straight off the live book; never
+        fresh while the market is shut or either leg's quote is stale."""
+        book = _leg_book()
+        if not book or not _session_open():
+            return None, None, False
+        a, b = book["leg_a"], book["leg_b"]
+        max_age = float(cfg.get("signal.max_quote_age_sec", 60) or 0)
+        now = time.time()
+        if max_age > 0 and any(now - float(x.get("ts") or 0) > max_age for x in (a, b)):
+            return None, None, False
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        sell = (k * float(a["bid"]) - float(b["ask"])
+                if a.get("bid") is not None and b.get("ask") is not None else None)
+        buy = (k * float(a["ask"]) - float(b["bid"])
+               if a.get("ask") is not None and b.get("bid") is not None else None)
+        return sell, buy, True
+
+    def _wo_gate(o):
+        """May this order fire now — and does it OPEN or CLOSE? One position at
+        a time: flat → open; the opposite side for at most the open lots →
+        close; otherwise the order waits (held), never adds to a position."""
+        if arrow_algo.running:
+            return False, "the algo is ON — manual orders are not allowed"
+        op = _open_position_view()
+        want = "SHORT_SPREAD" if o["side"] == "SELL" else "LONG_SPREAD"
+        if not op:
+            return True, "open"
+        if op["direction"] != want and o["lots"] <= op["lots"]:
+            return True, "close"
+        return False, (f"held — a {op['owner'].upper()} {op['direction'].replace('_SPREAD', '')} "
+                       f"{op['lots']} lot(s) position is open")
+
+    def _wo_fire(o, how):
+        if how == "close":
+            op = _open_position_view() or {}
+            return _spread_close(op.get("direction"), int(o["lots"]), source="manual",
+                                 reason="working order")
+        return _spread_execute("SHORT_SPREAD" if o["side"] == "SELL" else "LONG_SPREAD",
+                               int(o["lots"]), source="manual")
+
+    working_orders = WorkingOrders(SIGNAL_WINDOW_FILE.with_name("working_orders.json"),
+                                   _wo_quotes, _wo_gate, _wo_fire)
+    working_orders.start()
+
+    @app.route("/api/working-orders", methods=["GET"])
+    def api_working_orders():
+        return jsonify({"active": working_orders.active(),
+                        "recent": [o for o in working_orders.all()
+                                   if o["status"] not in ("working", "held")][-20:][::-1]})
+
+    @app.route("/api/working-orders", methods=["POST"])
+    def api_working_orders_place():
+        """Place a GTC working order: {side: BUY|SELL, price, lots}. Manual —
+        refused while the algo is ON (the same lock as every manual order)."""
+        why = _manual_blocked()
+        if why:
+            return jsonify({"success": False, "error": why})
+        d = request.get_json(silent=True) or {}
+        try:
+            o = working_orders.place(d.get("side"), float(d.get("price")),
+                                     int(d.get("lots") or cfg.get("risk.lots_per_trade", 1) or 1))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"success": False, "error": f"Not placed: {exc}"})
+        sell, buy, fresh = _wo_quotes()
+        marketable = fresh and ((o["side"] == "SELL" and sell is not None and sell >= o["price"]) or
+                                (o["side"] == "BUY" and buy is not None and buy <= o["price"]))
+        return jsonify({"success": True, "order": o, "marketable": bool(marketable)})
+
+    def _cancel_note() -> str:
+        """Who cancelled, and how — kept on the order and in app.log, so a
+        cancel nobody remembers making can be traced to the control and the
+        computer (a second tab or another device) it came from."""
+        d = request.get_json(silent=True) or {}
+        via = str(request.args.get("via") or d.get("via") or "the desk")[:60]
+        who = request.headers.get("X-Forwarded-For", request.remote_addr or "?")
+        ua = request.headers.get("User-Agent", "")
+        dev = ("phone" if "Mobile" in ua else "Edge" if "Edg/" in ua else "Chrome" if "Chrome" in ua
+               else "Firefox" if "Firefox" in ua else "browser")
+        return f"cancelled — {via} (from {who}, {dev})"
+
+    @app.route("/api/working-orders/<oid>", methods=["DELETE"])
+    def api_working_orders_cancel(oid):
+        o = working_orders.cancel(oid, _cancel_note())
+        return jsonify({"success": bool(o), "order": o,
+                        "error": None if o else "No working order with that id (already filled or cancelled?)"})
+
+    @app.route("/api/working-orders/cancel-all", methods=["POST"])
+    def api_working_orders_cancel_all():
+        return jsonify({"success": True, "cancelled": working_orders.cancel_all(_cancel_note())})
+
+    app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo,
+                               "working_orders": working_orders}
 
     return app, socketio

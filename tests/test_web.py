@@ -993,3 +993,62 @@ def test_algo_entry_journals_its_band_timeframe_through_the_real_order_path(tmp_
     from arrow_statarb.core.trade_log import TradeLog
     op = TradeLog(path=appmod.TRADES_FILE).open_position()
     assert op["source"] == "algo" and op["band_source"] == "candles" and op["band_tf"] == "1h"
+
+
+def test_working_orders_through_the_app_open_hold_close_and_the_lock(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    wo = app.extensions["arrow"]["working_orders"]
+    mkt = {"sell": 100.0, "buy": 104.0}
+    wo._quotes = lambda: (mkt["sell"], mkt["buy"], True)      # the live book, controlled
+
+    r = c.post("/api/working-orders", json={"side": "SELL", "price": 110, "lots": 1}).get_json()
+    assert r["success"] and r["marketable"] is False
+    sell_id = r["order"]["id"]
+    c.post("/api/working-orders", json={"side": "SELL", "price": 112, "lots": 1})
+    buy_tp = c.post("/api/working-orders", json={"side": "BUY", "price": 101, "lots": 1}).get_json()
+    assert len(c.get("/api/working-orders").get_json()["active"]) == 3
+
+    mkt["sell"] = 113.0                                         # both SELLs reached
+    wo.check_once()
+    act = {o["id"]: o for o in c.get("/api/working-orders").get_json()["active"]}
+    assert sell_id not in act                                   # the first one opened a SHORT
+    held = [o for o in act.values() if o["side"] == "SELL"][0]
+    assert held["status"] == "held" and "position is open" in held["note"]   # never adds
+    st = c.get("/api/algo/state").get_json()
+    assert st["position_owner"] == "manual"
+
+    mkt["sell"], mkt["buy"] = 100.0, 101.0                      # BUY reached: closes the SHORT
+    wo.check_once()
+    assert c.get("/api/algo/state").get_json()["position_owner"] is None
+    recent = {o["id"]: o for o in c.get("/api/working-orders").get_json()["recent"]}
+    assert recent[buy_tp["order"]["id"]]["status"] == "filled"
+
+    # the lock: the algo ON cancels working orders and refuses new ones
+    assert len(wo.active()) == 1
+    r = c.post("/api/algo/start", json={}).get_json()
+    assert r["success"] and r["working_orders_cancelled"] == 1 and wo.active() == []
+    r = c.post("/api/working-orders", json={"side": "SELL", "price": 120, "lots": 1}).get_json()
+    assert r["success"] is False and "algo is ON" in r["error"]
+
+
+def test_working_order_cancel_endpoints(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    a = c.post("/api/working-orders", json={"side": "BUY", "price": 90, "lots": 1}).get_json()["order"]
+    c.post("/api/working-orders", json={"side": "SELL", "price": 130, "lots": 2})
+    assert c.delete(f"/api/working-orders/{a['id']}").get_json()["success"]
+    assert c.delete(f"/api/working-orders/{a['id']}").get_json()["success"] is False
+    assert c.post("/api/working-orders/cancel-all").get_json()["cancelled"] == 1
+    assert c.post("/api/working-orders", json={"side": "SELL", "price": "x"}).get_json()["success"] is False
+
+
+def test_a_cancel_records_which_control_and_which_computer_sent_it(tmp_path):
+    """'Cancelled by you' was not enough to explain a cancel the trader did not
+    make: the note now names the control and the sending computer."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    o = c.post("/api/working-orders", json={"side": "SELL", "price": 130, "lots": 1}).get_json()["order"]
+    c.delete(f"/api/working-orders/{o['id']}?via=✕ in the Working Orders window",
+             headers={"User-Agent": "Mozilla/5.0 Chrome/130"})
+    rec = [x for x in c.get("/api/working-orders").get_json()["recent"] if x["id"] == o["id"]][0]
+    assert rec["status"] == "cancelled"
+    assert "✕ in the Working Orders window" in rec["note"] and "from 127.0.0.1" in rec["note"]
+    assert "Chrome" in rec["note"]
