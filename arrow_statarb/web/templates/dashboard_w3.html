@@ -542,12 +542,14 @@
                 <span id="wo-lock" class="badge bg-info ms-auto d-none" style="font-size:0.62rem;">ALGO ON — manual orders off</span>
             </div>
             <div class="card-body py-2" style="font-size:0.75rem;">
-                <div class="d-flex gap-2 mb-2">
+                <div class="d-flex gap-2 mb-1">
                     <button class="btn btn-sm wo-buy fw-bold flex-fill wo-man" id="wo-buy-mkt"
                             title="MARKET: buy the spread now at the Buy spread (Ask A − Bid B)">BUY MKT</button>
                     <button class="btn btn-sm wo-sell fw-bold flex-fill wo-man" id="wo-sell-mkt"
                             title="MARKET: sell the spread now at the Sell spread (Bid A − Ask B)">SELL MKT</button>
                 </div>
+                <button class="btn btn-sm btn-dark fw-bold w-100 mb-2 wo-man" id="wo-close"
+                        title="Close the open position now, at market, on its closing side">CLOSE POSITION <span id="wo-pos" class="fw-normal"></span></button>
                 <div class="d-flex gap-1 align-items-center mb-1">
                     <select id="wo-side" class="form-select form-select-sm py-0" style="width:auto;font-size:0.75rem;">
                         <option value="SELL">SELL</option><option value="BUY">BUY</option>
@@ -1273,7 +1275,7 @@
     (function () {
         const $ = id => document.getElementById(id);
         if (!$('wo-card')) return;
-        let wo = {active: [], recent: []}, live = {sell: null, buy: null}, lock = null;
+        let wo = {active: [], recent: []}, live = {sell: null, buy: null}, lock = null, owner = null;
         let lastAct = {k: null, at: 0};
         const once = k => { const n = Date.now(); if (lastAct.k === k && n - lastAct.at < 500) return false;
                             lastAct = {k: k, at: n}; return true; };
@@ -1297,6 +1299,15 @@
                               : 'Not sent: ' + (r.error || 'refused'), r.success ? 'success' : 'danger');
             });
         }
+        $('wo-close').addEventListener('click', () => {
+            if (!once('close')) return;
+            fetch('/api/engine/close-position', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})}).then(r => r.json()).then(r => {
+                say(r.success ? 'Position closed — ' + (r.message || 'sent') : 'Not closed: ' + (r.error || 'refused'),
+                    r.success ? 'success' : 'danger');
+                refresh();
+            });
+        });
         $('wo-buy-mkt').addEventListener('click', () => market('LONG_SPREAD'));
         $('wo-sell-mkt').addEventListener('click', () => market('SHORT_SPREAD'));
         $('wo-place').addEventListener('click', () => {
@@ -1358,6 +1369,10 @@
             $('wo-use-sell').textContent = 'Sell ' + f2(live.sell);
             $('wo-use-buy').textContent = 'Buy ' + f2(live.buy);
             document.querySelectorAll('#wo-card .wo-man').forEach(b => { b.disabled = !!lock; b.title = lock || b.title; });
+            // CLOSE POSITION: only with something open, and it says what it closes
+            const flat = !owner;
+            $('wo-close').disabled = !!lock || flat;
+            $('wo-pos').textContent = flat ? '(flat)' : '(' + String(owner).toUpperCase() + ' position)';
             $('wo-lock').classList.toggle('d-none', !lock);
         }
         function refresh() {
@@ -1370,7 +1385,7 @@
                             (o.note ? ' — ' + o.note : ''), o.status === 'filled' ? 'success' : 'danger');
                 });
                 seen = seen || {}; (d.recent || []).forEach(o => { seen[o.id] = true; });
-                wo = d; lock = st.manual_block || null;
+                wo = d; lock = st.manual_block || null; owner = st.position_owner || null;
                 const sg = window._lastSignal || {};
                 live = {sell: sg.sell_spread != null ? Number(sg.sell_spread) : null,
                         buy: sg.buy_spread != null ? Number(sg.buy_spread) : null};
