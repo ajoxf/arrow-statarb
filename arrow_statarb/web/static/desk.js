@@ -110,6 +110,21 @@
     if (m) { m.addEventListener('mousedown', function (e) { if (e.target === m) { dismissDialogs(); } }); }
   });
 
+  // One-click trading by default: the dialog only appears with 'Confirm'
+  // ticked on the ladder rail. A repeat of the SAME action within 0.5 s is
+  // dropped — with no dialog in the way, a double-click must not send twice.
+  function wantConfirm() { return prefs.confirmOrders === true; }
+  var lastAction = {key: null, at: 0};
+  function debounced(key) {
+    var now = Date.now();
+    if (lastAction.key === key && now - lastAction.at < 500) { return true; }
+    lastAction = {key: key, at: now};
+    return false;
+  }
+  function maybeConfirm(title, body, confirmText, tone) {
+    return wantConfirm() ? confirmBox(title, body, confirmText, tone) : Promise.resolve(true);
+  }
+
   function confirmBox(title, body, confirmText, tone) {
     var m = $('#modal');
     $('#modal-title').textContent = title;
@@ -132,7 +147,7 @@
   // ── windows ────────────────────────────────────────────────────────────
   var W = {};            // id -> {def, node, body}
   var layout = load(LAYOUT_KEY, {});
-  var prefs = load(PREF_KEY, {confirmClicks: true});
+  var prefs = load(PREF_KEY, {});
   var topZ = 20;
 
   var DEFS = [
@@ -357,7 +372,8 @@
     var px = direction === 'LONG_SPREAD' ? lad.buy_spread : lad.sell_spread;
     var words = (direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread · ' + qty +
       ' lot(s) · at ~' + num(px, 2) + ' (' + (direction === 'LONG_SPREAD' ? 'Ask A − Bid B' : 'Bid A − Ask B') + ')';
-    var go = prefs.confirmClicks !== false
+    if (debounced('mkt' + direction)) { return; }
+    var go = wantConfirm()
       ? confirmBox((direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread — market',
                    words + '\n\nTagged MANUAL. The algo cannot start while it is open.',
                    direction === 'LONG_SPREAD' ? 'BUY' : 'SELL', direction === 'LONG_SPREAD' ? 'buy' : 'sell')
@@ -375,7 +391,8 @@
   function closePosition() {
     var t = S.status && S.status.open_trade;
     if (!t) { toast('No open position.', 'info'); return; }
-    confirmBox('Close position',
+    if (debounced('close')) { return; }
+    maybeConfirm('Close position',
       'Close the ' + (t.owner || '') + ' ' + t.position_type + ' position (' + t.quantity +
       ' lot(s)) now, at the ' + (t.position_type === 'LONG' ? 'Sell' : 'Buy') + ' spread.', 'Close')
       .then(function (ok) {
@@ -420,7 +437,8 @@
       (marketable ? 'the market is already there: it fires NOW (both legs at market)'
                   : 'fires when the ' + (side === 'SELL' ? 'Sell' : 'Buy') + ' spread reaches ' + num(level, 2) +
                     ' (now ' + num(now, 2) + ')');
-    var go = prefs.confirmClicks !== false
+    if (debounced('wo' + side + level)) { return; }
+    var go = wantConfirm()
       ? confirmBox(side + ' the spread — ' + (marketable ? 'fires now' : 'working order (GTC)'),
                    words + '\n\nManual order: good till cancelled; turning the algo ON cancels it.',
                    side + ' ' + qty, side === 'SELL' ? 'sell' : 'buy')
@@ -438,7 +456,7 @@
   function cancelWorking(ids) {
     var list = (S.wo && S.wo.active || []).filter(function (o) { return ids.indexOf(o.id) >= 0; });
     var words = list.map(function (o) { return o.side + ' ' + o.lots + ' @ ' + num(o.price, 2); }).join(', ');
-    confirmBox('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + '?', 'Cancel order')
+    maybeConfirm('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + '?', 'Cancel order')
       .then(function (ok) {
         if (!ok) { return; }
         Promise.all(ids.map(function (id) {
@@ -450,7 +468,7 @@
   function cancelAllWorking() {
     var n = (S.wo && S.wo.active || []).length;
     if (!n) { toast('No working orders.', 'info'); return; }
-    confirmBox('Cancel all working orders', 'Cancel all ' + n + ' working order(s)?', 'Cancel all')
+    maybeConfirm('Cancel all working orders', 'Cancel all ' + n + ' working order(s)?', 'Cancel all')
       .then(function (ok) {
         if (!ok) { return; }
         postJSON('/api/working-orders/cancel-all', {}).then(function (r) {
@@ -517,8 +535,8 @@
     $('.sell-touch', body).onclick = function () { manualOrder('SHORT_SPREAD'); };
     $('.flatten', body).onclick = closePosition;
     var cc = $('.confirm-clicks', body);
-    cc.checked = prefs.confirmClicks !== false;
-    cc.onchange = function () { prefs.confirmClicks = cc.checked; save(PREF_KEY, prefs); };
+    cc.checked = wantConfirm();
+    cc.onchange = function () { prefs.confirmOrders = cc.checked; save(PREF_KEY, prefs); };
     $('.lock-scroll', body).onchange = function (e) {
       ladderAnchor = e.target.checked && S.ladder && S.ladder.rows && S.ladder.rows.length
         ? S.ladder.rows[Math.floor(S.ladder.rows.length / 2)].level : null;
