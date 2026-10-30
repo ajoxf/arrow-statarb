@@ -36,14 +36,15 @@ def test_limit_order_no_mpp(arrow_broker):
 
 
 def test_mcx_is_accepted(arrow_broker):
-    # Arrow supports MCX from SDK 1.5.x — mcx_fo must route to the MCX exchange
-    # enum, not be rejected (the old hard-block is gone).
+    # mcx_fo orders are accepted and go out under MCXFO: Arrow rejects an MCX
+    # order sent as exchange=MCX with 400 'invalid trading symbol', and fills
+    # it under MCXFO (seen live on CRUDEOILM, 30 Oct 2026).
     res = arrow_broker.submit_order(
         symbol="CRUDEOIL25JULFUT", side="buy", quantity=100,
         order_type="market", exchange_segment="mcx_fo")
     assert res["status"] == "submitted"
     kw = arrow_broker._client.placed_orders[-1]
-    assert kw["exchange"].value == "MCX"        # mcx_fo → MCX enum
+    assert kw["exchange"].value == "MCXFO"      # mcx_fo → MCXFO for orders
     assert kw["mpp"] is True and kw["price"] == 0.0
 
 
