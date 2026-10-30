@@ -47,10 +47,14 @@ class LegOrder:
                  "order_id", "status", "order_type", "filled", "avg_price",
                  "limit_price", "ref_price", "error", "unconfirmed", "amend_count",
                  "recovery", "escalated", "prefill", "unknown_polls",
-                 "sent_at", "acked_at", "filled_at")
+                 "sent_at", "acked_at", "filled_at", "product")
 
-    def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = ""):
+    def __init__(self, segment: str, symbol: str, side: str, units: int, token: str = "",
+                 product: Optional[str] = None):
         self.segment = segment
+        # A close is sent under the product of the position it closes (an
+        # opposite order under another product would open a second position).
+        self.product = product            # None → the execution setting
         self.symbol = symbol
         self.side = side                  # "buy" | "sell"
         self.units = int(units)           # already lots × lot_size
@@ -264,7 +268,7 @@ class SpreadExecutor:
         res = broker.submit_order(
             symbol=leg.symbol, side=leg.side, quantity=residual,
             order_type=order_type, price=price, exchange_segment=leg.segment,
-            product=str(p.get("product", "NRML")), token=leg.token,
+            product=str(leg.product or p.get("product", "NRML")), token=leg.token,
         ) or {}
 
         if res.get("status") == "error" or res.get("order_id") in (None, ""):
@@ -473,7 +477,8 @@ class SpreadExecutor:
             try:
                 res = broker.submit_order(
                     symbol=leg.symbol, side=opp, quantity=qty, order_type="market",
-                    exchange_segment=leg.segment, product=str(p.get("product", "NRML")),
+                    exchange_segment=leg.segment,
+                    product=str(leg.product or p.get("product", "NRML")),
                     token=leg.token,
                 ) or {}
                 leg.recovery = res

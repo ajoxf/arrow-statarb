@@ -20,6 +20,7 @@ class FakeBroker:
 
     def submit_order(self, **kw):
         self.orders.append(kw)
+        self.__dict__.setdefault("fills", []).append(kw)   # survives orders.clear()
         oid = f"OID{len(self.orders)}"
         return {"order_id": oid, "status": "submitted", **kw}
 
@@ -42,7 +43,15 @@ class FakeBroker:
         return {}
 
     def get_positions(self):
-        return []
+        """Net positions, as an Indian exchange keeps them: every fill nets
+        into one figure per symbol and product (no tickets). ``seed`` holds
+        positions opened before the test's own orders."""
+        net = dict(getattr(self, "seed", {}))
+        for o in getattr(self, "fills", []):
+            key = (o["symbol"], str(o.get("product", "NRML")).upper())
+            net[key] = net.get(key, 0) + (o["quantity"] if o["side"] == "buy" else -o["quantity"])
+        return [{"symbol": sym, "product": prod, "net_quantity": q}
+                for (sym, prod), q in net.items() if q]
 
 
 def _app(tmp_path, mode="dry_run"):
@@ -794,6 +803,8 @@ def test_dashboard_close_closes_the_held_side_at_its_size(tmp_path, held, close_
     algo = app.extensions["arrow"]["algo"]
     algo._pos = {"direction": held, "lots": 2, "entry_z": 2.5, "entry_spread": 100.0,
                  "entry_fill_spread": 100.0, "entry_time": 0.0}
+    sa = 150 if held == "LONG_SPREAD" else -150          # what Arrow holds
+    broker.seed = {("NIFTY30JUN26F", "NRML"): sa, ("NIFTY28JUL26F", "NRML"): -sa}
     r = app.test_client().post("/api/engine/close-position", json={}).get_json()
     assert r["success"] is True
     sides = [(o["symbol"], o["side"], o["quantity"]) for o in broker.orders]
@@ -1144,3 +1155,59 @@ def test_a_cancel_records_which_control_and_which_computer_sent_it(tmp_path):
     assert rec["status"] == "cancelled"
     assert "✕ in the Working Orders window" in rec["note"] and "from 127.0.0.1" in rec["note"]
     assert "Chrome" in rec["note"]
+
+
+# ── a close is checked against Arrow's own (netted) positions ─────────────────
+
+def _open_long(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    c = app.test_client()
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    broker.orders.clear()
+    return app, broker, c
+
+
+def test_close_nets_the_arrow_position_to_flat(tmp_path):
+    app, broker, c = _open_long(tmp_path)
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    assert broker.get_positions() == []                   # flat on Arrow, not doubled
+
+
+def test_close_refused_when_arrow_is_already_flat(tmp_path):
+    # the position was closed in the Arrow app; our journal still says LONG
+    app, broker, c = _open_long(tmp_path)
+    broker.fills = []
+    r = c.post("/api/manual-trade/close",
+               json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is False and "would OPEN a new position" in r["error"]
+    assert broker.orders == []
+
+
+def test_close_refused_when_bigger_than_the_arrow_position(tmp_path):
+    app, broker, c = _open_long(tmp_path)
+    broker.seed = {("NIFTY30JUN26F", "NRML"): -40, ("NIFTY28JUL26F", "NRML"): 40}
+    r = c.post("/api/manual-trade/close",
+               json={"direction": "LONG_SPREAD", "lots": 1}).get_json()
+    assert r["success"] is False and "only 35 open" in r["error"]
+    assert broker.orders == []
+
+
+def test_close_goes_out_under_the_positions_product(tmp_path):
+    app, broker, c = _open_long(tmp_path)
+    broker.fills = []
+    broker.seed = {("NIFTY30JUN26F", "MIS"): 75, ("NIFTY28JUL26F", "MIS"): -75}
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    assert {o["product"] for o in broker.orders} == {"MIS"}
+    assert broker.get_positions() == []
+
+
+def test_close_still_goes_out_when_positions_cannot_be_read(tmp_path):
+    app, broker, c = _open_long(tmp_path)
+    broker.fills = []
+    broker.positions_ok = False                           # a failed read, not "flat"
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    assert len(broker.orders) == 2

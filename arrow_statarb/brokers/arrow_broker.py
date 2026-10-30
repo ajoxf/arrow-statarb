@@ -87,6 +87,10 @@ _PRODUCT_MAP: Dict[str, str] = {
     "nrml": "M",
     "mis":  "I",
     "cnc":  "C",
+    # Arrow's own wire codes / words, as its positions report them — a close
+    # is sent under the product of the position it closes.
+    "M": "M", "I": "I", "C": "C",
+    "MARGIN": "M", "INTRADAY": "I", "DELIVERY": "C",
 }
 
 # Broker/NEST order-status strings → our normalized lifecycle states. Anything
@@ -1435,8 +1439,10 @@ class ArrowBroker(BaseBroker):
                     "pnl":           pnl,
                     "raw":           p,
                 })
+            self.positions_ok = True
             return positions
         except Exception as exc:
+            self.positions_ok = False     # [] below means "unknown", not "flat"
             logger.error("ArrowBroker: get_positions failed — {}", exc)
             return []
 
