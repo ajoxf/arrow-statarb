@@ -204,7 +204,7 @@ def test_slippage_budget_never_unwinds_an_exit():
 # ── amendment: a slow limit gets re-priced toward the market ─────────────────
 def test_slow_limit_is_amended_then_fills():
     b = MockBroker()
-    b.fill_after = {"AAA": 3, "BBB": 3}      # need a few polls → amendments fire
+    b.fill_after = {"AAA": 8, "BBB": 8}      # a slow fill (past the quick first checks) → amendments fire
     res = _executor(b).execute(_legs())
     assert res["success"] is True
     assert len(b.amends) >= 1                 # the resting limit was chased
@@ -374,3 +374,27 @@ def test_legs_carry_the_fired_and_filled_timeline_and_keep_the_first_touch():
     v = leg.view()
     assert v["sent_at"] and v["acked_at"] and v["filled_at"]
     assert v["sent_at"] <= v["acked_at"] <= v["filled_at"]
+
+
+def test_both_legs_are_checked_at_the_same_time():
+    """Two legs' fill checks go out together, not one round trip after the other."""
+    import threading
+    import time as _t
+    from arrow_statarb.core.executor import SpreadExecutor, LegOrder
+    seen, lock = [], threading.Lock()
+
+    class SlowBroker:
+        def get_order_status(self, oid):
+            with lock:
+                seen.append((oid, _t.monotonic()))
+            _t.sleep(0.2)
+            return {"status": "COMPLETE", "filled_qty": 1, "avg_price": 1.0}
+
+    ex = SpreadExecutor(broker_fn=lambda: None, price_fn=lambda s, y: None, params_fn=lambda: {})
+    legs = [LegOrder("a", "A", "buy", 1), LegOrder("b", "B", "sell", 1)]
+    for i, l in enumerate(legs):
+        l.order_id, l.status = f"O{i}", "OPEN"
+    t0 = _t.monotonic()
+    ex._refresh_all(SlowBroker(), legs, {})
+    assert len(seen) == 2 and abs(seen[0][1] - seen[1][1]) < 0.1
+    assert _t.monotonic() - t0 < 0.35                   # ~one round trip, not two

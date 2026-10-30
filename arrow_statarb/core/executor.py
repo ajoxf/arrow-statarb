@@ -30,6 +30,7 @@ order this places is real.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -336,12 +337,14 @@ class SpreadExecutor:
 
         deadline = self._clock() + timeout
         next_amend = self._clock() + amend_every
+        # A fill is usually there within milliseconds: look again quickly at
+        # first, then settle into the configured cadence.
+        fast = [0.05, 0.1, 0.2]
         while self._clock() < deadline:
             working = [l for l in legs if l.working]
             if not working:
                 break
-            for leg in working:
-                self._refresh(broker, leg, p)
+            self._refresh_all(broker, working, p)
             working = [l for l in legs if l.working]
             if not working:
                 break
@@ -349,7 +352,21 @@ class SpreadExecutor:
                 for leg in working:
                     self._amend_more_aggressive(broker, leg, p)
                 next_amend = self._clock() + amend_every
-            self._sleep(poll)
+            self._sleep(min(fast.pop(0), poll) if fast else poll)
+
+    def _refresh_all(self, broker, legs: List[LegOrder], p: Dict) -> None:
+        """Read every working leg's state AT THE SAME TIME (one thread per
+        leg): two sequential round trips to the broker doubled the wait."""
+        if len(legs) < 2:
+            for leg in legs:
+                self._refresh(broker, leg, p)
+            return
+        threads = [threading.Thread(target=self._refresh, args=(broker, leg, p), daemon=True)
+                   for leg in legs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
 
     def _amend_more_aggressive(self, broker, leg: LegOrder, p: Dict) -> None:
         """Walk the resting limit further through the market to chase the fill."""
