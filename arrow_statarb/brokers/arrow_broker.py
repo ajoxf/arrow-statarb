@@ -1227,8 +1227,8 @@ class ArrowBroker(BaseBroker):
         order_price = 0.0 if is_market else float(price or 0)
 
         logger.info(
-            "ArrowBroker: placing order — {} {} {} {} @ {} ({}{})",
-            side.upper(), quantity, symbol, exchange_segment,
+            "ArrowBroker: placing order — {} {} {} {} → exchange={} @ {} ({}{})",
+            side.upper(), quantity, symbol, exchange_segment, self._wire(exchange_enum),
             "MKT(mpp)" if is_market else order_price, product,
             ", mpp" if mpp else "",
         )
