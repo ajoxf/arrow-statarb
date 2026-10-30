@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -296,7 +297,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return [(sa, ya, "sell", qa), (sb, yb, "buy", qb)]
 
     def _spread_order(legs, label: str, verify_flat: bool = False,
-                      source: str = "manual") -> Dict:
+                      source: str = "manual",
+                      products: Optional[Dict[str, str]] = None) -> Dict:
         """Execute both legs according to the current mode:
           dry_run   → simulated, nothing leaves the process;
           live_sim  → real SpreadExecutor against a SimBroker (no real orders);
@@ -332,7 +334,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             lot_size = resolver.resolve_lot_size(seg, sym)
             tok = resolver.resolve_token(seg, sym)
             leg_orders.append(LegOrder(segment=seg, symbol=sym, side=side,
-                                       units=qty * lot_size, token=tok))
+                                       units=qty * lot_size, token=tok,
+                                       product=(products or {}).get(sym.upper())))
         res = executor.execute(leg_orders, label=label, verify_flat=verify_flat)
         execution_log.record(res, label, mode, source=source)        # telemetry
         return res
@@ -460,11 +463,64 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     logger.critical("clip: could not unwind %s after error", fsym)
             return {"success": False, "results": results, "error": str(exc)}
 
-    def _place(legs, label: str, verify_flat: bool = False, source: str = "manual") -> Dict:
+    def _place(legs, label: str, verify_flat: bool = False, source: str = "manual",
+               products: Optional[Dict[str, str]] = None) -> Dict:
         """Route to the clip engine or the legacy SpreadExecutor per settings."""
         if _engine_mode() == "clip":
             return _clip_spread_order(legs, label)
-        return _spread_order(legs, label, verify_flat=verify_flat, source=source)
+        return _spread_order(legs, label, verify_flat=verify_flat, source=source,
+                             products=products)
+
+    def _close_against_broker(legs) -> Tuple[Optional[str], Dict[str, str]]:
+        """Check a close against Arrow's OWN open positions before sending it.
+
+        Indian exchanges net positions — there are no tickets: a close is the
+        opposite order for the same units under the same product, and it
+        reduces the open position only if all three match. So each close leg
+        must face an open position on Arrow in the opposite direction, at least
+        as large as the close, and is sent under THAT position's product.
+        Returns (refusal, {SYMBOL: product}); refusal is None when it is safe.
+        If Arrow's positions cannot be read the close still goes out (an exit
+        must not be trapped) under the configured product, with a warning."""
+        if _mode() != "live" or not bool(cfg.get("execution.verify_close_against_broker", True)):
+            return None, {}
+        broker = active.get()
+        positions = None
+        try:
+            positions = broker.get_positions() if broker else None
+            if getattr(broker, "positions_ok", True) is False:
+                positions = None                          # a failed read, not "flat"
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("Close: could not read Arrow positions — {}", exc)
+        if positions is None:
+            positions = _positions_for_verify()
+        if positions is None:
+            logger.warning("Close: Arrow positions unavailable — sending the close unchecked")
+            return None, {}
+        def _norm(x) -> str:
+            return re.sub(r"[^A-Z0-9]", "", str(x or "").upper())
+
+        products: Dict[str, str] = {}
+        for seg, sym, side, qty in legs:
+            units = int(round(qty * _resolve_lot_size(seg, sym)))
+            want = -1 if side == "buy" else 1       # a BUY closes a short, a SELL a long
+            have = [p for p in positions
+                    if _norm(p.get("symbol")) == _norm(sym)
+                    and int(p.get("net_quantity", 0) or 0) * want > 0]
+            if not have:
+                held = "SHORT" if want < 0 else "LONG"
+                return (f"Arrow shows no open {held} position in {sym} — this close "
+                        f"({side.upper()} {units}) would OPEN a new position instead "
+                        f"of closing one. Nothing was sent; check Positions in Arrow."), {}
+            best = max(have, key=lambda p: abs(int(p.get("net_quantity", 0) or 0)))
+            net = abs(int(best.get("net_quantity", 0) or 0))
+            if units > net:
+                return (f"{sym}: Arrow shows only {net} open, the close is {units} — "
+                        f"the extra {units - net} would open a new position. "
+                        f"Nothing was sent."), {}
+            if best.get("product"):
+                products[sym.upper()] = str(best["product"]).upper()
+        return None, products
 
     # ── MANUAL / ALGO lock (whole account) ───────────────────────────────────
     # One account, one pair, one position at a time, and exactly one owner:
@@ -638,7 +694,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             legs = _order_legs(close_dir, lots)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        res = _place(legs, "Close", source=source)
+        refusal, products = _close_against_broker(legs)
+        if refusal:
+            logger.error("Close refused: {}", refusal)
+            return {"success": False, "error": refusal}
+        if products:
+            logger.info("Close: against Arrow's open positions — product {}",
+                        ", ".join(f"{k} {v}" for k, v in products.items()))
+        res = _place(legs, "Close", source=source, products=products)
         if res.get("success"):
             m = _trade_meta(res)
             rec = trade_log.record(action="CLOSE", direction=direction, lots=lots,
