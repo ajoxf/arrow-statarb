@@ -453,25 +453,27 @@
     });
   }
 
-  function cancelWorking(ids) {
+  function cancelWorking(ids, via) {
     var list = (S.wo && S.wo.active || []).filter(function (o) { return ids.indexOf(o.id) >= 0; });
     var words = list.map(function (o) { return o.side + ' ' + o.lots + ' @ ' + num(o.price, 2); }).join(', ');
     maybeConfirm('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + '?', 'Cancel order')
       .then(function (ok) {
         if (!ok) { return; }
         Promise.all(ids.map(function (id) {
-          return fetch('/api/working-orders/' + encodeURIComponent(id), {method: 'DELETE'}).then(function (r) { return r.json(); });
+          return fetch('/api/working-orders/' + encodeURIComponent(id) + '?via=' + encodeURIComponent(via || 'the desk'),
+                       {method: 'DELETE'}).then(function (r) { return r.json(); });
         })).then(function () { toast('Cancelled: ' + words, 'info'); refreshWorking(); });
       });
   }
 
-  function cancelAllWorking() {
+  function cancelAllWorking(via) {
+    via = typeof via === 'string' ? via : 'CANCEL ALL';
     var n = (S.wo && S.wo.active || []).length;
     if (!n) { toast('No working orders.', 'info'); return; }
     maybeConfirm('Cancel all working orders', 'Cancel all ' + n + ' working order(s)?', 'Cancel all')
       .then(function (ok) {
         if (!ok) { return; }
-        postJSON('/api/working-orders/cancel-all', {}).then(function (r) {
+        postJSON('/api/working-orders/cancel-all?via=' + encodeURIComponent(via), {via: via}).then(function (r) {
           toast((r.cancelled || 0) + ' working order(s) cancelled', 'info'); refreshWorking();
         });
       });
@@ -545,10 +547,20 @@
     conv.value = clickMode();
     conv.onchange = function () { prefs.clickMode = conv.value; save(PREF_KEY, prefs); labelColumns(body); REFRESH.ladder(); };
     labelColumns(body);
-    $('.wo-cancel-all', body).onclick = cancelAllWorking;
+    $('.wo-cancel-all', body).onclick = function () { cancelAllWorking('CANCEL ALL on the ladder rail'); };
+    // A working order's tag in the Mark column cancels on a DOUBLE-click only:
+    // the column sits beside the prices, and with one-click trading a stray
+    // single click there must not silently cancel an order.
+    $('tbody', body).ondblclick = function (e) {
+      var mark = e.target.closest('td.work');
+      if (mark && mark.dataset.wo) { cancelWorking(mark.dataset.wo.split(','), 'double-click on the ladder Mark tag'); }
+    };
     $('tbody', body).onclick = function (e) {
       var mark = e.target.closest('td.work');
-      if (mark && mark.dataset.wo) { cancelWorking(mark.dataset.wo.split(',')); return; }
+      if (mark && mark.dataset.wo) {
+        if (!debounced('markhint')) { toast('Double-click the tag to cancel that working order.', 'info'); }
+        return;
+      }
       var td = e.target.closest('td[data-col]');
       if (!td) { return; }
       if ((S.algo || {}).manual_block) { toast(S.algo.manual_block, 'danger'); return; }
@@ -627,7 +639,7 @@
         else { lv = nearestRow(rows, o.price); }
         (woAt[lv] = woAt[lv] || []).push({o: o, tag: tag});
         woTip[lv] = (woTip[lv] ? woTip[lv] + ' · ' : '') + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
-          (o.status === 'held' ? ' (' + o.note + ')' : '') + ' — click to cancel';
+          (o.status === 'held' ? ' (' + o.note + ')' : '') + ' — double-click to cancel';
       });
     }
     var sell = d.sell_spread, buy = d.buy_spread;
@@ -671,10 +683,18 @@
       '<th>Fires when</th><th>Status</th></tr></thead><tbody class="wo-act"></tbody></table>' +
       '<div class="sec" style="margin:6px 8px 2px">Recent</div>' +
       '<table class="dtable"><tbody class="wo-rec"></tbody></table>';
-    $('.wo-all', body).onclick = cancelAllWorking;
+    $('.wo-all', body).onclick = function () { cancelAllWorking('Cancel all in the Working Orders window'); };
+    // The ✕ cancels the order that was under the pointer when it was PRESSED:
+    // the id is taken on mousedown and must match on click.
+    var pressed = null;
+    $('.wo-act', body).onmousedown = function (e) {
+      var b = e.target.closest('button[data-id]');
+      pressed = b ? b.dataset.id : null;
+    };
     $('.wo-act', body).onclick = function (e) {
       var b = e.target.closest('button[data-id]');
-      if (b) { cancelWorking([b.dataset.id]); }
+      if (b && pressed && b.dataset.id === pressed) { cancelWorking([pressed], '✕ in the Working Orders window'); }
+      pressed = null;
     };
   };
   REFRESH.workorders = function () {
@@ -682,17 +702,31 @@
     var body = W.workorders.body, lad = S.ladder || {};
     var act = S.wo.active || [];
     $('.wo-sum', body).textContent = act.length + ' working · GTC · manual';
-    $('.wo-act', body).innerHTML = act.map(function (o) {
+    // Rebuild the rows ONLY when an order is added, removed or changes state —
+    // a list redrawn every second moves the ✕ buttons under the pointer. The
+    // live price is updated in place.
+    var key = act.map(function (o) { return o.id + o.status + o.note; }).join('|');
+    var tb = $('.wo-act', body);
+    if (tb.dataset.key === key && act.length) {
+      Array.prototype.forEach.call(tb.querySelectorAll('.wo-now'), function (el) {
+        var o = act.filter(function (x) { return x.id === el.dataset.id; })[0];
+        if (o) { el.textContent = '(' + num(o.side === 'SELL' ? lad.sell_spread : lad.buy_spread, 2) + ')'; }
+      });
+    } else {
+    tb.dataset.key = key;
+    tb.innerHTML = act.map(function (o) {
       var now = o.side === 'SELL' ? lad.sell_spread : lad.buy_spread;
       var cond = (o.side === 'SELL' ? 'Sell ≥ ' : 'Buy ≤ ') + num(o.price, 2) +
-        ' <span class="muted">(' + num(now, 2) + ')</span>';
-      return '<tr><td><button class="btn wo-x" data-id="' + esc(o.id) + '" title="Cancel this order">✕</button></td>' +
+        ' <span class="muted wo-now" data-id="' + esc(o.id) + '">(' + num(now, 2) + ')</span>';
+      return '<tr><td><button class="btn wo-x" data-id="' + esc(o.id) + '" title="Cancel ' + o.side + ' ' + o.lots +
+          ' @ ' + num(o.price, 2) + '">✕</button></td>' +
         '<td class="' + (o.side === 'SELL' ? 'down' : '') + '"><b>' + o.side + '</b></td>' +
         '<td class="num">' + o.lots + '</td><td class="num">' + num(o.price, 2) + '</td><td>' + cond + '</td>' +
         '<td title="' + esc(o.note || '') + '">' + (o.status === 'held' ? '<span class="pill warn">HELD</span> ' +
           esc(o.note) : '<span class="pill ok">WORKING</span>') + '</td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted" style="text-align:center;padding:8px">' +
       'No working orders — click any price on the ladder to place one</td></tr>';
+    }
     $('.wo-rec', body).innerHTML = (S.wo.recent || []).slice(0, 8).map(function (o) {
       return '<tr><td>' + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) + '</td><td><span class="pill ' +
         (o.status === 'filled' ? 'ok' : o.status === 'rejected' ? 'bad' : '') + '">' + o.status.toUpperCase() +

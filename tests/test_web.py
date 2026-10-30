@@ -1131,3 +1131,16 @@ def test_working_order_cancel_endpoints(tmp_path):
     assert c.delete(f"/api/working-orders/{a['id']}").get_json()["success"] is False
     assert c.post("/api/working-orders/cancel-all").get_json()["cancelled"] == 1
     assert c.post("/api/working-orders", json={"side": "SELL", "price": "x"}).get_json()["success"] is False
+
+
+def test_a_cancel_records_which_control_and_which_computer_sent_it(tmp_path):
+    """'Cancelled by you' was not enough to explain a cancel the trader did not
+    make: the note now names the control and the sending computer."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    o = c.post("/api/working-orders", json={"side": "SELL", "price": 130, "lots": 1}).get_json()["order"]
+    c.delete(f"/api/working-orders/{o['id']}?via=✕ in the Working Orders window",
+             headers={"User-Agent": "Mozilla/5.0 Chrome/130"})
+    rec = [x for x in c.get("/api/working-orders").get_json()["recent"] if x["id"] == o["id"]][0]
+    assert rec["status"] == "cancelled"
+    assert "✕ in the Working Orders window" in rec["note"] and "from 127.0.0.1" in rec["note"]
+    assert "Chrome" in rec["note"]

@@ -3601,15 +3601,27 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                 (o["side"] == "BUY" and buy is not None and buy <= o["price"]))
         return jsonify({"success": True, "order": o, "marketable": bool(marketable)})
 
+    def _cancel_note() -> str:
+        """Who cancelled, and how — kept on the order and in app.log, so a
+        cancel nobody remembers making can be traced to the control and the
+        computer (a second tab or another device) it came from."""
+        d = request.get_json(silent=True) or {}
+        via = str(request.args.get("via") or d.get("via") or "the desk")[:60]
+        who = request.headers.get("X-Forwarded-For", request.remote_addr or "?")
+        ua = request.headers.get("User-Agent", "")
+        dev = ("phone" if "Mobile" in ua else "Edge" if "Edg/" in ua else "Chrome" if "Chrome" in ua
+               else "Firefox" if "Firefox" in ua else "browser")
+        return f"cancelled — {via} (from {who}, {dev})"
+
     @app.route("/api/working-orders/<oid>", methods=["DELETE"])
     def api_working_orders_cancel(oid):
-        o = working_orders.cancel(oid, "cancelled by you")
+        o = working_orders.cancel(oid, _cancel_note())
         return jsonify({"success": bool(o), "order": o,
                         "error": None if o else "No working order with that id (already filled or cancelled?)"})
 
     @app.route("/api/working-orders/cancel-all", methods=["POST"])
     def api_working_orders_cancel_all():
-        return jsonify({"success": True, "cancelled": working_orders.cancel_all("cancelled by you")})
+        return jsonify({"success": True, "cancelled": working_orders.cancel_all(_cancel_note())})
 
     app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo,
                                "working_orders": working_orders}
