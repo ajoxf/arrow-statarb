@@ -97,3 +97,15 @@ td.bid.clickable, td.ask.clickable { cursor: pointer; outline: 2px solid #000; o
 body.desk .rail .route-box { display: block; background: #fff; border: 1px solid #b8b8b8; padding: 2px 4px; }
 body.desk .rail .route-leg { display: block; font-size: 9px; color: var(--frame-muted, #5a5a5a); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 body.desk .rail .route-leg b { font: 700 9px Consolas, Menlo, monospace; color: #1a1a1a; }
+
+/* working orders in the ladder's Mark column (click to cancel) */
+td.work.has-wo { cursor: pointer; }
+.wo-mark { display: inline-block; margin-left: 2px; padding: 0 3px; font: 700 10px Consolas, Menlo, monospace;
+           color: #fff; border-radius: 2px; }
+.wo-mark.wo-sell { background: var(--ask, #b83232); }
+.wo-mark.wo-buy { background: var(--bid-strong, #1f7ac2); }
+td[data-col] { cursor: crosshair; }
+td[data-col].clickable { cursor: pointer; }
+.rail .quick.wo-cancel-all { background: linear-gradient(#f4d58d, #e0b450); color: #3a2a00; border-color: #8a6b1f; }
+.rail .click-conv { font-size: 10px; max-width: 100%; }
+.btn.wo-x { padding: 0 5px; font-size: 10px; line-height: 14px; }

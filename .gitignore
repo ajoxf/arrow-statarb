@@ -38,6 +38,8 @@ data/trades.json
 data/signal_window.json
 data/spread_candles.json
 data/spread_candles.tmp
+data/working_orders.json
+data/working_orders.tmp
 data/execution_log.jsonl
 # Untracked-close ledger (orphan/reconcile cleanup costs) — runtime only
 data/untracked_closes.json

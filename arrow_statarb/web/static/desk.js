@@ -14,7 +14,7 @@
   'use strict';
 
   var DASH = '—';
-  var LAYOUT_KEY = 'nexus-desk-layout-v2';   // v2: the spread candle/bands window in the default set
+  var LAYOUT_KEY = 'nexus-desk-layout-v3';   // v2: the spread candle/bands window in the default set
   var PREF_KEY = 'nexus-desk-prefs-v1';
 
   // ── tiny helpers ───────────────────────────────────────────────────────
@@ -141,7 +141,8 @@
     {id: 'bands', title: 'Spread', x: 376, y: 376, w: 470, h: 272},
     {id: 'charts', title: 'Z-Score & Spread', x: 376, y: 376, w: 470, h: 272, closed: true},
     {id: 'margin', title: 'Margin', x: 1192, y: 8, w: 300, h: 300},
-    {id: 'fills', title: 'Fills & Slippage', x: 8, y: 656, w: 838, h: 250, flush: true},
+    {id: 'fills', title: 'Fills & Slippage', x: 8, y: 656, w: 420, h: 250, flush: true},
+    {id: 'workorders', title: 'Working Orders', x: 434, y: 656, w: 412, h: 250, flush: true},
     {id: 'trades', title: 'Trades', x: 854, y: 376, w: 638, h: 272, flush: true},
     {id: 'orders', title: 'Order Log (Arrow)', x: 854, y: 656, w: 638, h: 250, flush: true},
     {id: 'settings', title: 'Settings', x: 120, y: 60, w: 900, h: 640, flush: true, iframe: '/settings?embed=1', closed: true},
@@ -383,6 +384,85 @@
       });
   }
 
+  // ── working (resting) orders ──────────────────────────────────────────
+  // Which side a click in a column sends. Default (touch): Bids = SELL (hit
+  // the bid), Asks = BUY (lift the offer) — as the ladder always worked here.
+  // 'join' is the classic price-ladder way: Bids = resting BUY, Asks = SELL.
+  function sideForColumn(col) {
+    var join = (prefs.clickConv || 'touch') === 'join';
+    if (col === 'ask') { return join ? 'SELL' : 'BUY'; }
+    return join ? 'BUY' : 'SELL';
+  }
+
+  function placeWorking(side, level) {
+    var qty = parseInt(($('.qty-in', W.ladder && W.ladder.body) || {}).value, 10) || 1;
+    var lad = S.ladder || {};
+    var now = side === 'SELL' ? lad.sell_spread : lad.buy_spread;
+    var marketable = now != null && (side === 'SELL' ? now >= level : now <= level);
+    var words = side + ' ' + qty + ' lot(s) at ' + num(level, 2) + ' — ' +
+      (marketable ? 'the market is already there: it fires NOW (both legs at market)'
+                  : 'fires when the ' + (side === 'SELL' ? 'Sell' : 'Buy') + ' spread reaches ' + num(level, 2) +
+                    ' (now ' + num(now, 2) + ')');
+    var go = prefs.confirmClicks !== false
+      ? confirmBox(marketable ? 'Order — fires now' : 'Working order (GTC)',
+                   words + '\n\nManual order: good till cancelled; turning the algo ON cancels it.',
+                   side)
+      : Promise.resolve(true);
+    go.then(function (ok) {
+      if (!ok) { return; }
+      postJSON('/api/working-orders', {side: side, price: level, lots: qty}).then(function (r) {
+        if (r.success) { toast((r.marketable ? 'Sent: ' : 'Working: ') + words, 'success'); }
+        else { toast('Not placed: ' + (r.error || 'refused'), 'danger'); }
+        refreshWorking();
+      }).catch(function (e) { toast('Order request failed: ' + e, 'danger'); });
+    });
+  }
+
+  function cancelWorking(ids) {
+    var list = (S.wo && S.wo.active || []).filter(function (o) { return ids.indexOf(o.id) >= 0; });
+    var words = list.map(function (o) { return o.side + ' ' + o.lots + ' @ ' + num(o.price, 2); }).join(', ');
+    confirmBox('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + '?', 'Cancel order')
+      .then(function (ok) {
+        if (!ok) { return; }
+        Promise.all(ids.map(function (id) {
+          return fetch('/api/working-orders/' + encodeURIComponent(id), {method: 'DELETE'}).then(function (r) { return r.json(); });
+        })).then(function () { toast('Cancelled: ' + words, 'info'); refreshWorking(); });
+      });
+  }
+
+  function cancelAllWorking() {
+    var n = (S.wo && S.wo.active || []).length;
+    if (!n) { toast('No working orders.', 'info'); return; }
+    confirmBox('Cancel all working orders', 'Cancel all ' + n + ' working order(s)?', 'Cancel all')
+      .then(function (ok) {
+        if (!ok) { return; }
+        postJSON('/api/working-orders/cancel-all', {}).then(function (r) {
+          toast((r.cancelled || 0) + ' working order(s) cancelled', 'info'); refreshWorking();
+        });
+      });
+  }
+
+  function refreshWorking() {
+    return getJSON('/api/working-orders').then(function (d) {
+      var before = S.wo ? JSON.stringify(S.wo.active.map(function (o) { return o.id + o.status; })) : '';
+      S.wo = d;
+      // a fill or a rejection since last time → say so once
+      (d.recent || []).forEach(function (o) {
+        if (S.woSeen && !S.woSeen[o.id] && (o.status === 'filled' || o.status === 'rejected')) {
+          toast('Working order ' + o.status.toUpperCase() + ': ' + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
+                (o.note ? ' — ' + o.note : ''), o.status === 'filled' ? 'success' : 'danger');
+        }
+      });
+      S.woSeen = S.woSeen || {};
+      (d.recent || []).forEach(function (o) { S.woSeen[o.id] = true; });
+      var n = (d.active || []).length;
+      if (W.ladder) { $('.wo-n', W.ladder.body).textContent = n ? '(' + n + ')' : ''; }
+      if (REFRESH.workorders) { REFRESH.workorders(); }
+      var after = JSON.stringify(d.active.map(function (o) { return o.id + o.status; }));
+      if (before !== after && W.ladder && S.ladder) { drawLadder(W.ladder.body, S.ladder); }
+    }).catch(function () {});
+  }
+
   // ── builders + refreshers per window ──────────────────────────────────
   var BUILD = {}, REFRESH = {};
 
@@ -394,9 +474,13 @@
       '<div class="rail">' +
       '  <div class="lock-note hidden">ALGO ON — manual orders off</div>' +
       '  <div class="route-box row"><div class="route-leg route-a">A <b>—</b></div><div class="route-leg route-b">B <b>—</b></div></div>' +
-      '  <button class="quick buy-touch" data-manual data-tip="Buy the spread at the Buy spread (Ask A − Bid B)">BUY</button>' +
-      '  <button class="quick sell-touch" data-manual data-tip="Sell the spread at the Sell spread (Bid A − Ask B)">SELL</button>' +
+      '  <button class="quick buy-touch" data-manual data-tip="MARKET: buy the spread now at the Buy spread (Ask A − Bid B)">BUY MKT</button>' +
+      '  <button class="quick sell-touch" data-manual data-tip="MARKET: sell the spread now at the Sell spread (Bid A − Ask B)">SELL MKT</button>' +
       '  <button class="quick flatten" data-manual data-tip="Close the open position at market">CLOSE POSITION</button>' +
+      '  <button class="quick wo-cancel-all" data-tip="Cancel every working order">CANCEL ALL <span class="wo-n"></span></button>' +
+      '  <label class="inline-field" title="What a click in the Bids / Asks columns sends"><span>Click</span>' +
+      '    <select class="click-conv"><option value="touch">Bid SELL·Ask BUY</option>' +
+      '    <option value="join">Bid BUY·Ask SELL</option></select></label>' +
       '  <label class="inline-field qty-row"><span>Qty (lots)</span><input class="qty-in" type="number" min="1" step="1"></label>' +
       '  <label class="inline-field"><span>Increment</span><input class="inc-in" type="number" min="0" step="0.05" placeholder="tick"></label>' +
       '  <div class="centre-row"><label class="check"><input type="checkbox" class="lock-scroll"> Lock</label>' +
@@ -406,7 +490,7 @@
       '  <div class="lad-err muted"></div>' +
       '</div>' +
       '<div class="grid"><table><thead><tr>' +
-      '  <th class="c-work" title="Your position\'s levels: ENTRY, BE (break-even), TP and SL">Mark</th>' +
+      '  <th class="c-work" title="Your position\'s levels (ENTRY, BE, TP, SL) and your working orders (S/B + lots — click one to cancel it)">Mark</th>' +
       '  <th class="c-bid" title="SELL the spread: Bid A − Ask B. Size = what both books can do, in lots">Bids</th>' +
       '  <th class="c-price" title="The spread, k × A − B, one row per increment">Price</th>' +
       '  <th class="c-ask" title="BUY the spread: Ask A − Bid B. Size = what both books can do, in lots">Asks</th>' +
@@ -422,15 +506,19 @@
       ladderAnchor = e.target.checked && S.ladder && S.ladder.rows && S.ladder.rows.length
         ? S.ladder.rows[Math.floor(S.ladder.rows.length / 2)].level : null;
     };
+    var conv = $('.click-conv', body);
+    conv.value = prefs.clickConv || 'touch';
+    conv.onchange = function () { prefs.clickConv = conv.value; save(PREF_KEY, prefs); REFRESH.ladder(); };
+    $('.wo-cancel-all', body).onclick = cancelAllWorking;
     $('tbody', body).onclick = function (e) {
-      var td = e.target.closest('td.bid, td.ask');
+      var mark = e.target.closest('td.work');
+      if (mark && mark.dataset.wo) { cancelWorking(mark.dataset.wo.split(',')); return; }
+      var td = e.target.closest('td[data-col]');
       if (!td) { return; }
       if ((S.algo || {}).manual_block) { toast(S.algo.manual_block, 'danger'); return; }
-      if (!td.classList.contains('clickable')) {
-        toast('Only the inside level trades now (the outlined cell). Resting orders at other levels come later.', 'info');
-        return;
-      }
-      manualOrder(td.classList.contains('ask') ? 'LONG_SPREAD' : 'SHORT_SPREAD');
+      var level = Number(td.parentNode.dataset.level);
+      if (!isFinite(level)) { return; }
+      placeWorking(sideForColumn(td.dataset.col), level);
     };
     applyLock();
   };
@@ -491,8 +579,26 @@
         markTips[lv] = (markTips[lv] ? markTips[lv] + ' · ' : '') + p[1] + ' ' + num(v, 2);
       });
     }
+    // Working orders in the Mark column ("S1" = sell 1 lot); off-ladder ones
+    // on the edge row with an arrow, like the position levels.
+    var woAt = {}, woTip = {};
+    if (rows.length) {
+      var wTop = rows[0].level, wBot = rows[rows.length - 1].level, wHalf = (d.increment || 0) / 2;
+      ((S.wo && S.wo.active) || []).forEach(function (o) {
+        var lv, tag = (o.side === 'SELL' ? 'S' : 'B') + o.lots + (o.status === 'held' ? '⏸' : '');
+        if (o.price > wTop + wHalf) { lv = wTop; tag += '↑'; }
+        else if (o.price < wBot - wHalf) { lv = wBot; tag += '↓'; }
+        else { lv = nearestRow(rows, o.price); }
+        (woAt[lv] = woAt[lv] || []).push({o: o, tag: tag});
+        woTip[lv] = (woTip[lv] ? woTip[lv] + ' · ' : '') + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
+          (o.status === 'held' ? ' (' + o.note + ')' : '') + ' — click to cancel';
+      });
+    }
     var sell = d.sell_spread, buy = d.buy_spread;
     var direction = d.trade_direction || 'both';
+    var join = (prefs.clickConv || 'touch') === 'join';
+    var bidTip = join ? 'BUY (resting) at this spread price' : 'SELL at this spread price';
+    var askTip = join ? 'SELL (resting) at this spread price' : 'BUY at this spread price';
     tb.innerHTML = rows.map(function (r) {
       var cls = [];
       if (sell != null && r.level <= sell + 1e-9) { cls.push('in-bid'); }
@@ -504,17 +610,60 @@
       var askCell = r.level >= (buy == null ? Infinity : buy - 1e-9);
       var bidTxt = r.bid_size != null ? r.bid_size : (r.is_best_bid ? '▲' : '');
       var askTxt = r.ask_size != null ? r.ask_size : (r.is_best_ask ? '▼' : '');
-      return '<tr class="' + cls.join(' ') + '">' +
-        '<td class="work' + (mk ? ' mark ' + mkCls : '') + '"' + (mk ? ' title="' + esc(markTips[r.level]) + '"' : '') + '>' + esc(mk) + '</td>' +
-        '<td class="' + (bidCell ? 'bid' : '') + (r.is_best_bid ? ' has-qty clickable' : '') + '"' +
-          (r.is_best_bid ? ' title="SELL the spread here (Bid A − Ask B)' + (direction === 'buy_only' ? ' — note: the ALGO only buys; this is manual' : '') + '"' : '') + '>' +
-          (bidCell ? bidTxt : '') + '</td>' +
+      var wo = woAt[r.level] || [];
+      var woHtml = wo.map(function (x) {
+        return '<span class="wo-mark ' + (x.o.side === 'SELL' ? 'wo-sell' : 'wo-buy') + '">' + esc(x.tag) + '</span>';
+      }).join('');
+      var tip = [mk ? markTips[r.level] : '', wo.length ? woTip[r.level] : ''].filter(Boolean).join(' · ');
+      return '<tr class="' + cls.join(' ') + '" data-level="' + r.level + '">' +
+        '<td class="work' + (mk ? ' mark ' + mkCls : '') + (wo.length ? ' has-wo' : '') + '"' +
+          (wo.length ? ' data-wo="' + wo.map(function (x) { return x.o.id; }).join(',') + '"' : '') +
+          (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(mk) + woHtml + '</td>' +
+        '<td data-col="bid" class="' + (bidCell ? 'bid' : '') + (r.is_best_bid ? ' has-qty clickable' : '') + '" title="' +
+          esc(bidTip + ' ' + num(r.level, 2)) + '">' + (bidCell ? bidTxt : '') + '</td>' +
         '<td class="price">' + num(r.level, dig) + '</td>' +
-        '<td class="' + (askCell ? 'ask' : '') + (r.is_best_ask ? ' has-qty clickable' : '') + '"' +
-          (r.is_best_ask ? ' title="BUY the spread here (Ask A − Bid B)"' : '') + '>' +
-          (askCell ? askTxt : '') + '</td></tr>';
+        '<td data-col="ask" class="' + (askCell ? 'ask' : '') + (r.is_best_ask ? ' has-qty clickable' : '') + '" title="' +
+          esc(askTip + ' ' + num(r.level, 2)) + '">' + (askCell ? askTxt : '') + '</td></tr>';
     }).join('');
   }
+
+  // WORKING ORDERS ---------------------------------------------------------------
+  BUILD.workorders = function (body) {
+    body.innerHTML = '<div style="padding:4px 8px;display:flex;gap:6px;align-items:center">' +
+      '<span class="muted wo-sum">—</span><button class="btn wo-all" style="margin-left:auto">Cancel all</button></div>' +
+      '<table class="dtable"><thead><tr><th></th><th>Side</th><th class="num">Lots</th><th class="num">Price</th>' +
+      '<th>Fires when</th><th>Status</th></tr></thead><tbody class="wo-act"></tbody></table>' +
+      '<div class="sec" style="margin:6px 8px 2px">Recent</div>' +
+      '<table class="dtable"><tbody class="wo-rec"></tbody></table>';
+    $('.wo-all', body).onclick = cancelAllWorking;
+    $('.wo-act', body).onclick = function (e) {
+      var b = e.target.closest('button[data-id]');
+      if (b) { cancelWorking([b.dataset.id]); }
+    };
+  };
+  REFRESH.workorders = function () {
+    if (!W.workorders || !S.wo) { return Promise.resolve(); }
+    var body = W.workorders.body, lad = S.ladder || {};
+    var act = S.wo.active || [];
+    $('.wo-sum', body).textContent = act.length + ' working · GTC · manual';
+    $('.wo-act', body).innerHTML = act.map(function (o) {
+      var now = o.side === 'SELL' ? lad.sell_spread : lad.buy_spread;
+      var cond = (o.side === 'SELL' ? 'Sell ≥ ' : 'Buy ≤ ') + num(o.price, 2) +
+        ' <span class="muted">(' + num(now, 2) + ')</span>';
+      return '<tr><td><button class="btn wo-x" data-id="' + esc(o.id) + '" title="Cancel this order">✕</button></td>' +
+        '<td class="' + (o.side === 'SELL' ? 'down' : '') + '"><b>' + o.side + '</b></td>' +
+        '<td class="num">' + o.lots + '</td><td class="num">' + num(o.price, 2) + '</td><td>' + cond + '</td>' +
+        '<td title="' + esc(o.note || '') + '">' + (o.status === 'held' ? '<span class="pill warn">HELD</span> ' +
+          esc(o.note) : '<span class="pill ok">WORKING</span>') + '</td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted" style="text-align:center;padding:8px">' +
+      'No working orders — click any price on the ladder to place one</td></tr>';
+    $('.wo-rec', body).innerHTML = (S.wo.recent || []).slice(0, 8).map(function (o) {
+      return '<tr><td>' + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) + '</td><td><span class="pill ' +
+        (o.status === 'filled' ? 'ok' : o.status === 'rejected' ? 'bad' : '') + '">' + o.status.toUpperCase() +
+        '</span></td><td class="muted" style="white-space:normal">' + esc(o.note || '') + '</td></tr>';
+    }).join('') || '<tr><td class="muted">—</td></tr>';
+    return Promise.resolve();
+  };
 
   // SIGNAL & POSITION ----------------------------------------------------------
   BUILD.signal = function (body) {
@@ -872,6 +1021,7 @@
   setInterval(function () { REFRESH.ladder(); }, 700);
   setInterval(function () { REFRESH.charts(); }, 2000);
   setInterval(function () { REFRESH.bands(); }, 3000);
+  setInterval(refreshWorking, 1000);
   setInterval(function () { REFRESH.margin(); }, 15000);
   setInterval(function () { REFRESH.fills(); REFRESH.trades(); }, 10000);
   setInterval(renderBanners, 1000);
@@ -886,5 +1036,6 @@
   refreshAll();
   REFRESH.charts();
   REFRESH.bands();
+  refreshWorking();
   REFRESH.orders(true);
 })();
