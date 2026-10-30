@@ -949,7 +949,7 @@ class ArrowBroker(BaseBroker):
         if mode is None:
             return out
         try:
-            exch = Exchange(_SEGMENT_MAP.get(exchange_segment.lower(), exchange_segment.upper()))
+            exch = self._order_exchange(exchange_segment, symbol)
             resp = self._client.get_quotes(mode, [(symbol, exch)])
             rec = resp[0] if isinstance(resp, list) and resp else (resp if isinstance(resp, dict) else None)
             if isinstance(rec, dict):
@@ -1145,6 +1145,25 @@ class ArrowBroker(BaseBroker):
 
     # ── Orders ────────────────────────────────────────────────────────────────
 
+    def _order_exchange(self, segment: str, symbol: str):
+        """The exchange value an ORDER (or a quote) for this contract is sent
+        under. Arrow files MCX futures under several codes and accepts
+        orders, quotes and margin only under MCXFO — sending ``MCX`` comes
+        back as 400 "invalid trading symbol" (the SDK: MCX is for permission
+        checks and instrument downloads). If a margin request for this very
+        contract has already found the code Arrow answers to, that one is
+        used; otherwise MCXFO. Other segments map as before."""
+        wire = _SEGMENT_MAP.get(segment.lower(), segment.upper())
+        if wire == "MCX":
+            known = (getattr(self, "_margin_routes", None) or {}).get((segment.lower(), symbol.upper()))
+            if known:
+                return known[0]
+            wire = "MCXFO"
+        try:
+            return Exchange(wire)
+        except ValueError:
+            return None
+
     def submit_order(
         self,
         symbol: str,
@@ -1170,10 +1189,8 @@ class ArrowBroker(BaseBroker):
         if not self.connected or not self._client:
             return {"order_id": None, "status": "error", "message": "Not connected"}
 
-        exchange_str = _SEGMENT_MAP.get(exchange_segment.lower(), exchange_segment.upper())
-        try:
-            exchange_enum = Exchange(exchange_str)
-        except ValueError:
+        exchange_enum = self._order_exchange(exchange_segment, symbol)
+        if exchange_enum is None:
             return {
                 "order_id": None, "status": "error",
                 "message": f"Unknown exchange segment: {exchange_segment}",
