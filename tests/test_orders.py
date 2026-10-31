@@ -128,6 +128,29 @@ def test_positions_parse_titlecase(arrow_broker):
     assert pos[0]["pnl"] == pytest.approx(750.0)
 
 
+@pytest.mark.parametrize("row,net", [
+    # Arrow's documented field: qty, signed
+    ({"symbol": "CRUDEOILM19NOV26F", "qty": "-1", "product": "M"}, -1),
+    # qty unsigned on a short — the sign comes from day + carry-forward fills
+    ({"symbol": "CRUDEOILM19NOV26F", "qty": "1", "dayBuyQty": "0", "daySellQty": "1",
+      "carryForwardBuyQty": "0", "carryForwardSellQty": "0"}, -1),
+    # a carried-forward long, nothing traded today
+    ({"symbol": "CRUDEOILM19NOV26F", "carryForwardBuyQty": "2",
+      "carryForwardSellQty": "0", "dayBuyQty": "0", "daySellQty": "0"}, 2),
+    # closed today: flat
+    ({"symbol": "CRUDEOILM19NOV26F", "qty": "0", "dayBuyQty": "1", "daySellQty": "1"}, 0),
+])
+def test_positions_read_arrows_qty_fields(arrow_broker, row, net):
+    arrow_broker._client.get_positions = lambda: [row]
+    pos = arrow_broker.get_positions()
+    assert pos[0]["net_quantity"] == net and pos[0]["quantity_known"] is True
+
+
+def test_positions_without_a_quantity_field_are_marked_unknown(arrow_broker):
+    arrow_broker._client.get_positions = lambda: [{"symbol": "X", "product": "M"}]
+    assert arrow_broker.get_positions()[0]["quantity_known"] is False
+
+
 def test_get_funds_normalizes_user_limits(arrow_broker):
     arrow_broker._client.get_user_limits = lambda: {
         "AvailableMargin": "50000.5", "MarginUsed": "12000", "Net": "62000",

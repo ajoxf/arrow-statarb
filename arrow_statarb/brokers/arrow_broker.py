@@ -1413,17 +1413,41 @@ class ArrowBroker(BaseBroker):
                         continue
             return default
 
+        def _sum(p, *groups):
+            """Sum of the first field found in each group; None if no group has one."""
+            vals = [_ci(p, *g, cast=float) for g in groups]
+            vals = [v for v in vals if v is not None]
+            return int(round(sum(vals))) if vals else None
+
         try:
             raw = self._client.get_positions()
+            if isinstance(raw, dict):                # {"net": [...], "day": [...]} shapes
+                raw = raw.get("net") or raw.get("data") or raw.get("positions") or []
             positions = []
             for p in (raw or []):
                 if not isinstance(p, dict):
                     continue
                 sym  = _ci(p, "tradingSymbol", "tradingsymbol", "symbol", default="")
                 exch = _ci(p, "exchSeg", "exchange", default="")
-                bq   = _ci(p, "buyQty", "buyQuantity", "cfBuyQty", cast=int, default=0)
-                sq   = _ci(p, "sellQty", "sellQuantity", "cfSellQty", cast=int, default=0)
-                net  = _ci(p, "netQty", "netQuantity", "quantity", "netqty", cast=int, default=(bq - sq))
+                # Arrow reports the open quantity as ``qty`` (docs: a position is
+                # active while qty != "0"), with day and carry-forward buys/sells
+                # beside it; other builds use netQty / buyQty / sellQty.
+                bq = _ci(p, "buyQty", "buyQuantity", "totalBuyQty", cast=int)
+                if bq is None:
+                    bq = _sum(p, ("dayBuyQty", "dayBuyQuantity"),
+                              ("carryForwardBuyQty", "cfBuyQty"))
+                sq = _ci(p, "sellQty", "sellQuantity", "totalSellQty", cast=int)
+                if sq is None:
+                    sq = _sum(p, ("daySellQty", "daySellQuantity"),
+                              ("carryForwardSellQty", "cfSellQty"))
+                net = _ci(p, "netQty", "netQuantity", "netqty", "quantity", "qty", cast=int)
+                if bq is not None and sq is not None:
+                    flow = bq - sq
+                    # an unsigned qty on a short: take the sign from the fills
+                    if net is None or (net > 0 and flow == -net):
+                        net = flow
+                known = net is not None           # False: no quantity field we recognise
+                bq, sq, net = bq or 0, sq or 0, net or 0
                 avg  = _ci(p, "avgPrice", "averagePrice", "netAvgPrice", "buyAvgPrice", cast=float, default=0.0)
                 ltp  = _ci(p, "ltp", "lastPrice", "lastTradedPrice", cast=float, default=0.0)
                 pnl  = _ci(p, "pnl", "unrealizedPnl", "mtm", "mtom", "netPnl", cast=float, default=0.0)
@@ -1434,6 +1458,7 @@ class ArrowBroker(BaseBroker):
                     "net_quantity":  net,
                     "buy_quantity":  bq,
                     "sell_quantity": sq,
+                    "quantity_known": known,
                     "average_price": avg,
                     "ltp":           ltp,
                     "pnl":           pnl,

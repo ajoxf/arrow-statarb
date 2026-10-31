@@ -505,11 +505,19 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for seg, sym, side, qty in legs:
             units = int(round(qty * _resolve_lot_size(seg, sym)))
             want = -1 if side == "buy" else 1       # a BUY closes a short, a SELL a long
-            have = [p for p in positions
-                    if _norm(p.get("symbol")) == _norm(sym)
-                    and int(p.get("net_quantity", 0) or 0) * want > 0]
+            rows = [p for p in positions if _norm(p.get("symbol")) == _norm(sym)]
+            if any(p.get("quantity_known") is False for p in rows):
+                # a row we cannot read the quantity of: never trap an exit on it
+                logger.warning("Close: cannot read Arrow's quantity for {} — sending the "
+                               "close unchecked. Arrow's row: {}", sym,
+                               [p.get("raw") for p in rows])
+                return None, {}
+            have = [p for p in rows if int(p.get("net_quantity", 0) or 0) * want > 0]
             if not have:
                 held = "SHORT" if want < 0 else "LONG"
+                logger.error("Close: Arrow's positions for {}: {} (all symbols: {})", sym,
+                             [p.get("raw") for p in rows] or "none",
+                             sorted({str(p.get("symbol")) for p in positions}) or "none")
                 return (f"Arrow shows no open {held} position in {sym} — this close "
                         f"({side.upper()} {units}) would OPEN a new position instead "
                         f"of closing one. Nothing was sent; check Positions in Arrow."), {}

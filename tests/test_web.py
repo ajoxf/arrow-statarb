@@ -1211,3 +1211,12 @@ def test_close_still_goes_out_when_positions_cannot_be_read(tmp_path):
     assert c.post("/api/manual-trade/close",
                   json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
     assert len(broker.orders) == 2
+
+
+def test_close_still_goes_out_when_arrows_quantity_is_unreadable(tmp_path):
+    app, broker, c = _open_long(tmp_path)
+    broker.get_positions = lambda: [{"symbol": "NIFTY30JUN26F", "product": "NRML",
+                                     "net_quantity": 0, "quantity_known": False}]
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    assert len(broker.orders) == 2
