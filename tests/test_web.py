@@ -1128,3 +1128,63 @@ def test_close_still_goes_out_when_arrows_quantity_is_unreadable(tmp_path):
     assert c.post("/api/manual-trade/close",
                   json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
     assert len(broker.orders) == 2
+
+
+# ── Nexus records a position that Arrow no longer holds ──────────────────────
+
+def _closed_in_arrow(tmp_path):
+    """A MANUAL SHORT opened through Nexus, then closed in the Arrow app."""
+    app, broker = _app(tmp_path, mode="live")
+    c = app.test_client()
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    broker.fills = []                                     # Arrow: both legs flat now
+    broker.get_order_book = lambda: [
+        {"time": "1793597780", "symbol": "NIFTY30JUN26F", "side": "B",
+         "status": "COMPLETE", "fill_price": 9530.5},
+        {"time": "1793597781", "symbol": "NIFTY28JUL26F", "side": "S",
+         "status": "COMPLETE", "fill_price": 9300.0},
+        {"time": "1793500000", "symbol": "NIFTY30JUN26F", "side": "S",
+         "status": "COMPLETE", "fill_price": 9850.0}]     # the entry — not the exit
+    return app, broker, c
+
+
+def test_state_flags_a_position_arrow_no_longer_holds(tmp_path):
+    app, broker, c = _closed_in_arrow(tmp_path)
+    app.extensions["arrow"]["refresh_broker_cache"]()
+    msg = c.get("/api/algo/state").get_json()["broker_mismatch"]
+    assert msg and "NO position" in msg and "SHORT SPREAD" in msg
+
+
+def test_no_flag_while_arrow_holds_the_position(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    c = app.test_client()
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    app.extensions["arrow"]["refresh_broker_cache"]()
+    assert c.get("/api/algo/state").get_json()["broker_mismatch"] is None
+
+
+def test_mark_flat_books_the_close_at_arrows_fills_and_unblocks_orders(tmp_path):
+    app, broker, c = _closed_in_arrow(tmp_path)
+    n = len(broker.orders)
+    r = c.post("/api/position/mark-flat", json={}).get_json()
+    assert r["success"] is True and "Arrow's fills" in r["message"]
+    assert r["exit_spread"] == 230.5                      # 9530.5 − 9300
+    assert len(broker.orders) == n                        # no order was sent
+    assert app.extensions["arrow"]["trade_log"].open_position() is None
+    st = c.get("/api/algo/state").get_json()
+    assert st["position_owner"] is None and st["algo_block"] is None
+    # new orders go through again
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+
+
+def test_mark_flat_refused_while_arrow_still_holds_a_leg(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    c = app.test_client()
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    r = c.post("/api/position/mark-flat", json={}).get_json()
+    assert r["success"] is False and "still shows a position" in r["error"]
+    assert app.extensions["arrow"]["trade_log"].open_position() is not None
