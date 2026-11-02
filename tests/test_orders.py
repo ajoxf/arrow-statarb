@@ -105,9 +105,19 @@ def test_get_order_status_unknown_when_absent(arrow_broker):
 
 
 def test_amend_order_calls_modify(arrow_broker):
-    assert arrow_broker.amend_order("OID1", price=25010.5) is True
-    assert arrow_broker._client.modified[-1]["order_id"] == "OID1"
-    assert arrow_broker._client.modified[-1]["price"] == pytest.approx(25010.5)
+    oid = arrow_broker.submit_order(symbol="CRUDEOILM19NOV26F", side="sell", quantity=1,
+                                    order_type="limit", price=9515.0,
+                                    exchange_segment="mcx_fo")["order_id"]
+    assert arrow_broker.amend_order(oid, price=9510.0) is True
+    m = arrow_broker._client.modified[-1]
+    assert m["order_id"] == oid and m["price"] == pytest.approx(9510.0)
+    # the whole order goes again, as SDK 1.8's modify_order requires
+    assert m["symbol"] == "CRUDEOILM19NOV26F" and m["quantity"] == 1
+    assert str(m["transaction_type"]).upper().endswith(("S", "SELL"))
+
+
+def test_amend_of_an_order_this_session_did_not_send_is_refused(arrow_broker):
+    assert arrow_broker.amend_order("UNKNOWN", price=1.0) is False
 
 
 def test_amend_order_not_connected():

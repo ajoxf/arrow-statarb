@@ -172,6 +172,15 @@ class SpreadExecutor:
             logger.info("{}: both legs filled — {}{}", label, ids, tag)
             return dict(self._ok(legs, f"[LIVE] Filled: {ids}{tag}"), elapsed_sec=elapsed)
 
+        lost = [l for l in legs if l.status == "UNCONFIRMED"]
+        if lost:
+            # A leg's fill could not be read: unwinding the other leg could leave
+            # a naked leg. Stop, and say so loudly.
+            msg = ("UNCONFIRMED on " + label + ": " + "; ".join(l.error for l in lost)
+                   + ". CHECK ARROW POSITIONS NOW — nothing was unwound.")
+            logger.error("{}", msg)
+            return dict(self._fail(legs, msg, orphan=True), elapsed_sec=elapsed)
+
         if not filled:
             err = "; ".join(l.error or f"{l.symbol} not filled" for l in failed)
             logger.error("{}: no legs filled — {}", label, err)
@@ -400,12 +409,37 @@ class SpreadExecutor:
                 leg.error = leg.error or "limit unfilled (limit_to_market disabled)"
             return
 
+        poll0 = float(p.get("poll_interval_sec", 0.4))
         for leg in working:
             if leg.order_id:
                 try:
-                    broker.cancel_order(leg.order_id)
+                    ok = broker.cancel_order(leg.order_id)
                 except Exception as exc:        # noqa: BLE001
                     logger.warning("Executor: cancel {} failed — {}", leg.order_id, exc)
+                    ok = False
+                # Read the order's final state BEFORE re-sending anything: a
+                # refused cancel ("order is not standing") means it already
+                # filled or is gone, and even a cancelled order may have part-
+                # filled. Re-sending on a stale read doubles the position.
+                for _ in range(1 if ok is not False else 6):
+                    self._refresh(broker, leg, p)
+                    if not leg.working:
+                        break
+                    self._sleep(poll0)
+                if leg.complete:
+                    logger.info("Executor: {} {} had already filled — not re-sent",
+                                leg.symbol, leg.order_id)
+                    continue
+                if leg.status == "REJECTED":
+                    leg.error = leg.error or f"{leg.symbol} order rejected by the exchange"
+                    continue
+                if ok is False and leg.status != "CANCELLED":
+                    leg.status = "UNCONFIRMED"
+                    leg.unconfirmed = True
+                    leg.error = (f"{leg.symbol}: cancel refused (order not standing) and its "
+                                 f"fill could not be read — NOT re-sent")
+                    logger.error("Executor: {}", leg.error)
+                    continue
             leg.order_id = None
             leg.status = "NEW"
             logger.warning("Executor: {} limit timed out — re-placing as MARKET", leg.symbol)

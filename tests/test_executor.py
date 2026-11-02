@@ -398,3 +398,42 @@ def test_both_legs_are_checked_at_the_same_time():
     ex._refresh_all(SlowBroker(), legs, {})
     assert len(seen) == 2 and abs(seen[0][1] - seen[1][1]) < 0.1
     assert _t.monotonic() - t0 < 0.35                   # ~one round trip, not two
+
+
+# ── the live 2-Nov double: a limit fills at once, the status read says OPEN ──
+class StaleReadBroker(MockBroker):
+    """Limits fill on Arrow immediately, but the status read keeps answering
+    OPEN until after the cancel (Arrow: 'order is not standing') — or forever."""
+    def __init__(self, reads_after_cancel=True):
+        super().__init__()
+        self.reads_after_cancel = reads_after_cancel
+        self.cancel_refused = set()
+
+    def get_order_status(self, order_id):
+        o = self.orders[order_id]
+        o.update(status="COMPLETE", filled=o["units"], avg=o["price"] or 100.0)  # Arrow's truth
+        if order_id in self.cancel_refused and self.reads_after_cancel:
+            return {"order_id": order_id, "status": "COMPLETE", "filled_qty": o["units"],
+                    "pending_qty": 0, "avg_price": o["avg"], "raw": o}
+        return {"order_id": order_id, "status": "OPEN", "filled_qty": 0,
+                "pending_qty": o["units"], "avg_price": 0.0, "raw": o}
+
+    def cancel_order(self, order_id):
+        self.cancels.append(order_id)
+        self.cancel_refused.add(order_id)
+        return False                                      # "order is not standing"
+
+
+def test_a_refused_cancel_is_read_again_and_never_resent_at_market():
+    b = StaleReadBroker()
+    res = _executor(b).execute(_legs(), label="Order")
+    assert res["success"] is True
+    assert [s["order_type"] for s in b.submits] == ["limit", "limit"]   # no MARKET re-send
+
+
+def test_an_unreadable_fill_after_a_refused_cancel_stops_without_resend_or_unwind():
+    b = StaleReadBroker(reads_after_cancel=False)
+    res = _executor(b).execute(_legs(), label="Order")
+    assert res["success"] is False and "UNCONFIRMED" in res["error"]
+    assert "CHECK ARROW POSITIONS" in res["error"]
+    assert len(b.submits) == 2                            # nothing re-sent, nothing unwound
