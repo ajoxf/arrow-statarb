@@ -146,6 +146,9 @@ const AlgoCtl = (function () {
             document.body.appendChild(bar);
         }
         bar.querySelector('span').textContent = '⚠ ' + msg;
+        // Mark flat only fits "Nexus holds, Arrow is flat"
+        bar.querySelector('button').style.display =
+            state.broker_mismatch_kind === 'nexus_only' ? '' : 'none';
     }
 
     async function markFlat() {

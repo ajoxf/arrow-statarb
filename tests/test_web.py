@@ -1188,3 +1188,23 @@ def test_mark_flat_refused_while_arrow_still_holds_a_leg(tmp_path):
     r = c.post("/api/position/mark-flat", json={}).get_json()
     assert r["success"] is False and "still shows a position" in r["error"]
     assert app.extensions["arrow"]["trade_log"].open_position() is not None
+
+
+def test_state_flags_a_position_on_arrow_that_nexus_does_not_record(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    broker.seed = {("NIFTY30JUN26F", "NRML"): -150, ("NIFTY28JUL26F", "NRML"): 150}
+    app.extensions["arrow"]["refresh_broker_cache"]()
+    st = app.test_client().get("/api/algo/state").get_json()
+    assert st["broker_mismatch_kind"] == "arrow_only" and "HOLDS" in st["broker_mismatch"]
+
+
+def test_state_flags_arrow_holding_twice_what_nexus_records(tmp_path):
+    app, broker = _app(tmp_path, mode="live")
+    c = app.test_client()
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "SHORT_SPREAD", "lots": 1}).get_json()["success"]
+    broker.seed = {("NIFTY30JUN26F", "NRML"): -75, ("NIFTY28JUL26F", "NRML"): 75}  # one more
+    app.extensions["arrow"]["refresh_broker_cache"]()
+    st = c.get("/api/algo/state").get_json()
+    assert st["broker_mismatch_kind"] == "size"
+    assert "-150" in st["broker_mismatch"] and "-75" in st["broker_mismatch"]

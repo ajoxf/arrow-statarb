@@ -1,3 +1,4 @@
+import pytest
 """Top-of-book from the FULL-mode stream, and exchange session hours."""
 
 from datetime import date, datetime
@@ -184,20 +185,45 @@ def test_mcx_order_uses_the_code_the_margin_lookup_found(arrow_broker):
     assert str(getattr(ex, "value", ex)) == "NCD"
 
 
-def test_fill_check_reads_one_order_not_the_whole_book(arrow_broker):
+def test_fill_check_reads_the_order_book_first(arrow_broker):
     b = arrow_broker
     calls = []
-    b._client.get_order_details = lambda oid: (calls.append(("one", oid)) or
-                                               [{"orderNo": oid, "status": "COMPLETE",
-                                                 "filledQty": "10", "avgPrice": "9850"}])
-    b._client.get_order_book = lambda: calls.append(("book",)) or []
+    b._client.get_order_details = lambda oid: calls.append(("one", oid)) or []
+    b._client.get_order_book = lambda: calls.append(("book",)) or [
+        {"orderNo": "261030", "orderStatus": "COMPLETE", "filledQty": "10", "avgPrice": "9850"}]
     st = b.get_order_status("261030")
     assert st["status"] == "COMPLETE" and st["filled_qty"] == 10 and st["avg_price"] == 9850.0
-    assert calls == [("one", "261030")]
+    assert calls == [("book",)]
 
 
-def test_an_unreadable_single_order_answer_falls_back_to_the_book(arrow_broker):
+def test_an_order_missing_from_the_book_falls_back_to_its_history(arrow_broker):
     b = arrow_broker
-    b._client.get_order_details = lambda oid: [{"orderNo": oid}]          # no status in it
-    b._client.get_order_book = lambda: [{"orderNo": "7", "status": "COMPLETE", "filledQty": "1"}]
+    b._client.get_order_book = lambda: []
+    b._client.get_order_details = lambda oid: [{"orderNo": oid, "orderStatus": "COMPLETE",
+                                                "filledQty": "1"}]
     assert b.get_order_status("7")["status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize("history", [
+    # newest FIRST — the case that once read a filled order as still open
+    [{"orderStatus": "COMPLETE", "filledQty": "1", "avgPrice": "9515"},
+     {"orderStatus": "OPEN", "filledQty": "0"},
+     {"orderStatus": "PUT ORDER REQ RECEIVED", "filledQty": "0"}],
+    # newest last
+    [{"orderStatus": "PUT ORDER REQ RECEIVED", "filledQty": "0"},
+     {"orderStatus": "OPEN", "filledQty": "0"},
+     {"orderStatus": "COMPLETE", "filledQty": "1", "avgPrice": "9515"}],
+])
+def test_a_filled_order_reads_filled_whatever_the_history_order(arrow_broker, history):
+    b = arrow_broker
+    b._client.get_order_book = lambda: []
+    b._client.get_order_details = lambda oid: [dict(h, orderNo=oid) for h in history]
+    st = b.get_order_status("9")
+    assert st["status"] == "COMPLETE" and st["filled_qty"] == 1 and st["avg_price"] == 9515.0
+
+
+def test_partially_filled_with_underscore_is_partial(arrow_broker):
+    b = arrow_broker
+    b._client.get_order_book = lambda: [{"orderNo": "5", "orderStatus": "PARTIALLY_FILLED",
+                                         "filledQty": "1"}]
+    assert b.get_order_status("5")["status"] == "PARTIAL"

@@ -111,8 +111,14 @@ class ArrowClient:
     def get_order_book(self):
         return self.order_book
 
-    def modify_order(self, order_id, **kwargs):
-        self.modified.append({"order_id": order_id, **kwargs})
+    # The SDK 1.8 signature: Arrow's modify takes the WHOLE order again.
+    def modify_order(self, order_id, exchange, quantity, symbol, price, disclosed_qty,
+                     product, transaction_type, order_type, validity,
+                     remarks=None, mpp=False, trigger_price=None):
+        self.modified.append({"order_id": order_id, "exchange": exchange,
+                              "quantity": quantity, "symbol": symbol, "price": price,
+                              "product": product, "transaction_type": transaction_type,
+                              "order_type": order_type, "validity": validity, "mpp": mpp})
         return "OK"
 
     def get_positions(self):

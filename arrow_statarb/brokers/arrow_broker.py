@@ -100,7 +100,7 @@ _ORDER_STATUS_MAP: Dict[str, str] = {
     "EXECUTED": "COMPLETE", "TRADED": "COMPLETE",
     "REJECTED": "REJECTED", "REJECT": "REJECTED",
     "CANCELLED": "CANCELLED", "CANCELED": "CANCELLED",
-    "PARTIALLY FILLED": "PARTIAL", "PARTIAL": "PARTIAL",
+    "PARTIALLY FILLED": "PARTIAL", "PARTIALLY_FILLED": "PARTIAL", "PARTIAL": "PARTIAL",
     "OPEN": "OPEN", "VALIDATION PENDING": "PENDING", "PUT ORDER REQ RECEIVED": "PENDING",
     "MODIFY VALIDATION PENDING": "PENDING", "TRIGGER PENDING": "PENDING",
     "TRIGGER_PENDING": "PENDING", "OPEN PENDING": "PENDING", "PENDING": "PENDING",
@@ -1229,6 +1229,13 @@ class ArrowBroker(BaseBroker):
                 mpp=mpp,
             )
             logger.info("ArrowBroker: order placed — id={}", order_id)
+            # Arrow's modify takes the WHOLE order again, not just the change.
+            self._sent = getattr(self, "_sent", {})
+            self._sent[str(order_id)] = dict(
+                exchange=exchange_enum, symbol=symbol, quantity=quantity,
+                disclosed_qty=disclosed_qty, product=prod_enum,
+                transaction_type=tt_enum, order_type=ot_enum, validity=ret_enum,
+                price=order_price, mpp=mpp)
             return {
                 "order_id":   str(order_id),
                 "status":     "submitted",
@@ -1256,16 +1263,30 @@ class ArrowBroker(BaseBroker):
             logger.error("ArrowBroker: cancel order {} failed — {}", order_id, exc)
             return False
 
-    @staticmethod
-    def _order_status_from(raw) -> Optional[Dict]:
-        """The latest state record of one order out of an answer (a list of
-        states, newest last, or one record), or None if it carries no status."""
-        rec = raw[-1] if isinstance(raw, list) and raw else (raw if isinstance(raw, dict) else None)
-        if not isinstance(rec, dict):
-            return None
-        if not str(_dig(rec, "status", "orderStatus", "ordStatus", "report_type", default="")).strip():
-            return None
-        return rec
+    _STATUS_RANK = {"COMPLETE": 5, "REJECTED": 5, "CANCELLED": 4, "PARTIAL": 3,
+                    "OPEN": 2, "PENDING": 1}
+
+    @classmethod
+    def _order_status_from(cls, raw) -> Optional[Dict]:
+        """The most advanced state record of one order out of an answer (one
+        record, or a list of its states in EITHER order), or None if it carries
+        no status. A filled order must never read as still open because the
+        history came newest-first: terminal states win, then the larger fill."""
+        recs = raw if isinstance(raw, list) else [raw]
+        best, key = None, None
+        for rec in recs:
+            if not isinstance(rec, dict):
+                continue
+            st = str(_dig(rec, "status", "orderStatus", "ordStatus", "report_type",
+                          default="")).upper().strip()
+            if not st:
+                continue
+            filled = float(_dig(rec, "filledQty", "filled_quantity", "fillshares", "cumQty",
+                                "filledQuantity", "tradedQty", default=0) or 0)
+            k = (cls._STATUS_RANK.get(_ORDER_STATUS_MAP.get(st, ""), 0), filled)
+            if key is None or k > key:
+                best, key = rec, k
+        return best
 
     def get_order_status(self, order_id: str) -> Dict:
         """Normalized fill state for one order. Tries the SDK's per-order
@@ -1279,32 +1300,30 @@ class ArrowBroker(BaseBroker):
 
         client = self._client
         raw = None
-        # ONE order first (GET /order/{id}: get_order_details in SDK 1.8) — the
-        # whole order book is downloaded only if that answer can't be read.
-        # (Every fill check used to fetch the full book: slow, and slower as
-        # the day's orders pile up.)
-        for meth in ("get_order_details", "get_order_status", "get_order_history",
-                     "single_order_history", "order_history"):
-            fn = getattr(client, meth, None)
-            if fn is None:
-                continue
+        # The ORDER BOOK first — the source proven on live fills. (Reading the
+        # one-order history first once left a filled order looking open: the
+        # executor then cancelled nothing, re-sent at market and doubled.)
+        fn = getattr(client, "get_order_book", None) or getattr(client, "get_orders", None)
+        if fn is not None:
             try:
-                raw = fn(order_id)
-                break
+                book = fn() or []
+                raw = [o for o in book if isinstance(o, dict) and str(
+                    _dig(o, "orderNo", "order_id", "nestOrderNumber", "norenordno",
+                         "id", "ID", default="")) == str(order_id)]
             except Exception as exc:
-                logger.debug("ArrowBroker: {}({}) failed — {}", meth, order_id, exc)
-        if raw is not None and self._order_status_from(raw) is None:
-            raw = None                       # unreadable → fall back to the order book
-        if raw is None:
-            fn = getattr(client, "get_order_book", None) or getattr(client, "get_orders", None)
-            if fn is not None:
+                logger.debug("ArrowBroker: order-book scan failed — {}", exc)
+        if not raw or self._order_status_from(raw) is None:
+            raw = None
+            for meth in ("get_order_details", "get_order_status", "get_order_history",
+                         "single_order_history", "order_history"):
+                f = getattr(client, meth, None)
+                if f is None:
+                    continue
                 try:
-                    book = fn() or []
-                    raw = [o for o in book if isinstance(o, dict) and str(
-                        _dig(o, "orderNo", "order_id", "nestOrderNumber", "norenordno",
-                             "id", "ID", default="")) == str(order_id)]
+                    raw = f(order_id)
+                    break
                 except Exception as exc:
-                    logger.debug("ArrowBroker: order-book scan failed — {}", exc)
+                    logger.debug("ArrowBroker: {}({}) failed — {}", meth, order_id, exc)
 
         rec = self._order_status_from(raw)
         if not rec:
@@ -1314,7 +1333,7 @@ class ArrowBroker(BaseBroker):
                               default="")).upper().strip()
         status = _ORDER_STATUS_MAP.get(status_raw, "OPEN" if status_raw else "UNKNOWN")
         filled = int(float(_dig(rec, "filledQty", "filled_quantity", "fillshares",
-                                "cumQty", "filledQuantity", default=0) or 0))
+                                "cumQty", "filledQuantity", "tradedQty", default=0) or 0))
         pend = int(float(_dig(rec, "pendingQty", "unfilledSize", "pending_quantity",
                               "remainingQuantity", default=0) or 0))
         avg = float(_dig(rec, "avgPrice", "averagePrice", "avgprc", "avg_price",
@@ -1348,26 +1367,33 @@ class ArrowBroker(BaseBroker):
             except ValueError:
                 pass
 
-        client = self._client
-        for meth in ("modify_order", "amend_order", "update_order"):
-            fn = getattr(client, meth, None)
-            if fn is None:
-                continue
-            try:
-                fn(order_id, **payload)
-            except TypeError:
-                try:
-                    fn(order_id=order_id, **payload)
-                except Exception as exc:
-                    logger.error("ArrowBroker: {} {} failed — {}", meth, order_id, exc)
-                    return False
-            except Exception as exc:
-                logger.error("ArrowBroker: {} {} failed — {}", meth, order_id, exc)
-                return False
-            logger.info("ArrowBroker: amended order {} → {}", order_id, payload)
-            return True
-        logger.warning("ArrowBroker: SDK exposes no modify/amend method")
-        return False
+        sent = (getattr(self, "_sent", {}) or {}).get(str(order_id))
+        fn = getattr(self._client, "modify_order", None)
+        if fn is None:
+            logger.warning("ArrowBroker: SDK exposes no modify_order")
+            return False
+        if sent is None:
+            logger.warning("ArrowBroker: cannot amend {} — not an order sent by this session",
+                           order_id)
+            return False
+        args = dict(sent)
+        if price is not None:
+            args["price"] = float(price)
+        if quantity is not None:
+            args["quantity"] = int(quantity)
+        if "order_type" in payload:
+            args["order_type"] = payload["order_type"]
+            if args["order_type"] != OrderType.MARKET:
+                args["mpp"] = False
+        try:
+            fn(order_id=str(order_id), **args)
+        except Exception as exc:
+            logger.error("ArrowBroker: modify_order {} failed — {}", order_id, exc)
+            return False
+        sent.update(args)
+        logger.info("ArrowBroker: amended order {} → {}", order_id,
+                    {k: v for k, v in payload.items()})
+        return True
 
     # ── Positions ─────────────────────────────────────────────────────────────
 

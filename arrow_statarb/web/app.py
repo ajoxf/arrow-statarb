@@ -2671,7 +2671,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         st["position_owner"] = (op or {}).get("owner")
         st["manual_block"] = _manual_blocked()
         st["algo_block"] = None if st.get("running") else _algo_blocked()
-        st["broker_mismatch"] = _arrow_flat_mismatch(op)
+        st["broker_mismatch"], st["broker_mismatch_kind"] = _arrow_mismatch(op)
         return jsonify(st)
 
     # ── Nexus holds a position that Arrow no longer has ──────────────────────
@@ -2696,18 +2696,41 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 return False
         return True
 
-    def _arrow_flat_mismatch(op) -> Optional[str]:
-        """A message when Nexus records an open position but Arrow shows both
-        legs flat (closed in the Arrow app, or never filled). LIVE only."""
-        if not op or _mode() != "live" or not active.get():
-            return None
+    def _arrow_mismatch(op) -> Tuple[Optional[str], Optional[str]]:
+        """(message, kind) when Nexus's record and Arrow's positions on the
+        pair's legs disagree. LIVE only, and only on a fresh, readable answer.
+          nexus_only — Nexus records a position, Arrow is flat (Mark flat);
+          arrow_only — Arrow holds the legs, Nexus records nothing;
+          size       — both hold something, but not the same."""
+        if _mode() != "live" or not active.get():
+            return None, None
         positions, fresh = _cache_get("positions", max_age=30.0)
-        if not fresh or not _arrow_is_flat(positions):
-            return None
-        return (f"Arrow shows NO position in either leg, but Nexus still records a "
-                f"{op['owner'].upper()} {op['direction'].replace('_', ' ')} "
-                f"({op['lots']} lot(s)). It was closed outside Nexus — every new order is "
-                f"blocked until Nexus is marked flat.")
+        rows = _arrow_leg_rows(positions) if fresh else None
+        if rows is None or any(p.get("quantity_known") is False
+                               for r in rows.values() for p in r):
+            return None, None
+        net = {sym: sum(int(p.get("net_quantity", 0) or 0) for p in r)
+               for sym, r in rows.items()}
+        held = ", ".join(f"{sym} {q:+d}" for sym, q in net.items())
+        if op and not any(net.values()):
+            return (f"Arrow shows NO position in either leg, but Nexus still records a "
+                    f"{op['owner'].upper()} {op['direction'].replace('_', ' ')} "
+                    f"({op['lots']} lot(s)). It was closed outside Nexus — every new order is "
+                    f"blocked until Nexus is marked flat."), "nexus_only"
+        if not op and any(net.values()):
+            return (f"Arrow HOLDS {held} on this pair, but Nexus records NO position — "
+                    f"it is not managed or protected here. Close it in the Arrow app."), "arrow_only"
+        if op:
+            try:
+                want = {sym: (1 if side == "buy" else -1) * int(round(q * _resolve_lot_size(seg, sym)))
+                        for seg, sym, side, q in _order_legs(op["direction"], op["lots"])}
+            except ValueError:
+                return None, None
+            if any(net.get(sym, 0) != w for sym, w in want.items()):   # the OPEN's own legs
+                exp = ", ".join(f"{sym} {w:+d}" for sym, w in want.items())
+                return (f"Arrow holds {held}, but Nexus records {op['direction'].replace('_', ' ')} "
+                        f"{op['lots']} lot(s) = {exp}. Check Positions in Arrow."), "size"
+        return None, None
 
     def _arrow_exit_fills(direction: str) -> Tuple[Optional[float], Optional[float]]:
         """Leg A / leg B average prices of the latest COMPLETE orders in Arrow's
