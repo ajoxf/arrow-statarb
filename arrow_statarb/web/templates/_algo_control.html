@@ -124,6 +124,42 @@ const AlgoCtl = (function () {
         }
         txt.textContent = label;
         document.title = prefix + ' · ' + baseTitle;
+        renderMismatch();
+    }
+
+    // Nexus records a position that Arrow no longer holds: say so on every
+    // page, with the one way out (mark it flat — places no order).
+    function renderMismatch() {
+        let bar = document.getElementById('broker-mismatch-bar');
+        const msg = state && state.broker_mismatch;
+        if (!msg) { if (bar) bar.remove(); return; }
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'broker-mismatch-bar';
+            bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:3000;background:#b3261e;' +
+                'color:#fff;font:600 13px/1.4 system-ui,sans-serif;padding:6px 12px;display:flex;' +
+                'gap:12px;align-items:center;justify-content:center;flex-wrap:wrap';
+            bar.innerHTML = '<span></span><button type="button" style="font:inherit;padding:2px 10px;' +
+                'border:1px solid #fff;background:#fff;color:#b3261e;border-radius:3px;cursor:pointer">' +
+                'Mark flat</button>';
+            bar.querySelector('button').addEventListener('click', markFlat);
+            document.body.appendChild(bar);
+        }
+        bar.querySelector('span').textContent = '⚠ ' + msg;
+    }
+
+    async function markFlat() {
+        if (!window.confirm('Arrow shows both legs flat.\n\nMark Nexus\'s position as closed? ' +
+                            'No order is sent — the trade is booked at Arrow\'s own closing fills.')) return;
+        try {
+            const r = await fetch('/api/position/mark-flat', { method: 'POST',
+                headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            const d = await r.json();
+            notify(d.success ? d.message : ('Not marked flat: ' + d.error), d.success ? 'success' : 'danger');
+        } catch (e) {
+            notify('Not marked flat: ' + e, 'danger');
+        }
+        refresh();
     }
 
     async function refresh() {

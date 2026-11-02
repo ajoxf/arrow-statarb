@@ -178,6 +178,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return
         try:
             pos = b.get_positions() or []
+            if getattr(b, "positions_ok", True) is False:
+                return                                   # a failed read, not "flat"
             with _broker_cache_lock:
                 _broker_cache["positions"] = {"ts": time.time(), "val": pos, "ok": True}
         except Exception as exc:
@@ -2792,7 +2794,126 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         st["position_owner"] = (op or {}).get("owner")
         st["manual_block"] = _manual_blocked()
         st["algo_block"] = None if st.get("running") else _algo_blocked()
+        st["broker_mismatch"] = _arrow_flat_mismatch(op)
         return jsonify(st)
+
+    # ── Nexus holds a position that Arrow no longer has ──────────────────────
+    def _arrow_leg_rows(positions) -> Optional[Dict[str, List[Dict]]]:
+        legs = _read_legs()
+        if not _have_both_legs(legs):
+            return None
+        norm = lambda x: re.sub(r"[^A-Z0-9]", "", str(x or "").upper())   # noqa: E731
+        return {legs[lk]["symbol"]: [p for p in positions
+                                     if norm(p.get("symbol")) == norm(legs[lk]["symbol"])]
+                for lk in ("leg_a", "leg_b")}
+
+    def _arrow_is_flat(positions) -> bool:
+        """Both legs read, and both net 0 on Arrow (never True on doubt)."""
+        rows = _arrow_leg_rows(positions)
+        if rows is None:
+            return False
+        for r in rows.values():
+            if any(p.get("quantity_known") is False for p in r):
+                return False
+            if any(int(p.get("net_quantity", 0) or 0) != 0 for p in r):
+                return False
+        return True
+
+    def _arrow_flat_mismatch(op) -> Optional[str]:
+        """A message when Nexus records an open position but Arrow shows both
+        legs flat (closed in the Arrow app, or never filled). LIVE only."""
+        if not op or _mode() != "live" or not active.get():
+            return None
+        positions, fresh = _cache_get("positions", max_age=30.0)
+        if not fresh or not _arrow_is_flat(positions):
+            return None
+        return (f"Arrow shows NO position in either leg, but Nexus still records a "
+                f"{op['owner'].upper()} {op['direction'].replace('_', ' ')} "
+                f"({op['lots']} lot(s)). It was closed outside Nexus — every new order is "
+                f"blocked until Nexus is marked flat.")
+
+    def _arrow_exit_fills(direction: str) -> Tuple[Optional[float], Optional[float]]:
+        """Leg A / leg B average prices of the latest COMPLETE orders in Arrow's
+        order book that close ``direction`` (a SHORT closes buy A / sell B)."""
+        legs = _read_legs()
+        broker = active.get()
+        if not broker or not hasattr(broker, "get_order_book"):
+            return None, None
+        side = {"leg_a": "B" if direction == "SHORT_SPREAD" else "S",
+                "leg_b": "S" if direction == "SHORT_SPREAD" else "B"}
+        try:
+            book = broker.get_order_book() or []
+        except Exception:
+            return None, None
+
+        def _t(o, i):
+            try:
+                return float(o.get("time"))
+            except (TypeError, ValueError):
+                return float(i)
+        out = []
+        for lk in ("leg_a", "leg_b"):
+            sym = legs[lk]["symbol"].upper()
+            hits = [(_t(o, i), o) for i, o in enumerate(book)
+                    if str(o.get("symbol", "")).upper() == sym
+                    and str(o.get("side", "")).upper()[:1] == side[lk]
+                    and str(o.get("status", "")).upper() == "COMPLETE"
+                    and float(o.get("fill_price") or 0) > 0]
+            out.append(float(max(hits, key=lambda h: h[0])[1]["fill_price"]) if hits else None)
+        return out[0], out[1]
+
+    @app.route("/api/position/mark-flat", methods=["POST"])
+    def api_position_mark_flat():
+        """Close Nexus's record of a position Arrow no longer holds. LIVE: only
+        after a fresh read shows BOTH legs flat on Arrow; the close is booked
+        at the fills of Arrow's own closing orders when they are in today's
+        order book, else at the current spread (marked as an estimate)."""
+        op = _open_position_view()
+        if not op:
+            return jsonify({"success": False, "error": "Nexus has no open position."})
+        if arrow_algo.running:
+            return jsonify({"success": False, "error": _manual_blocked()})
+        a = b = None
+        if _mode() == "live":
+            broker = active.get()
+            if not broker:
+                return jsonify({"success": False, "error": "No broker connected"})
+            try:
+                positions = broker.get_positions()
+            except Exception as exc:                      # noqa: BLE001
+                positions, broker.positions_ok = None, False
+                logger.warning("Mark flat: positions read failed — {}", exc)
+            if positions is None or getattr(broker, "positions_ok", True) is False:
+                return jsonify({"success": False,
+                                "error": "Could not read Arrow's positions — try again."})
+            if not _arrow_is_flat(positions):
+                return jsonify({"success": False,
+                                "error": ("Arrow still shows a position in a leg — close it "
+                                          "with Close Position instead. Nothing was changed.")})
+            a, b = _arrow_exit_fills(op["direction"])
+        m = _trade_meta({"results": []})
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        if a is not None and b is not None:
+            spread, how = round(k * a - b, 4), "at Arrow's fills"
+        else:
+            a, b, spread, how = m["leg_a_price"], m["leg_b_price"], m["spread"], "estimated at market"
+        reason = f"closed outside Nexus — marked flat ({how})"
+        trade_log.record(action="CLOSE", direction=op["direction"], lots=op["lots"],
+                         spread=spread, decision_spread=spread,
+                         dry_run=(_mode() != "live"),
+                         status=_MODE_STATUS.get(_mode(), "DRY-RUN"), source="manual",
+                         lot_size=m["lot_size"], zscore=m["zscore"],
+                         leg_a_price=a, leg_b_price=b,
+                         stt_pct=float(cfg.get("filters.stt_pct", 0.02) or 0),
+                         other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
+                         capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
+                         name=m["name"], exit_reason=reason)
+        if op["owner"] == "algo":
+            arrow_algo.clear_position("marked flat — closed outside Nexus")
+        logger.warning("Position marked flat: {} {} lot(s) — {} (exit spread {})",
+                       op["direction"], op["lots"], reason, spread)
+        return jsonify({"success": True, "message": f"Marked flat {how} — exit spread {spread}",
+                        "exit_spread": spread, "leg_a_price": a, "leg_b_price": b})
 
     @app.route("/api/reconcile", methods=["GET"])
     def api_reconcile():
@@ -3695,6 +3816,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         return jsonify({"success": True, "cancelled": working_orders.cancel_all(_cancel_note())})
 
     app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo,
-                               "working_orders": working_orders}
+                               "working_orders": working_orders,
+                               "refresh_broker_cache": _refresh_broker_cache,
+                               "trade_log": trade_log}
 
     return app, socketio
