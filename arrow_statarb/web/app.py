@@ -31,6 +31,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
+from arrow_statarb.core.signal_study import SignalStudy, RANGES as STUDY_RANGES
 from arrow_statarb.core.algo import ArrowAutoTrader
 from arrow_statarb.core.executor import SpreadExecutor, LegOrder
 from arrow_statarb.core.execution_log import ExecutionLog
@@ -44,6 +45,10 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # Trade-log location. Module-level so tests can redirect it to a temp file and
 # never write into the shipped data/trades.json.
 TRADES_FILE = PROJECT_ROOT / "data" / "trades.json"
+# The z-score excursion tally and its arming state (survive a restart).
+EXCURSIONS_FILE = PROJECT_ROOT / "data" / "excursions.json"
+# The signal study: what the algo's rules would have done, settled in money.
+SIGNAL_STUDY_FILE = PROJECT_ROOT / "data" / "signal_study.json"
 
 
 def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
@@ -354,7 +359,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
         }
 
-    signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params)
+    signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
+                                 excursions_path=EXCURSIONS_FILE)
     # Auto-start so the live signal + z-score chart always collect whenever prices
     # are available — independent of connecting the broker or arming the algo. It
     # simply no-ops while no prices are returned, so this is safe at startup.
@@ -387,6 +393,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
+            # entry on the way BACK inside the band (armed), or at the touch
+            "entry_mode": str(s.get("entry_mode", "reentry")),
+            "reentry_back": float(s.get("reentry_back", 0.5)),
+            "reentry_window_pct": float(s.get("reentry_window_pct", 50.0)),
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "cooldown": float(cfg.get("execution.cooldown_sec", 300)),
             "lots": lots,
@@ -402,6 +412,25 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "time_stop_half_lives": float(f.get("time_stop_half_lives", 3.0)),
             "trading_hours": cfg.section("trading_hours"),
         }
+
+    # ── signal study: a READING. It gets a copy of the algo's parameters and
+    # writes only its own file; it holds no order path of any kind.
+    def _study_params() -> Dict:
+        d = _algo_params()
+        broker = active.get()
+        legs = _read_legs()
+        lot = None                    # unknown lot size → no money, never ₹ at ×1
+        if broker and "leg_a" in legs:
+            try:
+                lot = float(broker.resolve_lot_size(legs["leg_a"]["segment"],
+                                                    legs["leg_a"]["symbol"])) or None
+            except Exception:
+                lot = None
+        d["lot_multiplier"] = lot
+        return d
+
+    signal_study = SignalStudy(SIGNAL_STUDY_FILE, _study_params)
+    signal_engine.add_observer(signal_study.observe)
 
     arrow_algo = ArrowAutoTrader(
         signal_provider=signal_engine.get_signal,
@@ -685,6 +714,26 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         mean reversions) for the Analysis page."""
         return jsonify(signal_engine.get_excursions())
 
+    @app.route("/api/analysis/signals", methods=["GET"])
+    def api_analysis_signals():
+        """The signal study for a date range: 1d | 7d | 30d | all."""
+        rng = request.args.get("range", "1d")
+        out = signal_study.report(rng if rng in STUDY_RANGES else "1d")
+        p = _algo_params()
+        sp = _signal_params()
+        out["rules"] = {k: p.get(k) for k in ("entry_zscore", "exit_zscore", "stop_zscore",
+                                              "confirmation_ticks", "time_stop_half_lives",
+                                              "entry_mode", "reentry_back", "reentry_window_pct",
+                                              "cooldown", "brokerage_per_lot",
+                                              "enable_probability_filter")}
+        out["rules"].update(window_minutes=sp["window_minutes"],
+                            sample_interval_sec=sp["sample_interval_sec"],
+                            min_signal_minutes=sp["min_signal_minutes"])
+        legs = _read_legs()
+        out["pair"] = (f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
+                       if _have_both_legs(legs) else None)
+        return jsonify(out)
+
     @app.route("/api/signal/excursions/reset", methods=["POST"])
     def api_signal_excursions_reset():
         signal_engine.reset_excursions()
@@ -929,6 +978,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "exit_zscore": s.get("exit_zscore", 0.0),
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
+                    "entry_mode": s.get("entry_mode", "reentry"),
+                    "reentry_back": s.get("reentry_back", 0.5),
+                    "reentry_window_pct": s.get("reentry_window_pct", 50.0),
                 },
                 "risk": {
                     "lots_per_trade": r.get("lots_per_trade", 1),
@@ -966,9 +1018,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         for k, d in (("window_minutes", 120.0), ("min_signal_minutes", 10.0),
                      ("sample_interval_sec", 0.5),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
-                     ("confirmation_ticks", 3)):
+                     ("confirmation_ticks", 3), ("reentry_back", 0.5),
+                     ("reentry_window_pct", 50.0)):
             if k in (data.get("signal") or {}):
                 sig[k] = _num(data["signal"][k], d)
+        em = (data.get("signal") or {}).get("entry_mode")
+        if em in ("touch", "reentry"):
+            sig["entry_mode"] = em
 
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
@@ -1186,6 +1242,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         emit("status", {"connected": active.get() is not None})
 
     # Expose internals for tests (inject a fake broker, inspect the engines).
-    app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo}
+    app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo,
+                               "study": signal_study}
 
     return app, socketio

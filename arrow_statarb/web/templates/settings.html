@@ -44,6 +44,24 @@
                         <input type="number" class="form-control" id="s-confirm">
                         <div class="form-text">Consecutive ticks above threshold before entry</div>
                     </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Entry</label>
+                        <select class="form-select" id="s-entry-mode">
+                            <option value="reentry">Armed → on the way back</option>
+                            <option value="touch">At the touch</option>
+                        </select>
+                        <div class="form-text">Armed: a stretch to ±Entry Z arms; the entry comes when z falls back inside</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Re-entry back (σ)</label>
+                        <input type="number" step="0.05" class="form-control" id="s-reentry-back">
+                        <div class="form-text">Enters at Entry Z − this (2.0 − 0.5 = 1.5)</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Re-entry window (%)</label>
+                        <input type="number" step="5" class="form-control" id="s-reentry-window">
+                        <div class="form-text">How far past that it may still enter (50% of 1.5 → down to 0.75); beyond, the arming is lost</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -204,6 +222,9 @@
         _set('s-exit', s.signal.exit_zscore);
         _set('s-stop', s.signal.stop_zscore);
         _set('s-confirm', s.signal.confirmation_ticks);
+        _set('s-entry-mode', s.signal.entry_mode || 'reentry');
+        _set('s-reentry-back', s.signal.reentry_back);
+        _set('s-reentry-window', s.signal.reentry_window_pct);
 
         _set('r-lots', s.risk.lots_per_trade);
         _set('r-maxleg', s.risk.max_contracts_per_leg);
@@ -241,6 +262,9 @@
                 exit_zscore: +document.getElementById('s-exit').value,
                 stop_zscore: +document.getElementById('s-stop').value,
                 confirmation_ticks: +document.getElementById('s-confirm').value,
+                entry_mode: document.getElementById('s-entry-mode').value,
+                reentry_back: +document.getElementById('s-reentry-back').value,
+                reentry_window_pct: +document.getElementById('s-reentry-window').value,
             },
             risk: {
                 lots_per_trade: +document.getElementById('r-lots').value,

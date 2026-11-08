@@ -41,6 +41,10 @@ signal:
   exit_zscore: 0.0
   stop_zscore: 4.0
   confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+  entry_mode: reentry         # reentry: a stretch to ±entry ARMS, the entry comes on the way
+                              #   back inside; touch: enter at the stretch itself
+  reentry_back: 0.5           # enters at entry_zscore − this (2.0 → 1.5)
+  reentry_window_pct: 50      # may still enter this far past that (1.5 → 0.75); beyond, lost
 
 # Probability / EV / cost gate (OU gambler's-ruin model).
 filters:

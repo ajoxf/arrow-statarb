@@ -12,9 +12,12 @@ Convention (Arrow fact #10):
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -28,9 +31,17 @@ class SignalEngine:
         self,
         prices_provider: Callable[[], Tuple[Optional[float], Optional[float]]],
         params_provider: Callable[[], Dict],
+        excursions_path: Optional[Path] = None,
     ):
         self._prices = prices_provider
         self._params = params_provider
+        # Where the excursion tally AND its arming state live between runs.
+        # None = in memory only (tests, backtests).
+        self._exc_path = Path(excursions_path) if excursions_path else None
+        self._exc_saved_at = 0.0
+        # Readers of each READY sample (the signal study). They get a copy of
+        # the numbers; nothing they do can reach the window or the z.
+        self._observers: List[Callable[[Dict], None]] = []
 
         # (timestamp, leg_a, leg_b, spread)
         self._samples: Deque[Tuple[float, float, float, float]] = deque()
@@ -51,6 +62,76 @@ class SignalEngine:
         # a band only re-arms once z falls back inside the re-arm zone (|z|<1).
         self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
         self._active_up = self._active_dn = False   # a ≥2σ excursion is open
+        self._load_exc_state()
+
+    def add_observer(self, fn: Callable[[Dict], None]) -> None:
+        """Call ``fn`` with every READY sample: ts, z, spread, legs, std,
+        half-life (samples) and the sample interval."""
+        self._observers.append(fn)
+
+    # ── excursion persistence ────────────────────────────────────────────────
+    # The counts and the arming that gates them are ONE state: counts restored
+    # without their arming re-count a stretch that was already counted (a
+    # spread parked beyond +2σ logs a fresh touch after every restart), and
+    # arming without counts forgets what it was protecting. Both or neither.
+    _ARMING = ("_arm_2u", "_arm_3u", "_arm_2d", "_arm_3d", "_active_up", "_active_dn")
+    _EXC_SAVE_EVERY_SEC = 5.0          # _z_prev alone moves every sample
+
+    def _arming_state(self) -> Tuple:
+        return tuple(getattr(self, a) for a in self._ARMING)
+
+    def _load_exc_state(self) -> None:
+        if not self._exc_path or not self._exc_path.exists():
+            return
+        try:
+            d = json.loads(self._exc_path.read_text())
+            exc = self._fresh_exc()
+            for k in exc:
+                if k in (d.get("exc") or {}):
+                    exc[k] = type(exc[k])(d["exc"][k])
+            arming = d.get("arming") or {}
+            for a in self._ARMING:
+                if not isinstance(arming.get(a), bool):
+                    raise ValueError(f"arming state {a} missing")
+            zp = d.get("z_prev")
+            events = [e for e in (d.get("events") or []) if isinstance(e, dict)]
+        except Exception as exc_:                          # noqa: BLE001
+            # Unreadable → start fresh, loudly; never half-restore (counts
+            # without arming is the bug this file exists to prevent).
+            logger.warning("SignalEngine: excursion state {} unreadable ({}) — "
+                           "starting a fresh tally", self._exc_path, exc_)
+            return
+        self._exc = exc
+        for a in self._ARMING:
+            setattr(self, a, arming[a])
+        self._z_prev = float(zp) if zp is not None else None
+        self._exc_events.extend(events[-self._exc_events.maxlen:])
+        logger.info("SignalEngine: excursion tally restored — {} event(s) since {}",
+                    len(self._exc_events),
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(exc["since"])))
+
+    def _save_exc_state(self, force: bool = False, now: Optional[float] = None) -> None:
+        """Write counts + arming + events atomically. Immediately when anything
+        that gates counting changed (``force``); otherwise at most every few
+        seconds, for ``_z_prev``."""
+        if not self._exc_path:
+            return
+        now = time.time() if now is None else now
+        if not force and now - self._exc_saved_at < self._EXC_SAVE_EVERY_SEC:
+            return
+        body = {"version": 1,
+                "exc": dict(self._exc),
+                "arming": {a: getattr(self, a) for a in self._ARMING},
+                "z_prev": self._z_prev,
+                "events": list(self._exc_events)}
+        try:
+            self._exc_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._exc_path.with_suffix(self._exc_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(body))
+            os.replace(tmp, self._exc_path)               # never a half-written file
+            self._exc_saved_at = now
+        except Exception as exc_:                          # noqa: BLE001
+            logger.warning("SignalEngine: could not save excursion state — {}", exc_)
 
     @staticmethod
     def _fresh_exc() -> Dict:
@@ -90,12 +171,15 @@ class SignalEngine:
     def stop(self) -> None:
         self._stop_evt.set()
         self.running = False
+        with self._lock:
+            self._save_exc_state(force=True)
         logger.info("SignalEngine: stopped")
 
     def reset(self) -> None:
         with self._lock:
             self._samples.clear()
             self._reset_exc_state()       # series discontinues; counters preserved
+            self._save_exc_state(force=True)
 
     def _reset_exc_state(self) -> None:
         """Clear the transient crossing state (not the counters)."""
@@ -109,6 +193,7 @@ class SignalEngine:
             self._exc = self._fresh_exc()
             self._exc_events.clear()
             self._reset_exc_state()
+            self._save_exc_state(force=True)
         logger.info("SignalEngine: excursion counters reset")
 
     def get_excursions(self, max_events: int = 100) -> Dict:
@@ -135,6 +220,12 @@ class SignalEngine:
         Each counted event is appended to the timestamped event log."""
         ts = time.time() if ts is None else ts
         e = self._exc
+        before = (self._arming_state(), len(self._exc_events))
+        self._tally_z_inner(z, ts, e)
+        changed = (self._arming_state(), len(self._exc_events)) != before
+        self._save_exc_state(force=changed, now=ts)
+
+    def _tally_z_inner(self, z: float, ts: float, e: Dict) -> None:
         if z > e["max_z"]:
             e["max_z"] = z
         if z < e["min_z"]:
@@ -213,11 +304,31 @@ class SignalEngine:
         Must be called while holding ``self._lock``."""
         if len(self._samples) < 2:
             return
+        # Count only on a READY window — the same gate the algo and the
+        # dashboard use (span ≥ min_signal_minutes). A warming window's z is
+        # measured against a mean a few samples old: after a restart it put
+        # spurious ±2σ/±3σ touches on the tally within the first minute. While
+        # not ready the tally and its arming are left exactly as they were.
+        span_min = (self._samples[-1][0] - self._samples[0][0]) / 60.0
+        if span_min < self._p()["min_signal_minutes"]:
+            return
         spreads = [s[3] for s in self._samples]
         mean, std = self.compute_stats(spreads)
         if std <= 1e-12:
             return
-        self._tally_z((spreads[-1] - mean) / std, ts)
+        z = (spreads[-1] - mean) / std
+        self._tally_z(z, ts)
+        if self._observers:
+            _, la, lb, sp = self._samples[-1]
+            sample = {"ts": time.time() if ts is None else ts, "z": z, "spread": sp,
+                      "leg_a": la, "leg_b": lb, "mean": mean, "std": std,
+                      "half_life": self.half_life(spreads),
+                      "sample_interval": self._p()["sample_interval_sec"]}
+            for fn in list(self._observers):
+                try:
+                    fn(dict(sample))
+                except Exception:                          # noqa: BLE001
+                    logger.exception("SignalEngine: observer failed")
 
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:

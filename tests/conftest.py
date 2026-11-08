@@ -155,3 +155,12 @@ SAMPLE_MASTER = [
     {"ExchSeg": "NSECM", "Symbol": "RELIANCE", "TradingSymbol": "RELIANCE-EQ",
      "OptionType": "", "StrikePrice": "", "Expiry": "", "LotSize": "1", "Token": "555"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _excursions_never_touch_the_real_data_file(tmp_path, monkeypatch):
+    """Every app a test builds keeps its excursion tally in the test's temp
+    dir, never in data/excursions.json."""
+    import arrow_statarb.web.app as appmod
+    monkeypatch.setattr(appmod, "EXCURSIONS_FILE", tmp_path / "excursions.json")
+    monkeypatch.setattr(appmod, "SIGNAL_STUDY_FILE", tmp_path / "signal_study.json")

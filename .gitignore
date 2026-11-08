@@ -34,3 +34,7 @@ htmlcov/
 
 # Runtime data
 data/trades.json
+data/excursions.json
+data/excursions.json.tmp
+data/signal_study.json
+data/signal_study.json.tmp

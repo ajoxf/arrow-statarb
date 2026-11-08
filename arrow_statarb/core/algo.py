@@ -35,6 +35,7 @@ from typing import Callable, Dict, Optional
 
 from loguru import logger
 
+from arrow_statarb.core.arming import REENTRY, Arming, mode_of, reentry_levels
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 
 # India Standard Time (UTC+5:30) — trading-hours window is evaluated in IST.
@@ -77,8 +78,11 @@ class ArrowAutoTrader:
 
         self._pos: Optional[Dict] = None          # open position, or None
         self._cooldown_until = 0.0
-        self._consec_above = 0                     # consecutive ticks z ≥ +entry
-        self._consec_below = 0                     # consecutive ticks z ≤ -entry
+        # WHEN a stretch becomes an entry: at the touch, or armed then on the
+        # way back (entry_mode). The algo's OWN instance — the Analysis study
+        # holds a separate one. A caller that does not set entry_mode gets
+        # the original at-the-touch behaviour.
+        self._arming = Arming(default_mode="touch")
         self._snap: Dict = {"status": "stopped"}   # last snapshot for /state
         self.running = False
         self.last_error = ""
@@ -203,29 +207,37 @@ class ArrowAutoTrader:
         sample_interval = float(sig.get("sample_interval_sec", 0.5))
         now = self._clock()
 
-        # Confirmation ticks: require N consecutive ticks beyond the threshold
-        # before an entry fires (filters out single-tick spikes).
+        # Confirmation ticks (N consecutive ticks beyond the threshold) and, in
+        # re-entry mode, the arming: see core/arming.py.
         confirm = max(1, int(p.get("confirmation_ticks", 1)))
-        if z >= entry_z:
-            self._consec_above += 1; self._consec_below = 0
-        elif z <= -entry_z:
-            self._consec_below += 1; self._consec_above = 0
+        if self._pos is not None:
+            arm = {"trigger": None, "event": None, "lost": None, "confirming": 0}
+            self._arming.reset()                  # a position: nothing is armed
         else:
-            self._consec_above = self._consec_below = 0
-        confirmed_long = self._consec_below >= confirm   # z ≤ -entry
-        confirmed_short = self._consec_above >= confirm   # z ≥ +entry
+            arm = self._arming.step(z, now, p)
+        if arm.get("event") == "armed":
+            logger.info("ArrowAlgo: ARMED {} at z={:.2f}", self._arming.armed, z)
+        elif arm.get("event") == "lost":
+            lost = arm["lost"]
+            logger.info("ArrowAlgo: arming LOST {} — z {:.2f} fell through the window "
+                        "floor without an entry (peak z {:.2f})", lost["side"], z, lost["peak_z"])
+        reentry = mode_of(p) == REENTRY
+        snap["entry_mode"] = mode_of(p)
+        snap["armed"] = self._arming.armed
+        snap["armed_peak_z"] = self._arming.peak_z
 
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
+            trigger = arm.get("trigger")
             if mdl > 0 and day_pnl <= -mdl:
                 snap["status"] = f"daily loss limit reached (₹{day_pnl:.0f} ≤ −₹{mdl:.0f}) — entries halted"
             elif now < self._cooldown_until:
                 snap["status"] = "cooldown"
             elif not _within_trading_hours(p):
                 snap["status"] = "outside trading hours"
-            elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
-                direction = "LONG_SPREAD" if z < 0 else "SHORT_SPREAD"
+            elif trigger:
+                direction = "LONG_SPREAD" if trigger == "LONG" else "SHORT_SPREAD"
                 pf = self._build_filter(p)
                 allow, reason, metrics = pf.check_entry(z, std, half_life, contracts=lots)
                 snap["pf_reason"] = reason
@@ -238,11 +250,15 @@ class ArrowAutoTrader:
                         extra = f" (P_win={wp*100:.0f}% EV=₹{ev:.0f})"
                     snap["status"] = f"blocked: {reason}{extra}"
                 else:
-                    snap["status"] = f"ENTRY {direction} (z={z:.2f})"
+                    how = " on re-entry" if reentry else ""
+                    snap["status"] = f"ENTRY {direction}{how} (z={z:.2f})"
                     self._enter(direction, lots, z, sig.get("spread", 0.0))
+            elif reentry and self._arming.armed:
+                back_at, floor = reentry_levels(p)
+                snap["status"] = (f"ARMED {self._arming.armed} (peak z={self._arming.peak_z:.2f}) — "
+                                  f"enters back inside at |z| ≤ {back_at:.2f}, window to {floor:.2f}")
             elif abs(z) >= entry_z:
-                c = max(self._consec_above, self._consec_below)
-                snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
+                snap["status"] = f"confirming {arm.get('confirming', 0)}/{confirm} (z={z:.2f})"
             else:
                 snap["status"] = "flat — watching"
         else:
@@ -284,7 +300,7 @@ class ArrowAutoTrader:
                 "order_ids": [r.get("order_id") for r in res.get("results", [])],
                 "dry_run": bool(res.get("dry_run")),
             }
-            self._consec_above = self._consec_below = 0
+            self._arming.reset()                  # entered: the arming is spent
             logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
         else:
             self.last_error = f"entry failed: {res.get('error')}"
