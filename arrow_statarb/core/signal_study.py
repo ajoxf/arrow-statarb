@@ -31,12 +31,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from loguru import logger
+
+_NUM = re.compile(r"[-+−]?₹?\d+(?:\.\d+)?")
+
+
+def reason_key(reason: Optional[str]) -> str:
+    """A gate's reason with its numbers taken out — "buy spread at z -2.51 —
+    LONG entries are off" and "... z -2.58 ..." are the same gate."""
+    text = str(reason or "blocked").split(" (")[0]
+    return " ".join(_NUM.sub("…", text).split())[:60]
 
 from arrow_statarb.core.algo import ArrowAutoTrader
 
@@ -248,12 +258,22 @@ class SignalStudy:
             return False
         row = self._row(self._blocked_id)
         if row is not None:
+            # One row per blocked RUN. Its entry z / spread / reason are all
+            # the FIRST sample's, so the row reads as one moment; the run's
+            # deepest z goes to peak_z. A later sample only replaces the reason
+            # when a DIFFERENT gate took over (not merely a new z in the text).
             row["blocked_samples"] = int(row.get("blocked_samples", 1)) + 1
-            row["filter_reason"] = reason
+            z = lb.get("zscore")
+            if z is not None and (row.get("peak_z") is None
+                                  or abs(float(z)) > abs(float(row["peak_z"]))):
+                row["peak_z"] = _r(z)
+            if reason_key(reason) != reason_key(row.get("filter_reason")):
+                row["filter_reason"] = reason
             return False
         row = self._new_row(lb.get("would_be_signal") or "SHORT", self._params() or {})
         row.update(status="filtered", filter_reason=reason, blocked_samples=1,
-                   entry_ts=now, entry_z=_r(lb.get("zscore")))
+                   entry_ts=now, entry_z=_r(lb.get("zscore")),
+                   entry_spread=_r(lb.get("spread")), peak_z=_r(lb.get("zscore")))
         self._blocked_id = row["id"]
         return True
 
@@ -503,7 +523,7 @@ def summarize(rows: List[Dict]) -> Dict:
 
     reasons: Dict[str, int] = {}
     for r in filtered:
-        key = str(r.get("filter_reason") or "blocked").split(" (")[0][:60]
+        key = reason_key(r.get("filter_reason"))
         reasons[key] = reasons.get(key, 0) + 1
 
     decided = len(won) + len(losers)

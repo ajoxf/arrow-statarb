@@ -631,7 +631,9 @@
                 : (r.status === 'closed' ? '<span class="chip chip-none" title="lot size unknown — no money measured">unmeasured</span>' : DASH);
             return `<tr class="${r.status}">
                 <td class="ps-3 num">${r.id}</td><td>${side}</td><td>${_tsNear(r.armed_ts, waiting ? null : r.entry_ts)}</td>
-                <td class="num">${r.armed_z == null ? DASH : _num(r.armed_z) + ' · ' + _num(r.peak_z)}</td>
+                <td class="num">${r.armed_z != null ? _num(r.armed_z) + ' · ' + _num(r.peak_z)
+                    : (r.status === 'filtered' && r.peak_z != null && (r.blocked_samples || 1) > 1)
+                    ? `<span title="deepest z while blocked (${r.blocked_samples} samples)">${DASH} · ${_num(r.peak_z)}</span>` : DASH}</td>
                 <td>${waiting ? DASH : _ts(r.entry_ts)}</td><td class="num">${waiting ? DASH : _num(r.entry_z)}</td>
                 <td class="num">${waiting ? DASH : _num(r.entry_spread)}</td><td class="num">${waiting ? DASH : pw}</td>
                 <td>${status}${from}${restart}</td><td>${_tsNear(r.exit_ts, r.entry_ts)}</td><td>${r.exit_reason ? (EXIT_LABEL[r.exit_reason] || r.exit_reason) : DASH}</td>
