@@ -189,3 +189,36 @@ def test_the_algo_never_reads_the_tally():
     for name in ("get_excursions", "_exc", "_arm_2u", "_arm_2d", "_active_up",
                  "_active_dn", "excursions"):
         assert name not in src, name
+
+
+# ── the tally counts on the z the algo trades on ─────────────────────────────
+
+class _Bands:
+    """Candle bands held still: mean 1000, σ 1 — a spread of 1003 is z +3."""
+    def bands(self, tf, n, k=1.0):
+        return {"ready": True, "mean": 1000.0, "std": 1.0, "count": n}
+
+    def update(self, *a, **kw):
+        pass
+
+
+def _candle_engine(src):
+    p = {"window_minutes": 120.0, "sample_interval_sec": 0.5, "min_signal_minutes": 0.0,
+         "band_source": src, "band_timeframe": "15m", "band_length": 20}
+    return SignalEngine(lambda: (None, None), lambda: p, candles=_Bands())
+
+
+def test_in_candle_mode_the_tally_counts_on_the_candle_bands():
+    eng = _candle_engine("candles")
+    for i, s in enumerate([1003.0] * 50):                 # flat: the tick window sees no stretch
+        eng.push(s + 1000.0, 1000.0, ts=float(i))
+    x = eng.get_excursions()
+    assert x["touch_2_up"] == 1 and x["touch_3_up"] == 1 and x["basis"] == "candles:15m:20"
+
+
+def test_control_in_tick_mode_the_same_flat_spread_touches_nothing():
+    eng = _candle_engine("ticks")
+    for i, s in enumerate([1003.0] * 50):
+        eng.push(s + 1000.0, 1000.0, ts=float(i))
+    x = eng.get_excursions()
+    assert x["touch_2_up"] == 0 and x["basis"] == "ticks"

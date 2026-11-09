@@ -184,3 +184,4 @@ def _analysis_files_never_touch_the_real_data_dir(tmp_path, monkeypatch):
     import arrow_statarb.web.app as appmod
     monkeypatch.setattr(appmod, "EXCURSIONS_FILE", tmp_path / "excursions.json")
     monkeypatch.setattr(appmod, "SIGNAL_STUDY_FILE", tmp_path / "signal_study.json")
+    monkeypatch.setattr(appmod, "SIGNAL_OUTCOMES_FILE", tmp_path / "signal_outcomes.json")

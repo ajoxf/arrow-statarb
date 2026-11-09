@@ -178,3 +178,10 @@ def test_derive_refuses_tick_bands(tmp_path):
     app.extensions["arrow"]["signal"].stop()
     r = app.test_client().post("/api/analysis/derive", json={}).get_json()
     assert r["success"] is False and "Candles" in r["error"]
+
+
+def test_replay_confirms_on_one_candle_close_not_on_n_candles():
+    calm = [0.5 * ((-1) ** i) for i in range(30)]
+    bars = _bars(calm + [8.0, 0.0, -0.3] + calm[:5])           # one candle beyond, then back
+    rows = replay_candles(bars, _p(confirmation_ticks=3), "15m", 900, 20)
+    assert [r for r in rows if r["status"] in ("open", "closed")]

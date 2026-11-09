@@ -137,6 +137,8 @@ class SignalEngine:
         for a in self._ARMING:
             setattr(self, a, arming[a])
         self._z_prev = float(zp) if zp is not None else None
+        if d.get("basis"):
+            self._exc_basis = d["basis"]          # a later switch re-arms (see above)
         self._exc_events.extend(events[-self._exc_events.maxlen:])
         logger.info("SignalEngine: excursion tally restored — {} event(s) since {}",
                     len(self._exc_events),
@@ -151,7 +153,7 @@ class SignalEngine:
         now = time.time() if now is None else now
         if not force and now - self._exc_saved_at < self._EXC_SAVE_EVERY_SEC:
             return
-        body = {"version": 1,
+        body = {"version": 1, "basis": getattr(self, "_exc_basis", None),
                 "exc": dict(self._exc),
                 "arming": {a: getattr(self, a) for a in self._ARMING},
                 "z_prev": self._z_prev,
@@ -273,6 +275,7 @@ class SignalEngine:
         e["max_z"] = round(e["max_z"], 2)
         e["min_z"] = round(e["min_z"], 2)
         e["event_count"] = len(events)
+        e["basis"] = getattr(self, "_exc_basis", None)   # the z it counts on
         e["events"] = list(reversed(events))[:max_events]   # newest first, capped
         return e
 
@@ -326,7 +329,7 @@ class SignalEngine:
         self._z_prev = z
 
     def _log_event(self, etype: str, z: float, ts: float) -> None:
-        self._exc_events.append({"ts": ts,
+        self._exc_events.append({"ts": ts, "basis": getattr(self, "_exc_basis", "ticks"),
                                  "time": time.strftime("%H:%M:%S", time.localtime(ts)),
                                  "type": etype, "z": round(z, 2)})
 
@@ -450,11 +453,29 @@ class SignalEngine:
         # signal's own warm-up. A warming window's z is measured against a
         # mean a few samples old and put spurious ±2σ/±3σ touches on the
         # tally. While not ready, the tally and its arming stay as they were.
-        span_min = (self._samples[-1][0] - self._samples[0][0]) / 60.0
-        if span_min < self._p()["min_signal_minutes"]:
-            return
+        # The tally counts on the z the ALGO trades on — the candle bands when
+        # band_source is candles, else the tick window — so the Excursion Log,
+        # the signal journal and the algo all read the same z. Not ready (too
+        # few candles / a warming window) → nothing counted, arming untouched.
+        src, tf, n_len = self._band_params()
+        basis = f"candles:{tf}:{n_len}" if src == "candles" and self.candles is not None else "ticks"
+        if basis != getattr(self, "_exc_basis", basis):
+            self._reset_exc_state()           # a different z: a stretch starts afresh
+        self._exc_basis = basis
         spreads = [s[3] for s in self._samples]
-        mean, std = self.compute_stats(spreads)
+        if basis == "ticks":
+            span_min = (self._samples[-1][0] - self._samples[0][0]) / 60.0
+            if span_min < self._p()["min_signal_minutes"]:
+                return
+            mean, std = self.compute_stats(spreads)
+        else:
+            try:
+                b = self.candles.bands(tf, n_len, self._p().get("hedge_ratio", 1.0) or 1.0)
+            except Exception:
+                return
+            if not b.get("ready"):
+                return
+            mean, std = float(b["mean"]), float(b["std"])
         if std <= 1e-12:
             return
         self._tally_z((spreads[-1] - mean) / std, ts)
