@@ -58,3 +58,9 @@ arrowtrader.db
 status.json
 commands.jsonl
 results.json
+
+# analysis state (runtime)
+data/excursions.json
+data/excursions.json.tmp
+data/signal_study.json
+data/signal_study.json.tmp

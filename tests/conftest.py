@@ -175,3 +175,12 @@ SAMPLE_MASTER = [
      "OptionType": "", "StrikePrice": "", "Expiry": "19-Aug-2025", "LotSize": "100",
      "TickSize": "1", "Token": "777"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _analysis_files_never_touch_the_real_data_dir(tmp_path, monkeypatch):
+    """Every app a test builds keeps its excursion tally and signal study in
+    the test's temp dir, never in data/."""
+    import arrow_statarb.web.app as appmod
+    monkeypatch.setattr(appmod, "EXCURSIONS_FILE", tmp_path / "excursions.json")
+    monkeypatch.setattr(appmod, "SIGNAL_STUDY_FILE", tmp_path / "signal_study.json")

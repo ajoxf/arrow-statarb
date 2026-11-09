@@ -105,6 +105,10 @@ signal:
                              # leg_b is the CONTRACT leg (its lot size denominates
                              # P&L); leg_a is sized to match leg_b's exposure × k.
   confirmation_ticks: 3       # consecutive ticks beyond entry before firing
+  entry_mode: reentry         # reentry: a stretch to ±entry ARMS, the entry comes on the way
+                              #   back inside; touch: enter at the stretch itself
+  reentry_back: 0.5           # enters at entry_zscore − this (2.0 → 1.5)
+  reentry_window_pct: 50      # may still enter this far past that (1.5 → 0.75); beyond, lost
   trade_direction: both       # which side may OPEN a trade (exits never restricted):
                               #   both      — either
                               #   sell_only — High → Low: SHORT the spread on the
