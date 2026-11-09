@@ -119,7 +119,11 @@ class ArrowAutoTrader:
         clock: Optional[Callable[[], float]] = None,
         prices_provider: Optional[Callable[[], Tuple[Optional[float], Optional[float]]]] = None,
         log=None,
+        on_entered: Optional[Callable[[Dict], None]] = None,
     ):
+        # Told the entry LEVELS (break-even / target / stop as spread prices)
+        # once a position is held, so they are journaled with the trade.
+        self._on_entered = on_entered
         # Where this instance logs. The Analysis study runs a PAPER copy of the
         # algo, and its decisions must never read like real ones in app.log.
         self._log = log or logger
@@ -615,6 +619,40 @@ class ArrowAutoTrader:
         if cands:
             stop = min(cands)
         return round(stop, 2), round(target, 2)
+
+    def entry_levels(self, p: Dict, pos: Dict, sig: Dict, auto_exits: bool = True) -> Dict:
+        """The levels a position was opened against, as SPREAD prices, for the
+        journals: break-even (net 0 after every cost), and the target and stop
+        that will close it — the rupee levels when those exits are set, else
+        the z levels (mean ± z·σ of the bands it entered on). ``auto_exits``
+        False (a manual position) records break-even and the z levels only."""
+        out: Dict = {"break_even": None, "target_spread": None, "target_kind": None,
+                     "stop_spread": None, "stop_kind": None,
+                     "entry_mean": sig.get("mean"), "entry_std": sig.get("std")}
+        stop_inr = tgt_inr = 0.0
+        if auto_exits:
+            saved = self._pos
+            try:
+                self._pos = pos                       # the levels read the position
+                stop_inr, tgt_inr = self._effective_exit_levels(p)
+            finally:
+                self._pos = saved
+        lv = self._spread_levels(p, tgt_inr, stop_inr, pos=pos) or {}
+        out["break_even"] = lv.get("break_even")
+        if lv.get("take_profit") is not None:
+            out.update(target_spread=lv["take_profit"], target_kind="₹")
+        if lv.get("stop") is not None:
+            out.update(stop_spread=lv["stop"], stop_kind="₹")
+        mean, sd = sig.get("mean"), sig.get("std")
+        if mean is not None and sd:
+            d = -1.0 if pos.get("direction") == "LONG_SPREAD" else 1.0   # SHORT sits above
+            ez = float(p.get("exit_zscore", 0.0) or 0.0)
+            sz = float(p.get("stop_zscore", 0.0) or 0.0)
+            if out["target_spread"] is None:
+                out.update(target_spread=round(float(mean) + d * ez * float(sd), 4), target_kind="z")
+            if out["stop_spread"] is None and sz > 0:
+                out.update(stop_spread=round(float(mean) + d * sz * float(sd), 4), stop_kind="z")
+        return out
 
     @staticmethod
     def _accepted(fn, kw: Dict) -> Dict:
@@ -1187,6 +1225,11 @@ class ArrowAutoTrader:
                             self._pos.get("entry_std"), self._round_trip_cost(p))
             except Exception:                        # noqa: BLE001 — log-only path
                 pass
+            if self._on_entered is not None:
+                try:
+                    self._on_entered(self.entry_levels(p, self._pos, self._signal() or {}))
+                except Exception:                    # noqa: BLE001 — never block an entry
+                    self._log.exception("ArrowAlgo: recording entry levels failed")
         else:
             self.last_error = f"entry failed: {res.get('error')}"
             self._log.error("ArrowAlgo: ENTER failed — {}", res.get("error"))

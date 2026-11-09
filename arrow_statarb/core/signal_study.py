@@ -63,8 +63,13 @@ class SignalStudy:
     def __init__(self, path: Optional[Path], signal_provider: Callable[[], Dict],
                  params_provider: Callable[[], Dict],
                  prices_provider: Optional[Callable] = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 pair_provider: Optional[Callable[[], Optional[str]]] = None,
+                 source: str = "live"):
         self._path = Path(path) if path else None
+        self._pair = pair_provider or (lambda: None)
+        self._source = source                  # "live" | "replayed"
+        self._live_since: Optional[float] = None
         self._signal = signal_provider
         self._params = params_provider
         self._clock = clock
@@ -80,8 +85,11 @@ class SignalStudy:
         self._algo = ArrowAutoTrader(
             signal_provider=self._signal, params_provider=self._paper_params,
             execute_fn=self._paper_open, close_fn=self._paper_close,
-            clock=clock, prices_provider=prices_provider, log=_Quiet())
+            clock=clock, prices_provider=prices_provider, log=_Quiet(),
+            on_entered=self._paper_entered)
         self._load()
+        if self._live_since is None:
+            self._live_since = clock()        # the live record starts now
 
     # ── the paper algo's world ──────────────────────────────────────────────
     def _paper_params(self) -> Dict:
@@ -126,6 +134,13 @@ class SignalStudy:
         self._save(force=True)
         return {"success": True, "dry_run": True, "results": [], "message": "paper",
                 "fill_spread": spread}
+
+    def _paper_entered(self, levels: Dict) -> None:
+        """The paper position's break-even / target / stop, as the algo set them."""
+        row = self._row(self._open_id)
+        if row is not None:
+            row.update({k: (_r(v) if isinstance(v, (int, float)) else v)
+                        for k, v in (levels or {}).items()})
 
     def _paper_close(self, direction: str, lots: int, reason: str = "",
                      z: Optional[float] = None, spread: Optional[float] = None,
@@ -245,7 +260,8 @@ class SignalStudy:
     # ── rows ────────────────────────────────────────────────────────────────
     def _new_row(self, side: Optional[str], p: Dict) -> Dict:
         now = self._clock()
-        row = {"id": self._next_id, "source": "live", "side": side or "SHORT",
+        row = {"id": self._next_id, "source": self._source, "side": side or "SHORT",
+               "pair": self._pair(),
                "entry_mode": str(p.get("entry_mode") or "touch"),
                "lots": max(1, int(p.get("lots", 1) or 1)), "lot_size": None,
                "armed_ts": None, "armed_z": None, "peak_z": None,
@@ -284,6 +300,10 @@ class SignalStudy:
             return
         self._rows = rows
         self._next_id = max([int(r.get("id", 0)) for r in rows] + [0]) + 1
+        try:
+            self._live_since = float(st.get("live_since")) if st.get("live_since") else None
+        except (TypeError, ValueError):
+            self._live_since = None
         for r in rows:                                # an arming ends with the process
             if r.get("status") == "armed":
                 r.update(status="never_back", lost_reason="restart")
@@ -308,7 +328,7 @@ class SignalStudy:
         if not force and now - self._saved_at < SAVE_EVERY_SEC:
             return
         body = {"version": 2, "rows": self._rows[-MAX_ROWS:],
-                "state": {"open_id": self._open_id,
+                "state": {"open_id": self._open_id, "live_since": self._live_since,
                           "paper_position": self._algo._pos,
                           "cooldown_until": self._algo._cooldown_until}}
         try:
@@ -321,16 +341,119 @@ class SignalStudy:
             logger.warning("SignalStudy: could not save — {}", exc)
 
     # ── reading ─────────────────────────────────────────────────────────────
-    def report(self, range_key: str = "1d", now: Optional[float] = None) -> Dict:
+    def report(self, range_key: str = "1d", now: Optional[float] = None,
+               day: Optional[str] = None, pair: Optional[str] = None) -> Dict:
+        """Rows for a rolling range (1d | 7d | 30d | all), or one IST trading
+        DAY ('YYYY-MM-DD', which wins over the range), optionally one pair."""
         now = self._clock() if now is None else now
         span = RANGES.get(range_key, RANGES["1d"])
+        lo = hi = None
+        if day:
+            try:
+                y, m, d = (int(x) for x in day.split("-"))
+                import calendar
+                lo = calendar.timegm((y, m, d, 0, 0, 0)) - IST_OFFSET
+                hi = lo + 86400
+            except Exception:                              # noqa: BLE001
+                lo = hi = None
         with self._lock:
             rows = [dict(r) for r in self._rows
-                    if span is None or float(r.get("entry_ts") or 0) >= now - span]
+                    if (lo is not None and lo <= float(r.get("entry_ts") or 0) < hi)
+                    or (lo is None and (span is None or float(r.get("entry_ts") or 0) >= now - span))]
+            pairs = sorted({str(r.get("pair")) for r in self._rows if r.get("pair")})
             status = self._algo.get_state().get("status")
-        return {"range": range_key if range_key in RANGES else "1d",
-                "rows": list(reversed(rows)), "summary": summarize(rows),
-                "paper_status": status}
+            derived = [r for r in self._rows if r.get("source") == "replayed"]
+        if pair:
+            rows = [r for r in rows if r.get("pair") == pair]
+        rows.sort(key=lambda r: float(r.get("entry_ts") or 0))
+        return {"range": range_key if range_key in RANGES else "1d", "day": day if lo else None,
+                "rows": list(reversed(rows)), "summary": summarize(rows), "pairs": pairs,
+                "paper_status": status, "live_since": self._live_since,
+                "derived": {"count": len(derived),
+                            "from": min((r["entry_ts"] for r in derived), default=None),
+                            "to": max((r["entry_ts"] for r in derived), default=None)}}
+
+    @property
+    def live_since(self) -> float:
+        """Where the live record begins: a derived row is only ever earlier."""
+        live = [float(r["entry_ts"]) for r in self._rows
+                if r.get("source") != "replayed" and r.get("entry_ts")]
+        return min([self._live_since or self._clock()] + live)
+
+    def replace_derived(self, rows: List[Dict]) -> int:
+        """Swap in a fresh set of replayed rows: every earlier replayed row
+        goes, every live row stays untouched, and only rows from BEFORE the
+        live record began are kept (the two never overlap or double-count)."""
+        with self._lock:
+            until = self.live_since
+            keep = [r for r in self._rows if r.get("source") != "replayed"]
+            new = []
+            for r in rows:
+                if float(r.get("entry_ts") or 0) >= until:
+                    continue
+                r = dict(r, source="replayed", id=self._next_id)
+                if r.get("status") in ("open", "armed"):
+                    r["status"] = "running" if r["status"] == "open" else "never_back"
+                self._next_id += 1
+                new.append(r)
+            self._rows = sorted(keep + new, key=lambda r: float(r.get("entry_ts") or 0))
+            self._save(force=True)
+        return len(new)
+
+
+def replay_candles(bars: List, params: Dict, tf: str, tf_sec: int, length: int,
+                   k: float = 1.0, pair: Optional[str] = None) -> List[Dict]:
+    """Run the paper algo over candle history, one look per closed candle.
+
+    ``bars``: [(bucket_start, close_a, close_b, ...)] from candles.align_legs.
+    The bands are the algo's own candle bands — BB(length) with an EMA basis
+    and population σ, the current candle included — evaluated at each candle's
+    close; the paper algo's clock is the candle's close time. What it cannot
+    see: anything inside a candle (a stop touched and recovered within one is
+    missed), bid/ask (it trades at the candle close), the trading-hours and
+    regime gates (candles exist only while the market is open)."""
+    from arrow_statarb.core.candles import pine_stdev
+    n = max(2, int(length))
+    closes = [k * float(b[1]) - float(b[2]) for b in bars]
+    alpha = 2.0 / (n + 1.0)
+    means: List[Optional[float]] = []
+    stds: List[Optional[float]] = []
+    ema = None
+    for i, c in enumerate(closes):
+        if i + 1 >= n:
+            ema = sum(closes[:n]) / n if ema is None else alpha * c + (1.0 - alpha) * ema
+            means.append(ema)
+            stds.append(pine_stdev(closes[:i + 1], n))
+        else:
+            means.append(None)
+            stds.append(None)
+    cur = {"i": 0}
+
+    def sig() -> Dict:
+        i = cur["i"]
+        m, sd, c = means[i], stds[i], closes[i]
+        ready = m is not None and sd is not None and sd > 1e-12
+        out = {"spread": c, "leg_a": float(bars[i][1]), "leg_b": float(bars[i][2]),
+               "ready": ready, "band_source": "candles", "band_timeframe": tf,
+               "band_length": n, "half_life": 0.0, "half_life_sec": 0.0,
+               "sample_interval_sec": float(tf_sec), "regime": None, "regime_detail": {},
+               "candles_have": i + 1, "candles_need": n}
+        if ready:
+            out.update(zscore=(c - m) / sd, mean=m, std=sd,
+                       bands={tf: {"mean": m, "std": sd}})
+        else:
+            out.update(zscore=None, mean=None, std=None)
+        return out
+
+    p = dict(params)
+    p.update(trading_hours={"enabled": False}, no_entry_buffer_min=0,
+             regime_enabled=False, max_entry_spread_divergence=0)
+    study = SignalStudy(None, sig, lambda: p, clock=lambda: float(bars[cur["i"]][0]) + tf_sec,
+                        pair_provider=lambda: pair, source="replayed")
+    for i in range(len(bars)):
+        cur["i"] = i
+        study.tick()
+    return study._rows
 
 
 def _r(v, d: int = 4):
@@ -339,7 +462,7 @@ def _r(v, d: int = 4):
 
 def summarize(rows: List[Dict]) -> Dict:
     """Totals over the rows given. Unmeasured is None, never zero."""
-    taken = [r for r in rows if r.get("status") in ("open", "closed")]
+    taken = [r for r in rows if r.get("status") in ("open", "closed", "running")]
     closed = [r for r in taken if r.get("status") == "closed"]
     measured = [r for r in closed if r.get("net") is not None]
     won = [r for r in measured if r["result"] == "won"]
@@ -367,7 +490,7 @@ def summarize(rows: List[Dict]) -> Dict:
 
     by_reason: Dict[str, Dict] = {}
     for r in closed:
-        b = by_reason.setdefault(r["exit_reason"], {"count": 0, "won": 0, "lost": 0,
+        b = by_reason.setdefault(r.get("exit_reason") or "exit", {"count": 0, "won": 0, "lost": 0,
                                                      "net": None, "avg_hold_sec": None})
         b["count"] += 1
         if r.get("result") == "won":
@@ -375,8 +498,8 @@ def summarize(rows: List[Dict]) -> Dict:
         elif r.get("result") == "lost":
             b["lost"] += 1
     for k, b in by_reason.items():
-        b["net"] = _sum([r for r in measured if r["exit_reason"] == k], "net")
-        b["avg_hold_sec"] = _avg([r for r in closed if r["exit_reason"] == k], "held_sec")
+        b["net"] = _sum([r for r in measured if (r.get("exit_reason") or "exit") == k], "net")
+        b["avg_hold_sec"] = _avg([r for r in closed if (r.get("exit_reason") or "exit") == k], "held_sec")
 
     reasons: Dict[str, int] = {}
     for r in filtered:

@@ -50,10 +50,12 @@
             <button class="btn btn-outline-secondary" data-r="30d">30D</button>
             <button class="btn btn-outline-secondary" data-r="all">All</button>
         </div>
+        <button class="btn btn-sm btn-outline-primary" id="an-derive" style="font-size:.75rem"
+                title="Replay the last 30 days of Arrow's candles through the paper algo — fills the blotter with the history before the live record began">Derive 30 days</button>
     </div>
 </div>
 <div class="an-rules mb-1" id="an-rules">—</div>
-<div class="an-sub mb-3" id="an-paper"></div>
+<div class="an-sub mb-3"><span id="an-paper"></span> <span id="an-derive-msg" class="ms-2"></span></div>
 
 <div class="kpis mb-3">
     <div class="kpi"><div class="l">Signals</div><div class="v" id="k-signals">—</div><div class="s" id="k-signals-s">&nbsp;</div></div>
@@ -622,6 +624,8 @@
                   (r.filter_reason ? `<div class="small text-secondary" style="white-space:normal;max-width:22rem">held back by: ${r.filter_reason}</div>` : '')
                 : `<span class="chip chip-${r.status === 'open' ? 'open' : 'none'}">${r.status}</span>`;
             const waiting = r.status === 'armed' || r.status === 'never_back';
+            const from = r.source === 'replayed'
+                ? ' <span class="chip chip-armed" title="Replayed from Arrow\'s candles: one look per candle, at the candle close, no bid/ask">replayed</span>' : '';
             const restart = r.crossed_restart ? ' <i class="bi bi-arrow-repeat text-warning" title="Open across a restart — followed on the new window\'s z"></i>' : '';
             const res = r.result ? `<span class="chip chip-${r.result}">${r.result.toUpperCase()}</span>`
                 : (r.status === 'closed' ? '<span class="chip chip-none" title="lot size unknown — no money measured">unmeasured</span>' : DASH);
@@ -630,7 +634,7 @@
                 <td class="num">${r.armed_z == null ? DASH : _num(r.armed_z) + ' · ' + _num(r.peak_z)}</td>
                 <td>${waiting ? DASH : _ts(r.entry_ts)}</td><td class="num">${waiting ? DASH : _num(r.entry_z)}</td>
                 <td class="num">${waiting ? DASH : _num(r.entry_spread)}</td><td class="num">${waiting ? DASH : pw}</td>
-                <td>${status}${restart}</td><td>${_tsNear(r.exit_ts, r.entry_ts)}</td><td>${r.exit_reason ? (EXIT_LABEL[r.exit_reason] || r.exit_reason) : DASH}</td>
+                <td>${status}${from}${restart}</td><td>${_tsNear(r.exit_ts, r.entry_ts)}</td><td>${r.exit_reason ? (EXIT_LABEL[r.exit_reason] || r.exit_reason) : DASH}</td>
                 <td class="num">${_num(r.exit_z)}</td><td class="num">${_num(r.exit_spread)}</td><td class="num">${_held(r.held_sec)}</td>
                 <td class="num ${_pnlCls(r.mae_inr)}">${_rs(r.mae_inr)}</td><td class="num ${_pnlCls(r.mfe_inr)}">${_rs(r.mfe_inr)}</td>
                 <td class="num ${_pnlCls(r.gross)}">${_rs(r.gross)}</td>
@@ -638,10 +642,28 @@
         }).join('');
     }
 
+    let autoDerived = false;
+    async function derive(auto) {
+        const r = await fetch('/api/analysis/derive', {method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({days: 30})}).then(x => x.json()).catch(e => ({success: false, error: String(e)}));
+        _set('an-derive-msg', r.success ? (auto ? 'nothing recorded yet — ' : '') + r.message : r.error);
+        setTimeout(loadStudy, 2000);
+    }
+    document.getElementById('an-derive').addEventListener('click', () => derive(false));
+
     async function loadStudy() {
         try {
             const d = await fetch('/api/analysis/signals?range=' + encodeURIComponent(range), {cache: 'no-store'}).then(r => r.json());
             renderSummary(d); renderBlotter(d.rows || []);
+            const job = d.derive_job || {};
+            if (job.state && job.state !== 'idle') _set('an-derive-msg', job.message || '');
+            document.getElementById('an-derive').disabled = job.state === 'running';
+            // an empty blotter with no history yet: fill it once, by itself
+            if (!autoDerived && (d.derived || {}).count === 0 && !(d.summary || {}).signals
+                    && (d.rules || {}).band_source === 'candles' && job.state === 'idle') {
+                autoDerived = true;
+                derive(true);
+            }
             _set('an-updated', 'updated ' + _IST.format(new Date()).split(' ').pop());
         } catch (e) { _set('an-updated', 'not answering'); }
     }
