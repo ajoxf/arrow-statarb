@@ -3,7 +3,131 @@
 {% block nav_analysis %}active{% endblock %}
 
 {% block content %}
-<h3 class="mb-3"><i class="bi bi-bar-chart me-2"></i>Analysis</h3>
+<style>
+    .an-head { display:flex; flex-wrap:wrap; gap:.75rem 1.5rem; align-items:flex-end; justify-content:space-between; }
+    .an-title { font-size:1.35rem; font-weight:600; letter-spacing:.01em; }
+    .an-sub { font-size:.8rem; color:var(--bs-secondary-color); }
+    .an-rules { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.74rem; color:var(--bs-secondary-color);
+                border:1px solid var(--bs-border-color); border-radius:.375rem; padding:.45rem .7rem; background:var(--bs-tertiary-bg); }
+    .an-rules b { color:var(--bs-body-color); font-weight:600; }
+    .kpis { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); border:1px solid var(--bs-border-color); border-radius:.375rem; overflow:hidden; }
+    .kpi { padding:.65rem .8rem; border-right:1px solid var(--bs-border-color); border-bottom:1px solid var(--bs-border-color); background:var(--bs-body-bg); }
+    .kpi:nth-child(6n) { border-right:0; }
+    .kpi .v { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:1.2rem; font-weight:600; line-height:1.25; white-space:nowrap; }
+    .kpi .l { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; color:var(--bs-secondary-color); }
+    .kpi .s { font-size:.72rem; color:var(--bs-secondary-color); font-family:ui-monospace,monospace; }
+    @media (max-width: 992px) { .kpis { grid-template-columns:repeat(3, minmax(0,1fr)); } .kpi:nth-child(6n){border-right:1px solid var(--bs-border-color);} .kpi:nth-child(3n){border-right:0;} }
+    .an-card { border:1px solid var(--bs-border-color); border-radius:.375rem; background:var(--bs-body-bg); }
+    .an-card > .h { display:flex; justify-content:space-between; align-items:center; gap:.5rem; padding:.5rem .75rem;
+                    border-bottom:1px solid var(--bs-border-color); font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
+    .an-card > .h .note { text-transform:none; letter-spacing:0; font-weight:400; color:var(--bs-secondary-color); }
+    .blot { font-size:.78rem; }
+    .blot th { font-size:.68rem; text-transform:uppercase; letter-spacing:.04em; color:var(--bs-secondary-color); font-weight:600; white-space:nowrap; }
+    .blot td { white-space:nowrap; }
+    .blot > :not(caption) > * > * { padding:.25rem .3rem; }
+    .blot .num { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-align:right; }
+    .blot tr.filtered td { color:var(--bs-secondary-color); }
+    .chip { font-size:.7rem; padding:.1rem .45rem; border-radius:.25rem; font-weight:600; letter-spacing:.02em; }
+    .chip-short { background:rgba(220,53,69,.12); color:#b02a37; } .chip-long { background:rgba(13,110,253,.12); color:#0a58ca; }
+    .chip-won { background:rgba(25,135,84,.14); color:#146c43; } .chip-lost { background:rgba(220,53,69,.14); color:#b02a37; }
+    .chip-flat, .chip-open, .chip-filtered, .chip-none { background:var(--bs-tertiary-bg); color:var(--bs-secondary-color); }
+    .chip-armed { background:rgba(255,193,7,.22); color:#8a6d00; } .chip-never { background:rgba(108,117,125,.16); color:#495057; }
+    .chip-live { background:rgba(25,135,84,.14); color:#146c43; }
+    .limits { font-size:.72rem; color:var(--bs-secondary-color); }
+    .seg .btn { font-size:.75rem; padding:.2rem .65rem; }
+</style>
+<div class="an-head mb-2">
+    <div>
+        <div class="an-title"><i class="bi bi-bar-chart-line me-2"></i>Signal Analysis</div>
+        <div class="an-sub"><span id="an-pair">—</span> · a paper copy of the algo on the live signal — it runs whether the algo is ON or not
+            <span class="chip chip-live ms-1" title="Every row was recorded from the live z as it happened">LIVE-MEASURED</span></div>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <span class="an-sub" id="an-updated">—</span>
+        <div class="btn-group seg" role="group" id="an-range">
+            <button class="btn btn-outline-secondary" data-r="1d">1D</button>
+            <button class="btn btn-outline-secondary" data-r="7d">7D</button>
+            <button class="btn btn-outline-secondary" data-r="30d">30D</button>
+            <button class="btn btn-outline-secondary" data-r="all">All</button>
+        </div>
+    </div>
+</div>
+<div class="an-rules mb-1" id="an-rules">—</div>
+<div class="an-sub mb-3" id="an-paper"></div>
+
+<div class="kpis mb-3">
+    <div class="kpi"><div class="l">Signals</div><div class="v" id="k-signals">—</div><div class="s" id="k-signals-s">&nbsp;</div></div>
+    <div class="kpi"><div class="l">Won / Lost / Flat</div><div class="v" id="k-wl">—</div><div class="s" id="k-wl-s">&nbsp;</div></div>
+    <div class="kpi"><div class="l">Win rate</div><div class="v" id="k-wr">—</div><div class="s">won ÷ (won + lost), in money</div></div>
+    <div class="kpi"><div class="l">Net P&amp;L</div><div class="v" id="k-net">—</div><div class="s" id="k-net-s">&nbsp;</div></div>
+    <div class="kpi"><div class="l">Profit factor</div><div class="v" id="k-pf">—</div><div class="s">Σ wins ÷ |Σ losses|</div></div>
+    <div class="kpi"><div class="l">Expectancy</div><div class="v" id="k-exp">—</div><div class="s">net per settled signal</div></div>
+    <div class="kpi"><div class="l">Avg win</div><div class="v" id="k-aw">—</div><div class="s">net</div></div>
+    <div class="kpi"><div class="l">Avg loss</div><div class="v" id="k-al">—</div><div class="s">net</div></div>
+    <div class="kpi"><div class="l">Max drawdown</div><div class="v" id="k-dd">—</div><div class="s">peak-to-trough, net</div></div>
+    <div class="kpi"><div class="l">Avg hold</div><div class="v" id="k-hold">—</div><div class="s">entry → exit</div></div>
+    <div class="kpi"><div class="l">Avg MAE / MFE</div><div class="v" id="k-mae">—</div><div class="s">worst / best while open</div></div>
+    <div class="kpi"><div class="l">Armed → entered</div><div class="v" id="k-armed">—</div><div class="s" id="k-armed-s">&nbsp;</div></div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-lg-8">
+        <div class="an-card h-100">
+            <div class="h"><span>Equity — cumulative net P&amp;L</span><span class="note">settled signals, in exit order</span></div>
+            <div class="p-2" style="height:240px"><canvas id="eq-canvas"></canvas>
+                <div id="eq-empty" class="text-center text-secondary small d-none" style="margin-top:-140px">No settled signals in this range</div></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="an-card h-100">
+            <div class="h"><span>By exit</span><span class="note">stop is checked before target</span></div>
+            <table class="table table-sm blot mb-0">
+                <thead><tr><th class="ps-3">Exit</th><th class="num">N</th><th class="num">Won</th><th class="num">Lost</th><th class="num">Net ₹</th><th class="num pe-3">Avg hold</th></tr></thead>
+                <tbody id="ex-body"></tbody>
+            </table>
+            <div class="h border-top"><span>Filtered out</span><span class="note">the algo's gates, in its order</span></div>
+            <table class="table table-sm blot mb-0"><tbody id="fr-body"></tbody></table>
+        </div>
+    </div>
+</div>
+
+<div class="an-card mb-3">
+    <div class="h">
+        <span>Signal blotter <span class="note ms-1" id="bl-count"></span></span>
+        <div class="btn-group seg" id="bl-filter">
+            <button class="btn btn-outline-secondary active" data-f="all">All</button>
+            <button class="btn btn-outline-secondary" data-f="taken">Taken</button>
+            <button class="btn btn-outline-secondary" data-f="filtered">Filtered</button>
+            <button class="btn btn-outline-secondary" data-f="open">Open</button>
+            <button class="btn btn-outline-secondary" data-f="never_back">Never back</button>
+        </div>
+    </div>
+    <div class="table-responsive" style="max-height:460px; overflow-y:auto;">
+        <table class="table table-sm table-hover blot mb-0 align-middle">
+            <thead class="sticky-top" style="background:var(--bs-body-bg)"><tr>
+                <th class="ps-3">#</th><th>Side</th><th title="When the stretch armed (re-entry mode)">Armed (IST)</th>
+                <th class="num" title="z when it armed · furthest z while armed">Armed z · peak</th>
+                <th>Entry (IST)</th><th class="num">Entry z</th><th class="num">Entry spread</th>
+                <th class="num" title="Probability filter's win probability / expected value at entry">P(win) · EV</th>
+                <th>Status</th><th>Exit (IST)</th><th>Exit</th><th class="num">Exit z</th><th class="num">Exit spread</th>
+                <th class="num">Held</th><th class="num">MAE ₹</th><th class="num">MFE ₹</th><th class="num">Gross ₹</th>
+<th class="num" title="Gross − brokerage (hover a row's net for its costs)">Net ₹</th><th class="pe-3">Result</th>
+            </tr></thead>
+            <tbody id="bl-body"><tr><td colspan="19" class="text-center text-secondary py-3">—</td></tr></tbody>
+        </table>
+    </div>
+    <div class="limits px-3 py-2 border-top">
+        <b>Armed entries.</b> In re-entry mode a stretch to ±entry z (held for the confirmation samples) ARMS; the entry comes when z falls
+        back to entry − re-entry back, inside the window. A stretch that falls through the window floor without an entry <i>never came back</i>:
+        it has no money and counts in no win/loss tally. Arming is not carried across a restart, live or here.<br>
+        <b>Limits.</b> The rows come from a <b>paper copy of the algo itself</b> on the same signal, so every rule, gate and exit is the algo's own.
+        It fills at the decision spread the algo saw (the executable side when there is a book); slippage beyond the algo's own cost estimate is not modelled.
+        Its daily-loss and loss-streak gates read its own results, not the real trades. An open paper position survives a restart (<i class="bi bi-arrow-repeat"></i>); an arming does not.
+        A row without a known lot multiplier has no money and counts in no tally.
+    </div>
+</div>
+
+<div class="an-head mt-4 mb-2"><div class="an-title" style="font-size:1.1rem"><i class="bi bi-journal-check me-2"></i>Actual trading</div></div>
 <div class="card">
     <div class="card-header"><i class="bi bi-clipboard-data me-2"></i>Session Summary</div>
     <div class="card-body">
@@ -355,5 +479,174 @@
         } catch (e) {}
     }
     loadDrawdown(); setInterval(loadDrawdown, 3000);
+</script>
+<script>
+(function () {
+    const DASH = '—';
+    function _num(v, d = 2) { return (v == null || !isFinite(v)) ? DASH : Number(v).toFixed(d); }
+    function _rs(v) {                                   // unmeasured is not zero
+        if (v == null || !isFinite(v)) return DASH;
+        const n = Number(v), s = n < 0 ? '−' : '';
+        return s + '₹' + Math.abs(n).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+    function _pnlCls(v) { return (v == null) ? '' : (v > 0 ? 'text-success' : (v < 0 ? 'text-danger' : '')); }
+    function _arrow(a, b, d = 2) { return `${_num(a, d)} <span class="text-secondary">→</span> ${_num(b, d)}`; }
+    function _held(s) {
+        if (s == null) return DASH;
+        s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        return h ? `${h}h ${m}m` : (m ? `${m}m ${sec}s` : `${sec}s`);
+    }
+    const _IST = new Intl.DateTimeFormat('en-GB', {timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
+    function _ts(t) { return t == null ? DASH : _IST.format(new Date(t * 1000)).replace(',', ''); }
+    // the time alone when it falls on the same IST day as `ref`
+    function _tsNear(t, ref) {
+        if (t == null) return DASH;
+        const full = _ts(t);
+        return (ref != null && full.slice(0, 6) === _ts(ref).slice(0, 6)) ? full.slice(7) : full;
+    }
+    function _set(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+    function _setHtml(id, v) { const el = document.getElementById(id); if (el) el.innerHTML = v; }
+
+    // ── range + blotter filter (remembered per browser) ──────────────────────
+    let range = '1d', blFilter = 'all', lastRows = [];
+    try { range = localStorage.getItem('analysis.range') || '1d'; } catch (e) {}
+    function paintSeg(id, attr, val) {
+        document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle('active', b.dataset[attr] === val));
+    }
+    document.getElementById('an-range').addEventListener('click', e => {
+        const b = e.target.closest('button'); if (!b) return;
+        range = b.dataset.r; try { localStorage.setItem('analysis.range', range); } catch (e) {}
+        paintSeg('an-range', 'r', range); loadStudy();
+    });
+    document.getElementById('bl-filter').addEventListener('click', e => {
+        const b = e.target.closest('button'); if (!b) return;
+        blFilter = b.dataset.f; paintSeg('bl-filter', 'f', blFilter); renderBlotter(lastRows);
+    });
+    paintSeg('an-range', 'r', range);
+
+    // ── equity chart ─────────────────────────────────────────────────────────
+    const eqChart = new Chart(document.getElementById('eq-canvas'), {
+        type: 'line',
+        data: { labels: [], datasets: [{ data: [], borderColor: '#0d6efd', borderWidth: 1.6, pointRadius: 2,
+                 fill: { target: 'origin', above: 'rgba(25,135,84,.10)', below: 'rgba(220,53,69,.10)' }, stepped: true }] },
+        options: { responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: { legend: { display: false },
+                tooltip: { callbacks: { label: c => 'cum net ' + _rs(c.parsed.y) } } },
+            scales: { x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+                      y: { ticks: { font: { size: 10 }, callback: v => _rs(v) } } } },
+    });
+
+    const EXIT_LABEL = { target: 'Target', stop: 'Stop', time_stop: 'Time stop' };
+    function renderSummary(d) {
+        const s = d.summary || {}, r = d.rules || {};
+        _set('an-pair', d.pair || 'no pair assigned');
+        _setHtml('an-rules',
+            (r.band_source === 'candles'
+                ? `z on <b>${r.band_timeframe || ''} candles</b> · BB(${r.band_length ?? DASH}, EMA basis), population σ — the algo's bands`
+                : `z = (spread − mean) ÷ σ over <b>${_num(r.window_minutes, 0)} min</b> of samples every <b>${_num(r.sample_interval_sec, 1)} s</b>` +
+                  ` · σ sample (ddof 1) · simple mean · counted after <b>${_num(r.min_signal_minutes, 0)} min</b> warm-up`) +
+            (r.trade_direction && r.trade_direction !== 'both' ? ` · <b>${r.trade_direction.replace('_', ' ')}</b>` : '') +
+            (r.entry_mode === 'reentry'
+                ? ` &nbsp;|&nbsp; <b>armed</b> at ±${_num(r.entry_zscore, 1)} after <b>${r.confirmation_ticks ?? DASH}</b> samples,` +
+                  ` enters back at <b>±${_num(r.entry_zscore - r.reentry_back, 2)}</b>` +
+                  ` (window to ±${_num((r.entry_zscore - r.reentry_back) * (1 - r.reentry_window_pct / 100), 2)})`
+                : ` &nbsp;|&nbsp; entry <b>at the touch</b> ±${_num(r.entry_zscore, 1)} after <b>${r.confirmation_ticks ?? DASH}</b> samples`) +
+            ` · exit <b>${_num(r.exit_zscore, 1)}</b> · stop <b>±${_num(r.stop_zscore, 1)}</b> (checked first)` +
+            ` · time-stop <b>${_num(r.time_stop_half_lives, 1)}</b> half-lives · cooldown <b>${_num(r.cooldown, 0)} s</b>` +
+            ` · costs: the algo's own estimate · prob. filter <b>${r.enable_probability_filter ? 'on' : 'off'}</b>`);
+        _set('an-paper', d.paper_status ? 'paper algo: ' + d.paper_status : '');
+        _set('k-signals', s.signals ?? DASH);
+        _set('k-signals-s', `${s.taken ?? 0} taken · ${s.filtered ?? 0} filtered · ${s.never_back ?? 0} never back`);
+        const decided = (s.won || 0) + (s.lost || 0) + (s.flat || 0);
+        _set('k-wl', decided ? `${s.won} / ${s.lost} / ${s.flat}` : DASH);
+        _set('k-wl-s', s.unmeasured ? `${s.unmeasured} without a lot size` : `${s.closed ?? 0} settled`);
+        _set('k-wr', s.win_rate == null ? DASH : s.win_rate.toFixed(1) + '%');
+        const net = document.getElementById('k-net'); net.textContent = _rs(s.net); net.className = 'v ' + _pnlCls(s.net);
+        _set('k-net-s', s.gross == null ? ' ' : `gross ${_rs(s.gross)} · costs ${_rs(s.costs)}`);
+        _set('k-pf', s.profit_factor == null ? (s.won && !s.lost ? '∞' : DASH) : s.profit_factor.toFixed(2));
+        const ex = document.getElementById('k-exp'); ex.textContent = _rs(s.expectancy); ex.className = 'v ' + _pnlCls(s.expectancy);
+        const aw = document.getElementById('k-aw'); aw.textContent = _rs(s.avg_win); aw.className = 'v ' + _pnlCls(s.avg_win);
+        const al = document.getElementById('k-al'); al.textContent = _rs(s.avg_loss); al.className = 'v ' + _pnlCls(s.avg_loss);
+        const dd = document.getElementById('k-dd'); dd.textContent = s.max_drawdown == null ? DASH : _rs(-s.max_drawdown);
+        dd.className = 'v ' + (s.max_drawdown ? 'text-danger' : '');
+        _set('k-hold', _held(s.avg_hold_sec));
+        _set('k-mae', (s.avg_mae == null && s.avg_mfe == null) ? DASH : `${_rs(s.avg_mae)} / ${_rs(s.avg_mfe)}`);
+        if ((d.rules || {}).entry_mode === 'reentry' || s.armed) {
+            _set('k-armed', s.armed ? `${s.armed} → ${s.taken}` : DASH);
+            _set('k-armed-s', `${s.never_back ?? 0} never came back · ${s.armed_now ?? 0} armed now · ${s.open ?? 0} open`);
+        } else {
+            _set('k-armed', DASH); _set('k-armed-s', `at the touch · ${s.open ?? 0} open`);
+        }
+
+        const eq = s.equity || [];
+        eqChart.data.labels = eq.map(p => _ts(p.ts));
+        eqChart.data.datasets[0].data = eq.map(p => p.cum);
+        eqChart.update();
+        document.getElementById('eq-empty').classList.toggle('d-none', eq.length > 0);
+
+        const be = s.by_exit || {};
+        const keys = Object.keys(be);
+        _setHtml('ex-body', keys.length ? keys.map(k => {
+            const b = be[k];
+            return `<tr><td class="ps-3">${EXIT_LABEL[k] || k}</td><td class="num">${b.count}</td><td class="num">${b.won}</td>
+                <td class="num">${b.lost}</td><td class="num ${_pnlCls(b.net)}">${_rs(b.net)}</td><td class="num pe-3">${_held(b.avg_hold_sec)}</td></tr>`;
+        }).join('') : `<tr><td colspan="6" class="text-center text-secondary py-2">${DASH}</td></tr>`);
+        const fr = s.filter_reasons || {};
+        _setHtml('fr-body', Object.keys(fr).length ? Object.keys(fr).map(k =>
+            `<tr><td class="ps-3">${k}</td><td class="num pe-3">${fr[k]}</td></tr>`).join('')
+            : `<tr><td class="text-center text-secondary py-2">${DASH}</td></tr>`);
+    }
+
+    function renderBlotter(rows) {
+        lastRows = rows;
+        const pick = rows.filter(r => blFilter === 'all' ? true
+            : blFilter === 'taken' ? (r.status === 'open' || r.status === 'closed')
+            : r.status === blFilter);
+        _set('bl-count', `${pick.length} of ${rows.length}`);
+        const body = document.getElementById('bl-body');
+        if (!pick.length) {
+            body.innerHTML = `<tr><td colspan="19" class="text-center text-secondary py-3">No signals in this range</td></tr>`;
+            return;
+        }
+        body.innerHTML = pick.map(r => {
+            const side = `<span class="chip chip-${r.side.toLowerCase()}">${r.side}</span>`;
+            const pw = r.win_probability == null ? DASH
+                : `${(r.win_probability * 100).toFixed(0)}% · ${_rs(r.expected_value)}`;
+            const status = r.status === 'filtered'
+                ? `<span class="chip chip-filtered" title="blocked for ${r.blocked_samples || 1} sample(s)">filtered: ${r.filter_reason}</span>`
+                : r.status === 'armed'
+                ? `<span class="chip chip-armed" title="waiting for z to come back inside the band">armed${r.filter_reason ? ' · blocked: ' + r.filter_reason : ''}</span>`
+                : r.status === 'never_back'
+                ? `<span class="chip chip-never" title="${r.lost_reason || ''}">never came back${r.lost_reason === 'restart' ? ' (restart)' : ''}</span>` +
+                  (r.filter_reason ? `<div class="small text-secondary" style="white-space:normal;max-width:22rem">held back by: ${r.filter_reason}</div>` : '')
+                : `<span class="chip chip-${r.status === 'open' ? 'open' : 'none'}">${r.status}</span>`;
+            const waiting = r.status === 'armed' || r.status === 'never_back';
+            const restart = r.crossed_restart ? ' <i class="bi bi-arrow-repeat text-warning" title="Open across a restart — followed on the new window\'s z"></i>' : '';
+            const res = r.result ? `<span class="chip chip-${r.result}">${r.result.toUpperCase()}</span>`
+                : (r.status === 'closed' ? '<span class="chip chip-none" title="lot size unknown — no money measured">unmeasured</span>' : DASH);
+            return `<tr class="${r.status}">
+                <td class="ps-3 num">${r.id}</td><td>${side}</td><td>${_tsNear(r.armed_ts, waiting ? null : r.entry_ts)}</td>
+                <td class="num">${r.armed_z == null ? DASH : _num(r.armed_z) + ' · ' + _num(r.peak_z)}</td>
+                <td>${waiting ? DASH : _ts(r.entry_ts)}</td><td class="num">${waiting ? DASH : _num(r.entry_z)}</td>
+                <td class="num">${waiting ? DASH : _num(r.entry_spread)}</td><td class="num">${waiting ? DASH : pw}</td>
+                <td>${status}${restart}</td><td>${_tsNear(r.exit_ts, r.entry_ts)}</td><td>${r.exit_reason ? (EXIT_LABEL[r.exit_reason] || r.exit_reason) : DASH}</td>
+                <td class="num">${_num(r.exit_z)}</td><td class="num">${_num(r.exit_spread)}</td><td class="num">${_held(r.held_sec)}</td>
+                <td class="num ${_pnlCls(r.mae_inr)}">${_rs(r.mae_inr)}</td><td class="num ${_pnlCls(r.mfe_inr)}">${_rs(r.mfe_inr)}</td>
+                <td class="num ${_pnlCls(r.gross)}">${_rs(r.gross)}</td>
+                <td class="num fw-semibold ${_pnlCls(r.net)}" title="${r.costs == null ? '' : 'costs ' + _rs(r.costs)}">${_rs(r.net)}</td><td class="pe-3">${res}</td></tr>`;
+        }).join('');
+    }
+
+    async function loadStudy() {
+        try {
+            const d = await fetch('/api/analysis/signals?range=' + encodeURIComponent(range), {cache: 'no-store'}).then(r => r.json());
+            renderSummary(d); renderBlotter(d.rows || []);
+            _set('an-updated', 'updated ' + _IST.format(new Date()).split(' ').pop());
+        } catch (e) { _set('an-updated', 'not answering'); }
+    }
+
+    loadStudy(); setInterval(loadStudy, 3000);
+})();
 </script>
 {% endblock %}

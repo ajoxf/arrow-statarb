@@ -35,6 +35,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
+from arrow_statarb.core.signal_study import SignalStudy, RANGES as STUDY_RANGES
 from arrow_statarb.core.working_orders import WorkingOrders
 from arrow_statarb.core.candles import SpreadCandles, TIMEFRAMES, TF_LABELS, normalise_tf
 from arrow_statarb.core.algo import ArrowAutoTrader
@@ -74,6 +75,10 @@ EXECUTION_LOG_FILE = PROJECT_ROOT / "data" / "execution_log.jsonl"
 UNTRACKED_FILE = PROJECT_ROOT / "data" / "untracked_closes.json"
 SHADOW_FILE = PROJECT_ROOT / "data" / "whatif_shadow.json"
 HEARTBEAT_FILE = PROJECT_ROOT / "data" / "heartbeat.txt"
+# The z-score excursion tally and its arming state (survive a restart).
+EXCURSIONS_FILE = PROJECT_ROOT / "data" / "excursions.json"
+# The signal study: a paper copy of the algo, settled in money.
+SIGNAL_STUDY_FILE = PROJECT_ROOT / "data" / "signal_study.json"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -980,7 +985,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
                                  persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key,
                                  book_provider=_leg_book, session_provider=_session_open,
-                                 candles=spread_candles)
+                                 candles=spread_candles, excursions_path=EXCURSIONS_FILE)
 
     def _candle_backfill_loop() -> None:
         """Back-fill candle history once Arrow is connected and the master is
@@ -1094,6 +1099,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
             "stop_zscore": float(s.get("stop_zscore", 4.0)),
             "confirmation_ticks": int(s.get("confirmation_ticks", 1)),
+            # entry on the way BACK inside the band (armed), or at the touch
+            "entry_mode": str(s.get("entry_mode", "reentry")),
+            "reentry_back": float(s.get("reentry_back", 0.5)),
+            "reentry_window_pct": float(s.get("reentry_window_pct", 50.0)),
             "trade_direction": _trade_direction(),
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
             "max_entry_spread_divergence": float(s.get("max_entry_spread_divergence", 0) or 0),
@@ -1182,6 +1191,26 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         close_fn=_spread_close,
         prices_provider=_leg_prices,        # fresh leg prices for the entry guard
     )
+
+    # ── signal study: a PAPER copy of the algo on the same signal. A reading:
+    # its orders are recordings, its log lines are DEBUG and labelled, and it
+    # writes only data/signal_study.json. It runs whether the algo is ON or not.
+    signal_study = SignalStudy(SIGNAL_STUDY_FILE, signal_engine.get_signal, _algo_params,
+                               prices_provider=_leg_prices)
+
+    def _study_loop() -> None:
+        while True:
+            interval = 0.5
+            try:
+                interval = max(0.2, float(_algo_params().get("tick_interval", 0.5)))
+                if signal_engine.running:
+                    signal_study.tick()
+            except Exception:                                  # noqa: BLE001
+                logger.exception("SignalStudy: loop error")
+            time.sleep(interval)
+
+    if not app.config.get("TESTING"):
+        threading.Thread(target=_study_loop, daemon=True, name="SignalStudy").start()
 
     # Position recovery on restart: re-adopt any open trade from the log so the
     # engine manages (and can exit) a position it didn't open this run.
@@ -2540,6 +2569,29 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         mean reversions) for the Analysis page."""
         return jsonify(signal_engine.get_excursions())
 
+    @app.route("/api/analysis/signals", methods=["GET"])
+    def api_analysis_signals():
+        """The signal study for a date range: 1d | 7d | 30d | all."""
+        rng = request.args.get("range", "1d")
+        out = signal_study.report(rng if rng in STUDY_RANGES else "1d")
+        p, sp = _algo_params(), _signal_params()
+        out["rules"] = {k: p.get(k) for k in (
+            "entry_zscore", "exit_zscore", "stop_zscore", "confirmation_ticks",
+            "time_stop_half_lives", "cooldown", "entry_mode", "reentry_back",
+            "reentry_window_pct", "enable_probability_filter", "lot_multiplier")}
+        sig = signal_engine.get_signal() or {}
+        out["rules"].update(window_minutes=sp.get("window_minutes"),
+                            sample_interval_sec=sp.get("sample_interval_sec"),
+                            min_signal_minutes=sp.get("min_signal_minutes"),
+                            band_source=sig.get("band_source") or "ticks",
+                            band_timeframe=sig.get("band_timeframe"),
+                            band_length=sig.get("band_length"),
+                            trade_direction=p.get("trade_direction"))
+        legs = _read_legs()
+        out["pair"] = (f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
+                       if _have_both_legs(legs) else None)
+        return jsonify(out)
+
     @app.route("/api/signal/excursions/reset", methods=["POST"])
     def api_signal_excursions_reset():
         signal_engine.reset_excursions()
@@ -2992,6 +3044,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     @app.route("/api/settings", methods=["GET", "POST"])
     def api_settings():
+        # Reload, change and save under the config's lock: a background loop's
+        # reload must never land between the change and its save.
+        with cfg.lock:
+            return _api_settings()
+
+    def _api_settings():
         cfg.reload()
         if request.method == "GET":
             s, f, r, th = (cfg.section("signal"), cfg.section("filters"),
@@ -3107,6 +3165,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "exit_zscore": s.get("exit_zscore", 0.0),
                     "stop_zscore": s.get("stop_zscore", 4.0),
                     "confirmation_ticks": s.get("confirmation_ticks", 3),
+                    "entry_mode": s.get("entry_mode", "reentry"),
+                    "reentry_back": s.get("reentry_back", 0.5),
+                    "reentry_window_pct": s.get("reentry_window_pct", 50.0),
                     "trade_direction": _trade_direction(),
                     "band_source": str(s.get("band_source", "ticks") or "ticks"),
                     "band_timeframe": normalise_tf(s.get("band_timeframe", "15m")),
@@ -3201,9 +3262,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("stats_update_interval_sec", 0.0),
                      ("entry_zscore", 2.0), ("exit_zscore", 0.0), ("stop_zscore", 4.0),
                      ("confirmation_ticks", 3), ("max_entry_z_divergence", 0.0),
-                     ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0)):
+                     ("max_entry_spread_divergence", 0.0), ("max_entry_zscore", 0.0),
+                     ("reentry_back", 0.5), ("reentry_window_pct", 50.0)):
             if k in sd:
                 sig[k] = _num(sd[k], d)
+        if sd.get("entry_mode") in ("touch", "reentry"):
+            sig["entry_mode"] = sd["entry_mode"]
 
         rk = raw.setdefault("risk", {})
         for k, d in (("lots_per_trade", 1), ("max_contracts_per_leg", 5),
@@ -3718,6 +3782,6 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     app.extensions["arrow"] = {"active": active, "signal": signal_engine, "algo": arrow_algo,
                                "working_orders": working_orders,
                                "refresh_broker_cache": _refresh_broker_cache,
-                               "trade_log": trade_log}
+                               "trade_log": trade_log, "study": signal_study}
 
     return app, socketio

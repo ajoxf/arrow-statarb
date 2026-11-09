@@ -35,6 +35,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from loguru import logger
 
+from arrow_statarb.core.arming import REENTRY, Arming, mode_of, reentry_levels
 from arrow_statarb.models.probability_filter import ProbabilityFilter
 from arrow_statarb.core import costs
 
@@ -117,7 +118,11 @@ class ArrowAutoTrader:
         close_fn: Callable[[str, int], Dict],
         clock: Optional[Callable[[], float]] = None,
         prices_provider: Optional[Callable[[], Tuple[Optional[float], Optional[float]]]] = None,
+        log=None,
     ):
+        # Where this instance logs. The Analysis study runs a PAPER copy of the
+        # algo, and its decisions must never read like real ones in app.log.
+        self._log = log or logger
         self._signal = signal_provider
         self._params = params_provider
         self._execute = execute_fn
@@ -149,6 +154,10 @@ class ArrowAutoTrader:
         self._tp_cap_warned = False
         self._consec_above = 0                     # consecutive ticks z ≥ +entry
         self._consec_below = 0                     # consecutive ticks z ≤ -entry
+        # entry_mode "reentry": a stretch ARMS, the entry comes on the way back
+        # inside the band (core/arming.py). This instance's own; never shared.
+        # A caller that does not set entry_mode gets at-the-touch entries.
+        self._arming = Arming(default_mode="touch")
         self._exit_failures = 0                    # consecutive failed exit attempts
         self._exit_halted = False                  # ceiling hit → stop auto-exit retries
         self._exit_retry_at = 0.0                  # don't re-attempt an exit before this (backoff)
@@ -170,13 +179,13 @@ class ArrowAutoTrader:
             self.last_error = ""
             self._thread = threading.Thread(target=self._loop, daemon=True, name="ArrowAlgo")
             self._thread.start()
-            logger.info("ArrowAlgo: started")
+            self._log.info("ArrowAlgo: started")
             return True
 
     def stop(self) -> None:
         self._stop_evt.set()
         self.running = False
-        logger.info("ArrowAlgo: stopped (open position, if any, is left untouched)")
+        self._log.info("ArrowAlgo: stopped (open position, if any, is left untouched)")
 
     def restore_position(self, pos: Optional[Dict]) -> bool:
         """Re-adopt an open position after a process restart so the running
@@ -209,7 +218,7 @@ class ArrowAutoTrader:
                 "dry_run": bool(pos.get("dry_run", False)),
                 "restored": True,
             }
-        logger.warning("ArrowAlgo: restored open {} position ({} lot(s)) from trade log",
+        self._log.warning("ArrowAlgo: restored open {} position ({} lot(s)) from trade log",
                        direction, self._pos["lots"])
         return True
 
@@ -225,7 +234,7 @@ class ArrowAutoTrader:
             self._exit_failures = 0
             self._exit_halted = False
             self._exit_retry_at = 0.0
-        logger.warning("ArrowAlgo: force-cleared engine position ({}) — {}", direction, reason)
+        self._log.warning("ArrowAlgo: force-cleared engine position ({}) — {}", direction, reason)
         return True
 
     def restore_cooldown(self, until_ts: float) -> bool:
@@ -240,7 +249,7 @@ class ArrowAutoTrader:
             return False
         with self._lock:
             self._cooldown_until = max(self._cooldown_until, until)
-        logger.info("ArrowAlgo: restored cooldown — {:.0f}s remaining",
+        self._log.info("ArrowAlgo: restored cooldown — {:.0f}s remaining",
                     self._cooldown_until - self._clock())
         return True
 
@@ -266,7 +275,7 @@ class ArrowAutoTrader:
                 self._tick()
             except Exception as exc:                       # never let the loop die
                 self.last_error = str(exc)
-                logger.exception("ArrowAlgo: tick error")
+                self._log.exception("ArrowAlgo: tick error")
             interval = 0.5
             try:
                 interval = max(0.05, float(self._params().get("tick_interval", 0.5)))
@@ -585,7 +594,7 @@ class ArrowAutoTrader:
         elif tp_cap > 0 and car > 0:
             target = (tp_cap / 100.0) * car        # BE + tp_capital_pct% of capital
         elif tp_cap > 0 and car <= 0 and not self._tp_cap_warned:
-            logger.warning("ArrowAlgo: tp_capital_pct={:.3g}% is set but "
+            self._log.warning("ArrowAlgo: tp_capital_pct={:.3g}% is set but "
                            "capital_at_risk_inr is 0 — the 'BE + %' take-profit "
                            "is INACTIVE; falling back to profit_target_inr "
                            "(₹{:.0f}). Set capital_at_risk_inr to enable it.",
@@ -720,10 +729,33 @@ class ArrowAutoTrader:
         confirmed_long = self._consec_below >= confirm   # z ≤ -entry
         confirmed_short = self._consec_above >= confirm   # z ≥ +entry
 
+        # Armed entries (entry_mode = reentry): the stretch only ARMS; the
+        # trigger comes on the way back inside the band, each side on its own
+        # executable z. A position arms nothing.
+        reentry = mode_of(p) == REENTRY
+        if self._pos is not None:
+            self._arming.reset()
+            arm = {"trigger": None, "event": None, "lost": None}
+        else:
+            arm = self._arming.step(zs_entry, now, p, z_long=zb_entry)
+        if arm.get("event") == "armed":
+            self._log.info("ArrowAlgo: ARMED {} at z={:.2f}", self._arming.armed,
+                           float(self._arming.armed_z))
+        elif arm.get("event") == "lost":
+            self._log.info("ArrowAlgo: arming LOST {} — fell through the re-entry window "
+                           "floor without an entry (peak z {:.2f})",
+                           arm["lost"]["side"], float(arm["lost"]["peak_z"]))
+        snap.update(entry_mode=mode_of(p), armed=self._arming.armed,
+                    armed_z=self._arming.armed_z, armed_peak_z=self._arming.peak_z,
+                    armed_ts=self._arming.armed_ts, arm_event=arm.get("event"),
+                    arm_lost=arm.get("lost"))
+
         if self._pos is None:
             mdl = float(p.get("max_daily_loss", 0) or 0)
             day_pnl = float(p.get("day_pnl", 0.0))
-            if zs_entry is not None and zs_entry >= entry_z:
+            if reentry and arm.get("trigger"):
+                want_dir = "SHORT_SPREAD" if arm["trigger"] == "SHORT" else "LONG_SPREAD"
+            elif zs_entry is not None and zs_entry >= entry_z:
                 want_dir = "SHORT_SPREAD"
             elif zb_entry is not None and zb_entry <= -entry_z:
                 want_dir = "LONG_SPREAD"
@@ -740,6 +772,14 @@ class ArrowAutoTrader:
             z_side = z_sell if want_dir == "SHORT_SPREAD" else z_buy
             z = z_side if z_side is not None else z_mid
             sp_side = sp_sell if want_dir == "SHORT_SPREAD" else sp_buy
+            # A signal to act on now: at the touch (confirmed beyond ±entry), or
+            # the armed side's trigger on the way back.
+            signal_on = (bool(arm.get("trigger")) if reentry
+                         else abs(z) >= entry_z and (confirmed_long or confirmed_short))
+            # The regime-shift cap reads how DEEP the stretch went — for an
+            # armed entry that is its peak, not the z it re-enters at.
+            depth = (abs(float(self._arming.peak_z)) if reentry and self._arming.peak_z is not None
+                     else abs(z))
             # z-reset: clear a post-stop block once z has recovered toward the
             # mean — a LONG block (entered deep-negative) clears when z ≥ −exit_z;
             # a SHORT block when z ≤ +exit_z (robust when exit_z = 0).
@@ -779,18 +819,16 @@ class ArrowAutoTrader:
                 snap["status"] = f"no new entries — within {buf:.0f} min of close"
             elif _expiry_blocks_entry(p, sig):
                 snap["status"] = _expiry_blocks_entry(p, sig)
-            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short) and trend_blocks):
+            elif signal_on and trend_blocks:
                 snap["status"] = (f"trend filter: {'SHORT' if reg_slope > 0 else 'LONG'}-only "
                                   f"(S {'rising' if reg_slope > 0 else 'falling'})")
-            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
-                  and self._stop_block_dir == want_dir):
+            elif signal_on and self._stop_block_dir == want_dir:
                 snap["status"] = (f"z-reset: blocking {want_dir.replace('_SPREAD','')} "
                                   f"re-entry until z re-enters ±{exit_z:.1f} band (z={z:.2f})")
-            elif (abs(z) >= entry_z and (confirmed_long or confirmed_short)
-                  and max_entry_z > 0 and abs(z) > max_entry_z):
-                snap["status"] = (f"blocked: |z|={abs(z):.2f} exceeds entry cap "
+            elif signal_on and max_entry_z > 0 and depth > max_entry_z:
+                snap["status"] = (f"blocked: |z|={depth:.2f} exceeds entry cap "
                                   f"{max_entry_z:.2f} (regime-shift guard)")
-            elif abs(z) >= entry_z and (confirmed_long or confirmed_short):
+            elif signal_on:
                 direction = want_dir
                 # Loss-streak size reducer: shrink size on a losing run.
                 eff_lots = lots
@@ -819,7 +857,12 @@ class ArrowAutoTrader:
                         mid_spread=spread_mid,
                         z_key=("z_sell" if direction == "SHORT_SPREAD" else "z_buy")
                         if has_book else "zscore")
-                    snap["status"] = refused or f"ENTRY {direction} (z={z:.2f}, {eff_lots} lot(s))"
+                    how = " on re-entry" if reentry else ""
+                    snap["status"] = refused or f"ENTRY {direction}{how} (z={z:.2f}, {eff_lots} lot(s))"
+            elif reentry and self._arming.armed and not off_side:
+                back_at, floor = reentry_levels(p)
+                snap["status"] = (f"ARMED {self._arming.armed} (peak z={float(self._arming.peak_z):.2f}) — "
+                                  f"enters back inside at |z| ≤ {back_at:.2f}, window to {floor:.2f}")
             elif abs(z) >= entry_z and not off_side:
                 c = max(self._consec_above, self._consec_below)
                 snap["status"] = f"confirming {c}/{confirm} (z={z:.2f})"
@@ -829,7 +872,7 @@ class ArrowAutoTrader:
                 snap["status"] = "flat — watching"
             # A signal was there but no trade came of it: remember why.
             st_txt = str(snap.get("status") or "")
-            wanted = abs(z) >= entry_z and (confirmed_long or confirmed_short)
+            wanted = signal_on
             if (wanted or off_side) and not st_txt.startswith(("ENTRY", "confirming")):
                 if off_side:
                     side = "SHORT" if td == "buy_only" else "LONG"
@@ -967,7 +1010,7 @@ class ArrowAutoTrader:
             z_stop_armed = bool(p.get("z_stop_exit_enabled", True)) or dollar_stop <= 0
             if abs(z) >= stop_z and not z_stop_armed:
                 if not self._zstop_suppressed_logged:
-                    logger.warning("ArrowAlgo: z-stop SUPPRESSED — would have fired at "
+                    self._log.warning("ArrowAlgo: z-stop SUPPRESSED — would have fired at "
                                    "z={:.2f} (≥ {:.1f}); dollar stop governs (net {})",
                                    z, stop_z, _pnl_txt)
                     self._zstop_suppressed_logged = True
@@ -1070,7 +1113,7 @@ class ArrowAutoTrader:
                        f"(Δ>{max_div:.2f}) — entry refused")
                 self._consec_above = self._consec_below = 0
                 self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
-                logger.warning("ArrowAlgo: {}", msg)
+                self._log.warning("ArrowAlgo: {}", msg)
                 return msg
 
         # Fresh-price spread guard: the z-guard above compares signal-to-signal,
@@ -1095,7 +1138,7 @@ class ArrowAutoTrader:
                        f"(Δ>{max_sdiv:.1f}) — entry refused")
                 self._consec_above = self._consec_below = 0
                 self._cooldown_until = self._clock() + float(p.get("cooldown", 300))
-                logger.warning("ArrowAlgo: {}", msg)
+                self._log.warning("ArrowAlgo: {}", msg)
                 return msg
 
         # Pass the algo's DECISION z/spread (and source) so the journal records
@@ -1129,15 +1172,16 @@ class ArrowAutoTrader:
                 "dry_run": bool(res.get("dry_run")),
             }
             self._consec_above = self._consec_below = 0
+            self._arming.reset()                    # entered: the arming is spent
             self._exit_failures = 0                 # fresh position → clean exit slate
             self._exit_halted = False
             self._exit_retry_at = 0.0
-            logger.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
+            self._log.info("ArrowAlgo: ENTER {} {} lot(s) z={:.2f} → {}", direction, lots, z, res.get("message"))
             # Print the RESOLVED exit geometry at entry, not the configs — a
             # cost floor or %-form can silently move a level at this size.
             try:
                 stop_lv, tgt_lv = self._effective_exit_levels(p)
-                logger.info("ArrowAlgo: entry geometry (resolved) — stop ₹{:.0f} / "
+                self._log.info("ArrowAlgo: entry geometry (resolved) — stop ₹{:.0f} / "
                             "target ₹{:.0f} (fill spread {}, σ={}, cost ₹{:.0f})",
                             stop_lv, tgt_lv, self._pos.get("entry_fill_spread"),
                             self._pos.get("entry_std"), self._round_trip_cost(p))
@@ -1145,7 +1189,7 @@ class ArrowAutoTrader:
                 pass
         else:
             self.last_error = f"entry failed: {res.get('error')}"
-            logger.error("ArrowAlgo: ENTER failed — {}", res.get("error"))
+            self._log.error("ArrowAlgo: ENTER failed — {}", res.get("error"))
 
     def _exit(self, reason: str, z: float, spread: Optional[float] = None) -> None:
         if not self._pos:
@@ -1166,7 +1210,7 @@ class ArrowAutoTrader:
                           **self._accepted(self._close, {**kw, **life})) or {}
         if res.get("success"):
             closed_dir = self._pos["direction"]
-            logger.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))
+            self._log.info("ArrowAlgo: EXIT ({}) {} z={:.2f} → {}", reason, closed_dir, z, res.get("message"))
             self._pos = None
             self._exit_failures = 0
             self._exit_halted = False
@@ -1202,7 +1246,7 @@ class ArrowAutoTrader:
                 plan = f"retry in {delay:.0f}s (backoff; position still open)"
             else:
                 plan = "will retry next tick (position still open)"
-            logger.error(
+            self._log.error(
                 "ArrowAlgo: EXIT FAILED — reason={} attempt={} ceiling={} orphan={} "
                 "recovered={} err={} → {}",
                 reason, self._exit_failures, ceiling or "∞",

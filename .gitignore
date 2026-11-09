@@ -52,3 +52,9 @@ data/heartbeat.txt
 # SQLite analysis persistence (trade_review, sd_touches, shadow, market_data) — runtime
 data/analysis.db
 data/analysis.db-journal
+
+# analysis state (runtime)
+data/excursions.json
+data/excursions.json.tmp
+data/signal_study.json
+data/signal_study.json.tmp

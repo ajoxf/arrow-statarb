@@ -61,3 +61,44 @@ def test_set_mode_persists(tmp_path):
     assert Config(p).mode == "live"
     cfg.set_mode("dry_run")
     assert Config(p).is_dry_run is True
+
+
+# ── a background reload must never throw a Settings change away ──────────────
+
+def _cfg(tmp_path):
+    from arrow_statarb.config.config import Config
+    p = tmp_path / "settings.yaml"
+    p.write_text("signal:\n  band_source: ticks\n")
+    return Config(p)
+
+
+def test_a_reload_cannot_land_between_a_change_and_its_save(tmp_path):
+    import threading
+    cfg = _cfg(tmp_path)
+    with cfg.lock:                                   # how /api/settings changes config
+        cfg.raw.setdefault("signal", {})["band_source"] = "candles"
+        t = threading.Thread(target=cfg.reload)      # a loop's mode check, mid-change
+        t.start()
+        t.join(0.2)
+        assert t.is_alive()                          # it waits for the save
+        cfg.save()
+    t.join(2)
+    assert cfg.get("signal.band_source") == "candles"
+    cfg.reload()
+    assert cfg.get("signal.band_source") == "candles"
+
+
+def test_control_without_the_lock_the_same_reload_loses_the_change(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.raw.setdefault("signal", {})["band_source"] = "candles"
+    cfg.reload()                                     # the reload lands before the save
+    cfg.save()
+    assert cfg.get("signal.band_source") == "ticks"  # the change is gone
+
+
+def test_save_is_atomic(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.raw["mode"] = "live_sim"
+    cfg.save()
+    assert not list(tmp_path.glob("*.tmp"))
+    assert "live_sim" in (tmp_path / "settings.yaml").read_text()

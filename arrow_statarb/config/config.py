@@ -8,6 +8,7 @@ tunable lives in the YAML and is read through here.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -41,10 +42,20 @@ class Config:
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path else SETTINGS_FILE
         self._data: Dict[str, Any] = {}
+        # One lock for reload, change-and-save. Background loops reload this
+        # config many times a second (mode checks); without it a reload landing
+        # between a Settings change and its save threw the change away, and one
+        # landing mid-write read a truncated file and fell back to defaults.
+        # Hold it across "change raw, then save()" — see Config.lock.
+        self.lock = threading.RLock()
         self.reload()
 
     # ── loading ──────────────────────────────────────────────────────────────
     def reload(self) -> None:
+        with self.lock:
+            self._reload()
+
+    def _reload(self) -> None:
         # settings.yaml is a runtime/local file (gitignored, mutated by the UI).
         # On first run, seed it from the tracked settings.example.yaml template so
         # a fresh clone has working defaults and pulls never conflict on it.
@@ -116,13 +127,18 @@ class Config:
     def set_mode(self, mode: str) -> None:
         """Persist the trading mode back to settings.yaml (dry_run | live_sim | live)."""
         m = str(mode).lower()
-        self._data["mode"] = m if m in ("live", "live_sim") else "dry_run"
-        self.save()
+        with self.lock:
+            self._data["mode"] = m if m in ("live", "live_sim") else "dry_run"
+            self.save()
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "w") as f:
-            yaml.dump(self._data, f, default_flow_style=False, sort_keys=False)
+        """Write atomically: a reader never sees a half-written file."""
+        with self.lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            with open(tmp, "w") as f:
+                yaml.dump(self._data, f, default_flow_style=False, sort_keys=False)
+            os.replace(tmp, self.path)
 
     # ── broker credentials from environment ──────────────────────────────────
     @staticmethod
