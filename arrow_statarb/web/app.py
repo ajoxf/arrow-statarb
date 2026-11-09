@@ -35,7 +35,7 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
-from arrow_statarb.core.signal_study import SignalStudy, RANGES as STUDY_RANGES
+from arrow_statarb.core.signal_study import SignalStudy, RANGES as STUDY_RANGES, replay_candles
 from arrow_statarb.core.working_orders import WorkingOrders
 from arrow_statarb.core.candles import SpreadCandles, TIMEFRAMES, TF_LABELS, normalise_tf
 from arrow_statarb.core.algo import ArrowAutoTrader
@@ -647,6 +647,18 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                              other_cost_pct=float(cfg.get("filters.other_cost_pct", 0) or 0),
                              capital_gains_pct=float(cfg.get("filters.capital_gains_pct", 0) or 0),
                              name=m["name"], band_source=band_source, band_tf=band_tf)
+            if source != "algo":
+                # A manual position: its break-even and the z levels of the
+                # bands it was opened on (the algo journals its own on entry).
+                try:
+                    trade_log.annotate_open(direction, **arrow_algo.entry_levels(
+                        _algo_params(),
+                        {"direction": direction, "lots": lots,
+                         "entry_spread": m["spread"], "entry_fill_spread": m["spread"],
+                         "entry_leg_a": m["leg_a_price"], "entry_leg_b": m["leg_b_price"]},
+                        signal_engine.get_signal() or {}, auto_exits=False))
+                except Exception as exc:                       # noqa: BLE001
+                    logger.debug("entry levels not journaled — {}", exc)
             _zt = z if z is not None else m["zscore"]
             _zx = f"{float(_zt):+.2f}" if _zt is not None else "n/a"
             telegram.notify(
@@ -1191,13 +1203,46 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         execute_fn=_spread_execute,
         close_fn=_spread_close,
         prices_provider=_leg_prices,        # fresh leg prices for the entry guard
+        # journal the levels the position opened against (BE / target / stop)
+        on_entered=lambda lv: trade_log.annotate_open(**lv),
     )
 
     # ── signal study: a PAPER copy of the algo on the same signal. A reading:
     # its orders are recordings, its log lines are DEBUG and labelled, and it
     # writes only data/signal_study.json. It runs whether the algo is ON or not.
+    def _pair_name() -> Optional[str]:
+        legs = _read_legs()
+        return (f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
+                if _have_both_legs(legs) else None)
+
     signal_study = SignalStudy(SIGNAL_STUDY_FILE, signal_engine.get_signal, _algo_params,
-                               prices_provider=_leg_prices)
+                               prices_provider=_leg_prices, pair_provider=_pair_name)
+    _derive_job: Dict[str, Any] = {"state": "idle", "message": "", "count": 0}
+
+    def _derive(days: int) -> None:
+        """Replay the paper algo over Arrow's candle history (candle bands only)."""
+        from arrow_statarb.core.candles import align_legs, normalise_tf, tf_seconds
+        try:
+            sp = cfg.section("signal")
+            tf = normalise_tf(sp.get("band_timeframe", "15m"))
+            n = int(sp.get("band_length", 20) or 20)
+            k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+            src = "5m" if tf == "5m" else "15m"
+            now = time.time()
+            _derive_job.update(state="running", message=f"fetching {days} days of {src} candles from Arrow…")
+            hist = _candle_history(src, now - days * 86400.0, now)
+            if not hist or not hist.get("a") or not hist.get("b"):
+                raise RuntimeError("Arrow returned no candle history — connect, then try again")
+            bars = align_legs(hist["a"], hist["b"], tf_seconds(tf), _session_open_min(), k)
+            _derive_job.update(message=f"replaying {len(bars)} {tf} candles…")
+            rows = replay_candles(bars, _algo_params(), tf, tf_seconds(tf), n, k, _pair_name())
+            kept = signal_study.replace_derived(rows)
+            _derive_job.update(state="done", count=kept,
+                               message=f"{kept} replayed row(s) from {len(bars)} {tf} candles")
+            logger.info("Signal study: derived {} row(s) from {} {} candles", kept, len(bars), tf)
+        except Exception as exc:                               # noqa: BLE001
+            _derive_job.update(state="error", message=str(exc))
+            logger.warning("Signal study: derive failed — {}", exc)
 
     def _study_loop() -> None:
         while True:
@@ -2696,7 +2741,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_analysis_signals():
         """The signal study for a date range: 1d | 7d | 30d | all."""
         rng = request.args.get("range", "1d")
-        out = signal_study.report(rng if rng in STUDY_RANGES else "1d")
+        out = signal_study.report(rng if rng in STUDY_RANGES else "1d",
+                                  day=request.args.get("day") or None,
+                                  pair=request.args.get("pair") or None)
+        out["derive_job"] = dict(_derive_job)
         p, sp = _algo_params(), _signal_params()
         out["rules"] = {k: p.get(k) for k in (
             "entry_zscore", "exit_zscore", "stop_zscore", "confirmation_ticks",
@@ -2714,6 +2762,20 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         out["pair"] = (f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
                        if _have_both_legs(legs) else None)
         return jsonify(out)
+
+    @app.route("/api/analysis/derive", methods=["POST"])
+    def api_analysis_derive():
+        """Replay the last N days (default 30) of candles through the paper
+        algo. Replaces earlier replayed rows; never touches a live row."""
+        if str(cfg.get("signal.band_source", "ticks") or "ticks").lower() != "candles":
+            return jsonify({"success": False, "error": (
+                "Deriving needs candle bands (Settings → Band source: Candles). The tick "
+                "window's z — 120 min of 0.5 s samples — cannot be rebuilt from candles.")})
+        if _derive_job.get("state") == "running":
+            return jsonify({"success": False, "error": "a derive is already running"})
+        days = max(1, min(60, int((request.get_json(silent=True) or {}).get("days", 30) or 30)))
+        threading.Thread(target=_derive, args=(days,), daemon=True, name="SignalDerive").start()
+        return jsonify({"success": True, "message": f"deriving {days} days…"})
 
     @app.route("/api/signal/excursions/reset", methods=["POST"])
     def api_signal_excursions_reset():

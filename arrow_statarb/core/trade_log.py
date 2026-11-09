@@ -72,6 +72,9 @@ def _outcome_tag(reason: str, net: float, entry_z, exit_z) -> str:
     return r.upper().replace("_", " ") if r else ""
 
 
+# The levels a position is opened against, journaled on its OPEN and CLOSE.
+ENTRY_LEVEL_KEYS = ("break_even", "target_spread", "target_kind", "stop_spread", "stop_kind", "entry_mean", "entry_std")
+
 class TradeLog:
     def __init__(self, path: Optional[Path] = None, brokerage_per_lot: float = 20.0):
         # path=None → in-memory only (no file IO), used by the backtester.
@@ -211,6 +214,9 @@ class TradeLog:
                                 rec["slippage_pnl"] = round(rec["spread_pnl"] - rec["edge_pnl"], 2)
                             # full round-trip detail for the journal
                             # WHO opened it and who closed it (MANUAL / ALGO)
+                            # the levels it was opened against (journaled at entry)
+                            for _k in ENTRY_LEVEL_KEYS:
+                                rec[_k] = prev.get(_k)
                             rec["entry_source"] = prev.get("source") or "manual"
                             rec["exit_source"] = source
                             rec["entry_zscore"] = prev.get("zscore")
@@ -319,6 +325,21 @@ class TradeLog:
                 "avg_other": round(other / k, 2), "avg_cgt": round(cgt / k, 2),
                 "avg_slippage": round(slip / k, 2),
                 "avg_realized_cost": round((brk + stt + other + cgt + slip) / k, 2)}
+
+    def annotate_open(self, direction: Optional[str] = None, **fields) -> bool:
+        """Add the entry LEVELS (break-even / target / stop as spread prices)
+        to the open position's OPEN record; its CLOSE copies them."""
+        keep = {k: v for k, v in fields.items() if k in ENTRY_LEVEL_KEYS}
+        with self._lock:
+            for r in reversed(self._trades):
+                if r.get("action") == "OPEN" and not r.get("_closed") \
+                        and (direction is None or r.get("direction") == direction):
+                    r.update(keep)
+                    break
+            else:
+                return False
+            self._save()                             # under the lock, as record() does
+        return True
 
     def round_trips(self) -> Dict:
         """Completed trades (each settled CLOSE carries full entry+exit detail)
