@@ -42,6 +42,60 @@ from arrow_statarb.core.algo import ArrowAutoTrader
 
 MAX_ROWS = 5000
 SAVE_EVERY_SEC = 5.0
+MERGE_BLOCKED_SEC = 120.0                 # a refused stretch is one row, not one per tick
+# The OUTCOME study: the same paper algo with every entry GATE switched off —
+# trade direction, entry rule and exits kept — so each stretch that reaches the
+# entry z answers one question: did its exit make or lose money?
+OUTCOME_GATES_OFF = {
+    "enable_probability_filter": False, "min_edge_multiple": 0.0, "cost_floor_mult": 0.0,
+    "half_life_min_sec": 0.0, "half_life_max_sec": 0.0, "max_entry_zscore": 0.0,
+    "cooldown": 0.0, "stop_cooldown": 0.0, "z_reset_after_stop": False,
+    "max_daily_loss": 0.0, "loss_streak_pause_at": 0, "loss_streak_reduce_at": 0,
+    "regime_enabled": False, "max_entry_z_divergence": 0.0, "max_entry_spread_divergence": 0.0,
+}
+
+
+def outcome_params(p: Dict) -> Dict:
+    out = dict(p or {})
+    out.update(OUTCOME_GATES_OFF)
+    return out
+
+
+def _verdict(r: Dict) -> str:
+    """What the real algo's rules did with a stretch they did not trade."""
+    reason = str(r.get("filter_reason") or "").strip()
+    if reason.lower().startswith("blocked:"):
+        reason = reason[8:].strip()
+    if r.get("status") == "never_back":
+        return "never came back" + (f" · held back by {reason}" if reason else "")
+    if r.get("status") == "armed":
+        return "armed, waiting" + (f" · {reason}" if reason else "")
+    return "blocked: " + (reason or "a gate")
+
+
+def with_algo_verdict(outcomes: List[Dict], faithful: List[Dict]) -> List[Dict]:
+    """Say, for each stretch the outcome study traded, what the REAL algo's
+    rules did with it: took it (a faithful paper entry at the same moment), or
+    the gate that blocked it (a faithful refusal while the stretch was on)."""
+    taken = [r for r in faithful if r.get("status") in ("open", "closed", "running")]
+    refused = [r for r in faithful if r.get("status") in ("filtered", "never_back", "armed")]
+    out = []
+    for o in outcomes:
+        o = dict(o)
+        t0 = float(o.get("armed_ts") or o.get("entry_ts") or 0)
+        t1 = float(o.get("exit_ts") or o.get("entry_ts") or t0)
+        hit = next((r for r in taken if r.get("side") == o.get("side")
+                    and abs(float(r.get("entry_ts") or 0) - float(o.get("entry_ts") or 0)) <= 5), None)
+        if hit is not None:
+            o["algo"], o["algo_net"] = "took it", hit.get("net")
+        else:
+            why = [r for r in refused if r.get("side") == o.get("side")
+                   and t0 - 120 <= float(r.get("armed_ts") or r.get("entry_ts") or 0) <= t1 + 5]
+            o["algo"] = _verdict(why[-1]) if why else None
+        out.append(o)
+    return out
+
+
 RANGES = {"1d": 86400.0, "7d": 7 * 86400.0, "30d": 30 * 86400.0, "all": None}
 IST_OFFSET = 5.5 * 3600
 
@@ -241,19 +295,28 @@ class SignalStudy:
 
     def _blocked(self, lb: Dict, now: float) -> bool:
         reason = str(lb.get("reason") or "blocked")
+        if "entries are off" in reason:
+            return False                  # the side the trade direction switched off: not a signal
         armed = self._row(self._armed_id)
         if armed is not None:                         # stays armed; may still enter
             armed["filter_reason"] = reason
             armed["blocked_samples"] = int(armed.get("blocked_samples", 0)) + 1
             return False
         row = self._row(self._blocked_id)
+        side = lb.get("would_be_signal") or "SHORT"
+        if row is None:                   # the same stretch, blocked again a little later
+            last = next((r for r in reversed(self._rows) if r.get("status") == "filtered"), None)
+            if last is not None and last.get("side") == side \
+                    and now - float(last.get("last_blocked_ts") or last.get("entry_ts") or 0) < MERGE_BLOCKED_SEC:
+                row, self._blocked_id = last, last["id"]
         if row is not None:
             row["blocked_samples"] = int(row.get("blocked_samples", 1)) + 1
             row["filter_reason"] = reason
+            row["last_blocked_ts"] = now
             return False
         row = self._new_row(lb.get("would_be_signal") or "SHORT", self._params() or {})
         row.update(status="filtered", filter_reason=reason, blocked_samples=1,
-                   entry_ts=now, entry_z=_r(lb.get("zscore")))
+                   entry_ts=now, entry_z=_r(lb.get("zscore")), last_blocked_ts=now)
         self._blocked_id = row["id"]
         return True
 
@@ -446,8 +509,11 @@ def replay_candles(bars: List, params: Dict, tf: str, tf_sec: int, length: int,
         return out
 
     p = dict(params)
+    # Live, confirmation is a few SAMPLES (seconds); a candle is minutes. One
+    # closed candle beyond the level is the replay's confirmation — counting
+    # ticks as candles would demand 45 minutes beyond ±entry at 3 × 15 min.
     p.update(trading_hours={"enabled": False}, no_entry_buffer_min=0,
-             regime_enabled=False, max_entry_spread_divergence=0)
+             regime_enabled=False, max_entry_spread_divergence=0, confirmation_ticks=1)
     study = SignalStudy(None, sig, lambda: p, clock=lambda: float(bars[cur["i"]][0]) + tf_sec,
                         pair_provider=lambda: pair, source="replayed")
     for i in range(len(bars)):

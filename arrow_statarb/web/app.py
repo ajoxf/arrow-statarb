@@ -35,7 +35,8 @@ from arrow_statarb.config.config import Config, CONFIG_DIR, LEG_ASSIGNMENTS_FILE
 from arrow_statarb.brokers.registry import ActiveBroker, create_broker
 from arrow_statarb.brokers.sim_broker import SimBroker
 from arrow_statarb.core.signal import SignalEngine
-from arrow_statarb.core.signal_study import SignalStudy, RANGES as STUDY_RANGES, replay_candles
+from arrow_statarb.core.signal_study import (SignalStudy, RANGES as STUDY_RANGES, replay_candles,
+                                             outcome_params, with_algo_verdict, summarize as study_summary)
 from arrow_statarb.core.working_orders import WorkingOrders
 from arrow_statarb.core.candles import SpreadCandles, TIMEFRAMES, TF_LABELS, normalise_tf
 from arrow_statarb.core.algo import ArrowAutoTrader
@@ -79,6 +80,8 @@ HEARTBEAT_FILE = PROJECT_ROOT / "data" / "heartbeat.txt"
 EXCURSIONS_FILE = PROJECT_ROOT / "data" / "excursions.json"
 # The signal study: a paper copy of the algo, settled in money.
 SIGNAL_STUDY_FILE = PROJECT_ROOT / "data" / "signal_study.json"
+# The outcome study: every stretch to the entry z, gates off, settled in money.
+SIGNAL_OUTCOMES_FILE = PROJECT_ROOT / "data" / "signal_outcomes.json"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -1216,6 +1219,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
 
     signal_study = SignalStudy(SIGNAL_STUDY_FILE, signal_engine.get_signal, _algo_params,
                                prices_provider=_leg_prices, pair_provider=_pair_name)
+    # The same paper algo with every entry gate OFF: did reaching the entry z
+    # make or lose money? (Trade direction, entry rule and exits are kept.)
+    outcome_study = SignalStudy(SIGNAL_OUTCOMES_FILE, signal_engine.get_signal,
+                                lambda: outcome_params(_algo_params()),
+                                prices_provider=_leg_prices, pair_provider=_pair_name)
     _derive_job: Dict[str, Any] = {"state": "idle", "message": "", "count": 0}
 
     def _derive(days: int) -> None:
@@ -1234,8 +1242,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 raise RuntimeError("Arrow returned no candle history — connect, then try again")
             bars = align_legs(hist["a"], hist["b"], tf_seconds(tf), _session_open_min(), k)
             _derive_job.update(message=f"replaying {len(bars)} {tf} candles…")
-            rows = replay_candles(bars, _algo_params(), tf, tf_seconds(tf), n, k, _pair_name())
+            p = _algo_params()
+            rows = replay_candles(bars, p, tf, tf_seconds(tf), n, k, _pair_name())
             kept = signal_study.replace_derived(rows)
+            outcome_study.replace_derived(
+                replay_candles(bars, outcome_params(p), tf, tf_seconds(tf), n, k, _pair_name()))
             _derive_job.update(state="done", count=kept,
                                message=f"{kept} replayed row(s) from {len(bars)} {tf} candles")
             logger.info("Signal study: derived {} row(s) from {} {} candles", kept, len(bars), tf)
@@ -1250,6 +1261,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 interval = max(0.2, float(_algo_params().get("tick_interval", 0.5)))
                 if signal_engine.running:
                     signal_study.tick()
+                    outcome_study.tick()
             except Exception:                                  # noqa: BLE001
                 logger.exception("SignalStudy: loop error")
             time.sleep(interval)
@@ -2611,8 +2623,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     @app.route("/api/signal/excursions", methods=["GET"])
     def api_signal_excursions():
         """Session-cumulative z-score excursion counts (±2σ / ±3σ touches and
-        mean reversions) for the Analysis page."""
-        return jsonify(signal_engine.get_excursions())
+        mean reversions) for the Analysis page. ?n= events (default 100, max 500)."""
+        try:
+            n = max(1, min(500, int(request.args.get("n", 100))))
+        except (TypeError, ValueError):
+            n = 100
+        return jsonify(signal_engine.get_excursions(max_events=n))
 
     @app.route("/api/analysis/signals", methods=["GET"])
     def api_analysis_signals():
@@ -2639,6 +2655,42 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         out["pair"] = (f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
                        if _have_both_legs(legs) else None)
         return jsonify(out)
+
+    @app.route("/api/analysis/outcomes", methods=["GET"])
+    def api_analysis_outcomes():
+        """Every stretch that reached the entry z on a side you trade, and how
+        its exit settled in money — with what the real algo's rules did."""
+        rng = request.args.get("range", "1d")
+        rng = rng if rng in STUDY_RANGES else "1d"
+        day = request.args.get("day") or None
+        o = outcome_study.report(rng, day=day)
+        f = signal_study.report("all")
+        rows = with_algo_verdict(o["rows"], f["rows"])
+        s = study_summary(rows)
+        s["algo_took"] = sum(1 for r in rows if r.get("algo") == "took it")
+        blocked = [str(r["algo"]).replace("blocked: ", "") for r in rows
+                   if r.get("algo") and r.get("algo") != "took it"]
+        s["algo_blocked"] = len(blocked)
+        tops: Dict[str, int] = {}
+        for b in blocked:
+            key = b.split(" (")[0][:48]
+            tops[key] = tops.get(key, 0) + 1
+        s["algo_block_top"] = max(tops, key=tops.get) if tops else None
+        p, sp = _algo_params(), _signal_params()
+        sig = signal_engine.get_signal() or {}
+        return jsonify({"range": rng, "day": o.get("day"), "rows": rows, "summary": s,
+                        "pair": _pair_name(), "paper_status": f.get("paper_status"),
+                        "derive_job": dict(_derive_job), "derived": o.get("derived"),
+                        "rules": {"entry_zscore": p.get("entry_zscore"), "exit_zscore": p.get("exit_zscore"),
+                                  "stop_zscore": p.get("stop_zscore"), "entry_mode": p.get("entry_mode"),
+                                  "reentry_back": p.get("reentry_back"),
+                                  "confirmation_ticks": p.get("confirmation_ticks"),
+                                  "trade_direction": p.get("trade_direction"),
+                                  "band_source": sig.get("band_source") or "ticks",
+                                  "band_timeframe": sig.get("band_timeframe"),
+                                  "band_length": sig.get("band_length"),
+                                  "window_minutes": sp.get("window_minutes"),
+                                  "lot_multiplier": p.get("lot_multiplier")}})
 
     @app.route("/api/analysis/derive", methods=["POST"])
     def api_analysis_derive():
