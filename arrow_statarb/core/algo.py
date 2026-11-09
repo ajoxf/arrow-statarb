@@ -915,12 +915,17 @@ class ArrowAutoTrader:
                 if off_side:
                     side = "SHORT" if td == "buy_only" else "LONG"
                     z_rec = z_sell if side == "SHORT" else z_buy
+                    sp_rec = sp_sell if side == "SHORT" else sp_buy
                 else:
                     side = "LONG" if want_dir == "LONG_SPREAD" else "SHORT"
-                    z_rec = z
+                    z_rec, sp_rec = z, sp_side
+                if sp_rec is None:
+                    sp_rec = spread_mid
                 self._last_blocked = {
                     "would_be_signal": side,
                     "zscore": round(float(z_rec), 4) if z_rec is not None else None,
+                    # the spread on the side it would have traded, at that z
+                    "spread": round(float(sp_rec), 4) if sp_rec is not None else None,
                     "timestamp": int(self._clock() * 1000),
                     "reason": st_txt,
                 }
