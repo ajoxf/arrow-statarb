@@ -232,3 +232,29 @@ def test_the_app_serves_the_study(tmp_path):
     d = app.test_client().get("/api/analysis/signals?range=7d").get_json()
     assert d["range"] == "7d" and d["rows"] == [] and d["summary"]["win_rate"] is None
     assert d["rules"]["entry_mode"] == "reentry" and d["rules"]["band_source"] in ("ticks", "candles")
+
+
+def test_a_blocked_run_keeps_its_first_moment_and_records_the_spread_and_peak():
+    w = World()
+    st, _ = _study(w, entry_mode="touch", max_entry_zscore=2.5)
+    _drive(w, st, [2.6, 2.7, 2.8, 2.9, 3.1, 2.9])
+    (r,) = _rows(st)
+    # the first blocked sample (z 2.8 → spread 128) names the row ...
+    assert r["entry_z"] == 2.8 and r["entry_spread"] == 128.0
+    assert "2.80" in r["filter_reason"]            # ... and its reason says the same z
+    assert r["peak_z"] == 3.1 and r["blocked_samples"] == 4
+
+
+def test_an_off_side_signal_is_no_blotter_row_but_the_algo_records_its_spread():
+    w = World()
+    st, _ = _study(w, entry_mode="touch", trade_direction="sell_only")
+    _drive(w, st, [-2.5, -2.6, -2.7])
+    assert _rows(st) == []                         # a side switched off is not a missed trade
+    lb = st._algo._last_blocked
+    assert lb["would_be_signal"] == "LONG" and lb["spread"] == 73.0 and lb["zscore"] == -2.7
+
+
+def test_filter_reasons_bucket_by_gate_not_by_z():
+    rows = [{"status": "filtered", "filter_reason": f"buy spread at z {z:+.2f} — LONG entries are off (Sell spread only)"}
+            for z in (-2.51, -2.58, -3.0)]
+    assert summarize(rows)["filter_reasons"] == {"buy spread at z … — LONG entries are off": 3}
