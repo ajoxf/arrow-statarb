@@ -1208,3 +1208,49 @@ def test_state_flags_arrow_holding_twice_what_nexus_records(tmp_path):
     st = c.get("/api/algo/state").get_json()
     assert st["broker_mismatch_kind"] == "size"
     assert "-150" in st["broker_mismatch"] and "-75" in st["broker_mismatch"]
+
+
+def _mcx_app(tmp_path, extra=""):
+    """A CRUDEOILM calendar on MCX, broker order-lot 1 (as Arrow reports it)."""
+    app, broker = _app(tmp_path, mode="dry_run")
+    (tmp_path / "leg_assignments.yaml").write_text(
+        "leg_a:\n  mapping_id: mcx_fo|CRUDEOILM19NOV26F\n  ratio: 1\n"
+        "leg_b:\n  mapping_id: mcx_fo|CRUDEOILM19JAN27F\n  ratio: 1\n")
+    broker.resolve_lot_size = lambda seg, sym: 1
+    if extra:
+        app.test_client().post("/api/settings", json=extra)
+    return app, broker
+
+
+def test_mcx_journal_values_a_point_at_the_contract_multiplier(tmp_path):
+    # Arrow reports an MCX order lot of 1; a CRUDEOILM point is worth ₹10/lot.
+    # The journal used to record lot_size 1, so its P&L was 10× too small and
+    # did not match Arrow's P&L report.
+    app, broker = _mcx_app(tmp_path)
+    c = app.test_client()
+    px = {"CRUDEOILM19NOV26F": 8432.0, "CRUDEOILM19JAN27F": 8259.0}
+    broker.get_ltp = lambda instruments: dict(px)
+    assert c.post("/api/manual-trade/execute",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    px.update({"CRUDEOILM19NOV26F": 8232.0, "CRUDEOILM19JAN27F": 8078.0})
+    assert c.post("/api/manual-trade/close",
+                  json={"direction": "LONG_SPREAD", "lots": 1}).get_json()["success"]
+    trades = app.extensions["arrow"]["trade_log"].all()
+    close = [t for t in trades if t["action"] == "CLOSE"][-1]
+    assert close["lot_size"] == 10
+    # spread 173 → 154 on a long = −19 points × 1 lot × ₹10
+    assert close["spread_pnl"] == pytest.approx(-190.0)
+    # the order quantity is still the broker's order lot, not the multiplier
+    assert broker.orders == []                 # dry run: nothing transmitted
+
+
+def test_mcx_multiplier_is_automatic_and_overridable(tmp_path):
+    app, broker = _mcx_app(tmp_path)
+    broker.get_ltp = lambda instruments: {"CRUDEOILM19NOV26F": 8432.0,
+                                          "CRUDEOILM19JAN27F": 8259.0}
+    c = app.test_client()
+    a = c.get("/api/pair-analytics").get_json()
+    assert a["contract_a"] == 10 and a["contract_b"] == 10      # auto from the spec
+    c.post("/api/settings", json={"pairs": {"multiplier_a": 7, "multiplier_b": 7}})
+    a = c.get("/api/pair-analytics").get_json()
+    assert a["contract_a"] == 7 and a["contract_b"] == 7        # settings still win

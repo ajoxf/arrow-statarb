@@ -453,3 +453,60 @@ class TradeLog:
         with self._lock:
             self._trades = []
             self._save()
+
+    def rescale_lot_size(self, multiplier_for, capital_gains_pct: float = 0.0,
+                         apply: bool = True) -> List[Dict]:
+        """Repair rows journaled with the wrong ₹-per-point multiplier (MCX
+        trades recorded with the broker order lot of 1 instead of the contract
+        multiplier, e.g. CRUDEOILM 10).
+
+        ``multiplier_for(rec)`` returns the correct multiplier for a row, or
+        None to leave it alone. A row whose ``lot_size`` already equals it is
+        skipped, so this is safe to run twice. On a CLOSE the quantities that
+        scale with units (spread/edge/slippage P&L, STT, other costs) are
+        multiplied by new/old; brokerage (per lot) is unchanged; CGT and net
+        are recomputed. peak/trough P&L are left as recorded (they were live
+        estimates with costs folded in and cannot be rescaled exactly).
+
+        Returns one change summary per repaired row; ``apply=False`` is a dry
+        run that changes nothing."""
+        changes: List[Dict] = []
+        with self._lock:
+            for rec in self._trades:
+                new = multiplier_for(rec)
+                old = float(rec.get("lot_size") or 1)
+                if not new or abs(float(new) - old) < 1e-9:
+                    continue
+                new = float(new)
+                f = new / old
+                summary = {"time": rec.get("time"), "ts": rec.get("ts"),
+                           "action": rec.get("action"), "name": rec.get("name", ""),
+                           "lot_size": (old, new),
+                           "net_pnl": (rec.get("net_pnl"), rec.get("net_pnl"))}
+                upd: Dict = {"lot_size": int(round(new)), "lot_size_fixed_from": old}
+                if rec.get("action") == "CLOSE" and rec.get("entry_spread") is not None:
+                    spread_old = float(rec.get("spread_pnl") or 0)
+                    stt_old = float(rec.get("stt") or 0)
+                    other_old = float(rec.get("other_cost") or 0)
+                    cgt_old = float(rec.get("cgt") or 0)
+                    pre_tax_old = float(rec.get("net_pnl") or 0) + cgt_old
+                    # both legs' brokerage (entry + exit), as it was deducted
+                    fixed = spread_old - stt_old - other_old - pre_tax_old
+                    for k in ("spread_pnl", "edge_pnl", "slippage_pnl", "stt", "other_cost"):
+                        if rec.get(k) is not None:
+                            upd[k] = round(float(rec[k]) * f, 2)
+                    pre_tax = upd["spread_pnl"] - upd.get("stt", 0.0) - upd.get("other_cost", 0.0) - fixed
+                    pct = (cgt_old / pre_tax_old) if (cgt_old > 0 and pre_tax_old > 0) \
+                        else float(capital_gains_pct or 0) / 100.0
+                    cgt = round(pct * pre_tax, 2) if pre_tax > 0 else 0.0
+                    upd["cgt"] = cgt
+                    upd["net_pnl"] = round(pre_tax - cgt, 2)
+                    upd["outcome"] = _outcome_tag(rec.get("exit_reason", ""), upd["net_pnl"],
+                                                  rec.get("entry_zscore"), rec.get("exit_zscore"))
+                    summary["net_pnl"] = (rec.get("net_pnl"), upd["net_pnl"])
+                changes.append(summary)
+                if apply:
+                    rec.update(upd)
+            if apply and changes:
+                self._save()
+        return changes
