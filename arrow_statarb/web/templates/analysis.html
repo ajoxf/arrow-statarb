@@ -77,6 +77,7 @@
     <span><b style="font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">z touches</b>
         <span class="muted">on <span id="t-basis">—</span> · since <span id="t-since">—</span></span></span>
     <span>+2σ <span class="c up" id="t-2u">—</span></span><span>−2σ <span class="c dn" id="t-2d">—</span></span>
+    <span id="t-ent" style="display:none"><span id="t-elbl">±entry</span> <span class="c up" id="t-eu">—</span> / <span class="c dn" id="t-ed">—</span></span>
     <span>+3σ <span class="c up" id="t-3u">—</span></span><span>−3σ <span class="c dn" id="t-3d">—</span></span>
     <span>back to mean <span class="c pos" id="t-rev">—</span></span><span class="muted"><span id="t-n">0</span> events</span>
     <span>peak z <span class="c" id="t-peak">—</span></span>
@@ -221,7 +222,7 @@
         set('sg-foot', `${live} recorded live, ${reached - live} replayed from Arrow's candles (one look per candle at its close — a close beyond the level counts as confirmed; no bid/ask). ` +
             `Every entry gate is off here — the probability and edge filters, cooldowns, loss limits — so each stretch shows what it would have made; ` +
             `"Algo" says what your real settings did with it. Net is after the algo's own cost estimate. ` +
-            `Touch rows (live only) count every ±2σ / ±3σ crossing on BOTH sides on the same z; a Signal row needs your entry z on the side you trade.`);
+            `Touch rows (live only) count every ±2σ / ±entry / ±3σ crossing on the Desk's own z — the sell spread's z on the upper side, the buy spread's on the lower — whatever sides you trade; a Signal row needs your entry z on a side you trade.`);
         if (!autoDerived && !reached && (d.derived || {}).count === 0 && r0.band_source === 'candles' && job.state === 'idle') {
             autoDerived = true; derive(true);
         }
@@ -248,10 +249,11 @@
         const items = [];
         if ($('tl-sig').checked) lastSig.forEach(r => items.push({t: r.armed_ts || r.entry_ts, html: () => sigRow(r)}));
         if ($('tl-tch').checked) lastTch.filter(ev => inRange(ev.ts)).forEach(ev => {
-            const [lbl, c] = EVT[ev.type] || [ev.type, ''];
+            const [lbl, c] = evtLabel(ev);
+            const where = ev.side ? `${ev.side} spread` : (ev.type === 'reversion' ? '' : (ev.type.endsWith('_up') ? '↑ upper' : '↓ lower'));
             items.push({t: ev.ts, html: () => `<tr><td>${when(ev.ts)}</td><td class="${c}">${lbl}</td>` +
-                `<td class="${c}">${ev.type === 'reversion' ? '' : (ev.type.endsWith('_up') ? '↑ upper' : '↓ lower')}</td><td>live</td>` +
-                `<td class="n">${num(ev.z)}</td><td colspan="7"></td></tr>`});
+                `<td class="${c}" title="${ev.side ? (ev.side === 'sell' ? 'Bid A − Ask B: where a short enters / a long exits' : 'Ask A − Bid B: where a long enters / a short exits') : ''}">${where}</td><td>live</td>` +
+                `<td class="n">${num(ev.z)}</td><td></td><td class="n">${ev.spread == null ? '' : num(ev.spread)}</td><td colspan="5"></td></tr>`});
         });
         items.sort((a, b) => (b.t || 0) - (a.t || 0));
         $('sg-body').innerHTML = items.length ? items.map(i => i.html()).join('')
@@ -302,18 +304,29 @@
         } catch (e) {}
     }
     const EVT = { touch_2_up: ['Touched +2σ', 'up'], touch_2_down: ['Touched −2σ', 'dn'], touch_3_up: ['Touched +3σ', 'up'],
-                  touch_3_down: ['Touched −3σ', 'dn'], reversion: ['Back to the mean', 'pos'] };
+                  touch_3_down: ['Touched −3σ', 'dn'], touch_entry_up: ['Touched +entry', 'up'],
+                  touch_entry_down: ['Touched −entry', 'dn'], reversion: ['Back to the mean', 'pos'] };
+    const sig = v => (v > 0 ? '+' : v < 0 ? '−' : '') + (Number.isInteger(v) ? String(Math.abs(v)) : Math.abs(v).toFixed(2).replace(/0+$/, ''));
+    function evtLabel(ev) {
+        const [lbl, c] = EVT[ev.type] || [ev.type, ''];
+        if (ev.type === 'reversion' || ev.band == null) return [lbl + (ev.entry ? ' (entry)' : ''), c];
+        return [`Touched ${sig(ev.band)}σ${ev.entry ? ' (entry)' : ''}`, c];
+    }
     function basisName(b) {
         if (!b) return DASH;
-        if (b === 'ticks') return "the algo's z (tick window)";
-        const [, tf, n] = b.split(':');
-        return `the algo's z (${tf} candles, BB ${n})`;
+        const [src, tf, n] = b.split(':'), exec = b.endsWith(':exec');
+        const px = exec ? ' · sell spread above, buy spread below' : ' · mid price';
+        if (src === 'ticks') return `the Desk's z (tick window${px})`;
+        return `the Desk's z (${tf} candles, BB ${n}${px})`;
     }
     async function loadTouches() {
         try {
             const e = await fetch('/api/signal/excursions?n=500').then(r => r.json());
             const seen = e.event_count > 0;
             set('t-2u', e.touch_2_up); set('t-2d', e.touch_2_down); set('t-3u', e.touch_3_up); set('t-3d', e.touch_3_down);
+            const ez = Number(e.entry_zscore), ownEntry = ez > 0 && ez !== 2 && ez !== 3;
+            $('t-ent').style.display = ownEntry ? '' : 'none';
+            if (ownEntry) { set('t-elbl', `±${sig(ez).replace('+', '')}σ entry`); set('t-eu', e.touch_entry_up ?? 0); set('t-ed', e.touch_entry_down ?? 0); }
             set('t-rev', e.reversions); set('t-n', e.event_count || 0);
             set('t-peak', seen ? `${num(e.max_z)} / ${num(e.min_z)}` : DASH);
             set('t-since', e.since ? when(e.since) : DASH); set('t-basis', basisName(e.basis));
@@ -323,7 +336,7 @@
     }
     window.resetExc = async function () {
         const ok = await uiConfirm({ title: 'Reset excursion counters?', variant: 'warning',
-            body: 'This zeroes the ±2σ / ±3σ touch and reversion counts.', confirmText: 'Reset' });
+            body: 'This zeroes the ±2σ / ±entry / ±3σ touch and reversion counts.', confirmText: 'Reset' });
         if (!ok) return;
         try { await fetch('/api/signal/excursions/reset', {method: 'POST'}); loadTouches(); } catch (e) {}
     };

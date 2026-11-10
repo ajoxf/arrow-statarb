@@ -94,6 +94,7 @@ class SignalEngine:
         # per-side arming so boundary chatter near a band isn't double-counted:
         # a band only re-arms once z falls back inside the re-arm zone (|z|<1).
         self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
+        self._arm_eu = self._arm_ed = True          # the entry band (entry_zscore)
         self._active_up = self._active_dn = False   # a ≥2σ excursion is open
         self._load_exc_state()
         # Regime detection: a "morning anchor" frozen once per IST day after
@@ -106,7 +107,10 @@ class SignalEngine:
     # without their arming re-count a stretch that was already counted (a
     # spread parked beyond +2σ logs a fresh touch after every restart), and
     # arming without counts forgets what it was protecting. Both or neither.
-    _ARMING = ("_arm_2u", "_arm_3u", "_arm_2d", "_arm_3d", "_active_up", "_active_dn")
+    _ARMING = ("_arm_2u", "_arm_3u", "_arm_2d", "_arm_3d", "_active_up", "_active_dn",
+               "_arm_eu", "_arm_ed")
+    #: arming added later — a state file without them still restores (armed)
+    _ARMING_OPTIONAL = ("_arm_eu", "_arm_ed")
     _EXC_SAVE_EVERY_SEC = 5.0          # _z_prev alone moves every sample
 
     def _arming_state(self) -> Tuple:
@@ -123,6 +127,8 @@ class SignalEngine:
                     exc[k] = type(exc[k])(d["exc"][k])
             arming = d.get("arming") or {}
             for a in self._ARMING:
+                if a in self._ARMING_OPTIONAL and a not in arming:
+                    arming[a] = True
                 if not isinstance(arming.get(a), bool):
                     raise ValueError(f"arming state {a} missing")
             zp = d.get("z_prev")
@@ -170,7 +176,8 @@ class SignalEngine:
     @staticmethod
     def _fresh_exc() -> Dict:
         return {"touch_2_up": 0, "touch_2_down": 0, "touch_3_up": 0,
-                "touch_3_down": 0, "reversions": 0, "max_z": 0.0, "min_z": 0.0,
+                "touch_3_down": 0, "touch_entry_up": 0, "touch_entry_down": 0,
+                "reversions": 0, "max_z": 0.0, "min_z": 0.0,
                 "since": time.time()}
 
     # ── params ───────────────────────────────────────────────────────────────
@@ -252,6 +259,7 @@ class SignalEngine:
         """Clear the transient crossing state (not the counters)."""
         self._z_prev = None
         self._arm_2u = self._arm_3u = self._arm_2d = self._arm_3d = True
+        self._arm_eu = self._arm_ed = True
         self._active_up = self._active_dn = False
 
     def reset_excursions(self) -> None:
@@ -276,62 +284,96 @@ class SignalEngine:
         e["min_z"] = round(e["min_z"], 2)
         e["event_count"] = len(events)
         e["basis"] = getattr(self, "_exc_basis", None)   # the z it counts on
+        e["entry_zscore"] = self._p()["entry_zscore"]   # the entry band it also counts
         e["events"] = list(reversed(events))[:max_events]   # newest first, capped
         return e
 
     def _tally_z(self, z: float, ts: Optional[float] = None) -> None:
+        """Tally one z for both sides (no book: the sell and buy z are the
+        same number). Kept for callers that have a single z."""
+        self._tally_sides(z, z, z, ts)
+
+    def _tally_sides(self, z_sell: Optional[float], z_buy: Optional[float],
+                     z_mid: Optional[float], ts: Optional[float] = None,
+                     spreads: Tuple[Optional[float], Optional[float]] = (None, None)) -> None:
         """Update excursion counters from the latest z. Called once per sample.
 
-        A 'touch' of ±2σ/±3σ is counted on the OUTWARD crossing of that band,
-        then disarmed until z returns inside |z|<1 (hysteresis). A 'reversion'
-        is counted when an open ≥2σ excursion crosses back through the mean (0).
-        Each counted event is appended to the timestamped event log."""
+        Counted on the SAME z the Desk shows and the algo trades on: the upper
+        side on the SELL spread's z (k·bid_A − ask_B — where a short would
+        enter), the lower side on the BUY spread's z (k·ask_A − bid_B — where a
+        long would enter). A 'touch' of ±2σ / ±3σ / ±entry is counted on the
+        OUTWARD crossing of that band, then disarmed until that side's z is
+        back inside |z| < 1 (hysteresis). A 'reversion' is counted when an open
+        ≥2σ excursion comes back to the mean on the side that would CLOSE it:
+        an upper stretch when the buy z is ≤ 0, a lower one when the sell z is
+        ≥ 0. Each counted event is appended to the timestamped event log."""
         ts = time.time() if ts is None else ts
         e = self._exc
         before = (self._arming_state(), len(self._exc_events))
-        self._tally_z_inner(z, ts, e)
+        self._tally_sides_inner(z_sell, z_buy, z_mid, ts, e, spreads)
         changed = (self._arming_state(), len(self._exc_events)) != before
         self._save_exc_state(force=changed, now=ts)
 
-    def _tally_z_inner(self, z: float, ts: float, e: Dict) -> None:
-        if z > e["max_z"]:
-            e["max_z"] = z
-        if z < e["min_z"]:
-            e["min_z"] = z
+    def _tally_sides_inner(self, zs: Optional[float], zb: Optional[float],
+                           zm: Optional[float], ts: float, e: Dict,
+                           spreads: Tuple[Optional[float], Optional[float]]) -> None:
+        entry = abs(float(self._p().get("entry_zscore", 2.0) or 0.0))
+        # The entry band is its own event unless it IS the 2σ / 3σ band.
+        entry_own = entry > 0 and abs(entry - 2.0) > 1e-9 and abs(entry - 3.0) > 1e-9
+        sp_sell, sp_buy = spreads
 
-        # Upper side
-        if z >= 2.0 and self._arm_2u:
-            e["touch_2_up"] += 1; self._arm_2u = False; self._active_up = True
-            self._log_event("touch_2_up", z, ts)
-        if z >= 3.0 and self._arm_3u:
-            e["touch_3_up"] += 1; self._arm_3u = False
-            self._log_event("touch_3_up", z, ts)
-        if z < 1.0:
-            self._arm_2u = self._arm_3u = True
+        if zs is not None:                                   # upper side: sell z
+            if zs > e["max_z"]:
+                e["max_z"] = zs
+            for lvl, flag, cnt in ((2.0, "_arm_2u", "touch_2_up"),
+                                   (entry if entry_own else None, "_arm_eu", "touch_entry_up"),
+                                   (3.0, "_arm_3u", "touch_3_up")):
+                if lvl is not None and zs >= lvl and getattr(self, flag):
+                    e[cnt] = e.get(cnt, 0) + 1
+                    setattr(self, flag, False)
+                    if lvl >= 2.0:
+                        self._active_up = True
+                    self._log_event(cnt, zs, ts, band=lvl, side="sell", spread=sp_sell,
+                                    entry=(abs(lvl - entry) < 1e-9))
+            if zs < 1.0:
+                self._arm_2u = self._arm_3u = self._arm_eu = True
 
-        # Lower side
-        if z <= -2.0 and self._arm_2d:
-            e["touch_2_down"] += 1; self._arm_2d = False; self._active_dn = True
-            self._log_event("touch_2_down", z, ts)
-        if z <= -3.0 and self._arm_3d:
-            e["touch_3_down"] += 1; self._arm_3d = False
-            self._log_event("touch_3_down", z, ts)
-        if z > -1.0:
-            self._arm_2d = self._arm_3d = True
+        if zb is not None:                                   # lower side: buy z
+            if zb < e["min_z"]:
+                e["min_z"] = zb
+            for lvl, flag, cnt in ((2.0, "_arm_2d", "touch_2_down"),
+                                   (entry if entry_own else None, "_arm_ed", "touch_entry_down"),
+                                   (3.0, "_arm_3d", "touch_3_down")):
+                if lvl is not None and zb <= -lvl and getattr(self, flag):
+                    e[cnt] = e.get(cnt, 0) + 1
+                    setattr(self, flag, False)
+                    if lvl >= 2.0:
+                        self._active_dn = True
+                    self._log_event(cnt, zb, ts, band=-lvl, side="buy", spread=sp_buy,
+                                    entry=(abs(lvl - entry) < 1e-9))
+            if zb > -1.0:
+                self._arm_2d = self._arm_3d = self._arm_ed = True
 
-        # Reversion to the mean: an open ≥2σ excursion crossed back through 0.
-        if self._z_prev is not None:
-            crossed_zero = (self._z_prev > 0 >= z) or (self._z_prev < 0 <= z)
-            if crossed_zero and (self._active_up or self._active_dn):
-                e["reversions"] += 1
-                self._active_up = self._active_dn = False
-                self._log_event("reversion", z, ts)
-        self._z_prev = z
+        # Back to the mean, on the side that would close the stretch.
+        if self._active_up and zb is not None and zb <= 0.0:
+            e["reversions"] += 1
+            self._active_up = False
+            self._log_event("reversion", zb, ts, band=0.0, side="buy", spread=sp_buy)
+        if self._active_dn and zs is not None and zs >= 0.0:
+            e["reversions"] += 1
+            self._active_dn = False
+            self._log_event("reversion", zs, ts, band=0.0, side="sell", spread=sp_sell)
+        if zm is not None:
+            self._z_prev = zm
 
-    def _log_event(self, etype: str, z: float, ts: float) -> None:
+    def _log_event(self, etype: str, z: float, ts: float, band: Optional[float] = None,
+                   side: Optional[str] = None, spread: Optional[float] = None,
+                   entry: bool = False) -> None:
         self._exc_events.append({"ts": ts, "basis": getattr(self, "_exc_basis", "ticks"),
                                  "time": time.strftime("%H:%M:%S", time.localtime(ts)),
-                                 "type": etype, "z": round(z, 2)})
+                                 "type": etype, "z": round(z, 2),
+                                 "band": band, "side": side, "entry": bool(entry),
+                                 "spread": round(spread, 4) if spread is not None else None})
 
     # ── sampling loop ────────────────────────────────────────────────────────
     def _loop(self) -> None:
@@ -417,8 +459,11 @@ class SignalEngine:
             self._check_hedge_ratio(k)
             self._samples.append((now, float(la), float(lb), spread))
             self._trim(now, window_sec)
-            self._update_excursions_locked(now)
+        # Candles first: the tally must read the bands the Desk reads, which
+        # include this sample's price in the current candle.
         self._feed_candles(now, la, lb)
+        with self._lock:
+            self._update_excursions_locked(now)
 
     def _feed_candles(self, now: float, la: float, lb: float) -> None:
         """Candles are built from each leg's LAST TRADE, as a TradingView
@@ -445,40 +490,38 @@ class SignalEngine:
             self._update_excursions_locked(ts)
 
     def _update_excursions_locked(self, ts: Optional[float] = None) -> None:
-        """Compute the current z over the window and feed the excursion tally.
-        Must be called while holding ``self._lock``."""
+        """Feed the excursion tally the z the Desk shows and the algo trades on.
+        Must be called while holding ``self._lock``.
+
+        Same bands (``_live_bands``: the candle EMA/σ when band_source is
+        candles, else the tick window) and the same prices (the executable
+        sell / buy spreads from the book; the mid when there is no book), so
+        an event's z is the z the Desk showed at that moment. Not ready (too
+        few candles / a warming window) → nothing counted, arming untouched."""
         if len(self._samples) < 2:
             return
-        # Count only on a READY window — span ≥ min_signal_minutes, the tick
-        # signal's own warm-up. A warming window's z is measured against a
-        # mean a few samples old and put spurious ±2σ/±3σ touches on the
-        # tally. While not ready, the tally and its arming stay as they were.
-        # The tally counts on the z the ALGO trades on — the candle bands when
-        # band_source is candles, else the tick window — so the Excursion Log,
-        # the signal journal and the algo all read the same z. Not ready (too
-        # few candles / a warming window) → nothing counted, arming untouched.
+        p = self._p()
         src, tf, n_len = self._band_params()
-        basis = f"candles:{tf}:{n_len}" if src == "candles" and self.candles is not None else "ticks"
+        basis = (f"candles:{tf}:{n_len}" if src == "candles" else "ticks") + ":exec"
         if basis != getattr(self, "_exc_basis", basis):
             self._reset_exc_state()           # a different z: a stretch starts afresh
         self._exc_basis = basis
-        spreads = [s[3] for s in self._samples]
-        if basis == "ticks":
-            span_min = (self._samples[-1][0] - self._samples[0][0]) / 60.0
-            if span_min < self._p()["min_signal_minutes"]:
-                return
-            mean, std = self.compute_stats(spreads)
-        else:
-            try:
-                b = self.candles.bands(tf, n_len, self._p().get("hedge_ratio", 1.0) or 1.0)
-            except Exception:
-                return
-            if not b.get("ready"):
-                return
-            mean, std = float(b["mean"]), float(b["std"])
-        if std <= 1e-12:
+        now = self._samples[-1][0] if ts is None else ts
+        try:
+            bands = self._live_bands(self._samples, p, now)
+        except Exception:
             return
-        self._tally_z((spreads[-1] - mean) / std, ts)
+        mean, std = bands["mean"], bands["std"]
+        if not bands["ready"] or std <= 1e-12:
+            return
+        z_mid = (self._samples[-1][3] - mean) / std
+        ex = self._exec_spreads(self._book, p.get("hedge_ratio", 1.0) or 1.0)
+        if ex is None:                        # LTP-only feed: both sides on the mid
+            self._tally_sides(z_mid, z_mid, z_mid, ts, spreads=(self._samples[-1][3],) * 2)
+            return
+        zs = (ex["sell"] - mean) / std if ex["sell"] is not None else None
+        zb = (ex["buy"] - mean) / std if ex["buy"] is not None else None
+        self._tally_sides(zs, zb, z_mid, ts, spreads=(ex["sell"], ex["buy"]))
 
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:
@@ -708,6 +751,61 @@ class SignalEngine:
         self._stats_cache = (mean, std, now) if ready else None
         return mean, std
 
+    def _live_bands(self, samples: List, p: Dict, now: float,
+                    all_timeframes: bool = False) -> Dict:
+        """The mean/σ the algo trades on, and whether they are usable yet —
+        ONE computation shared by get_signal (Desk, algo) and the excursion
+        tally, so the Excursion Log can never count on a different z.
+
+        Tick mode: the rolling window (cached per stats_update_interval_sec),
+        ready once min_signal_minutes of SAMPLED history exist. Candle mode:
+        the configured timeframe's Bollinger basis (EMA) and σ, ready once N
+        candles exist."""
+        ts = [x[0] for x in samples]
+        spreads = [x[3] for x in samples]
+        history_sec, measured = self._coverage(ts, p["sample_interval_sec"])
+        enough = history_sec >= p["min_signal_minutes"] * 60.0
+        mean, std = self._window_stats(spreads, enough, now,
+                                       float(p.get("stats_update_interval_sec", 0) or 0))
+        out = {"tick_mean": mean, "tick_std": std, "history_sec": history_sec,
+               "measured": measured, "bands": {}, "count": 0}
+        src, tf, n_len = self._band_params()
+        k_now = p.get("hedge_ratio", 1.0) or 1.0
+        if self.candles is not None:
+            from arrow_statarb.core.candles import TIMEFRAMES
+            for _tf in (TIMEFRAMES if all_timeframes else (tf,) if src == "candles" else ()):
+                try:
+                    b = self.candles.bands(_tf, n_len, k_now)
+                except Exception:
+                    b = {"ready": False, "mean": None, "std": None, "count": 0}
+                out["bands"][_tf] = {"mean": b.get("mean"), "std": b.get("std"),
+                                     "ready": bool(b.get("ready")), "count": b.get("count", 0),
+                                     "status": b.get("status")}
+        if src == "candles":
+            b = out["bands"].get(tf) or {}
+            if b.get("ready"):
+                mean, std = float(b["mean"]), float(b["std"])
+            else:
+                std = 0.0                                 # not tradeable until N candles exist
+            enough = bool(b.get("ready"))
+            out["count"] = b.get("count", 0)
+        out.update(src=src, tf=tf, n=n_len, mean=mean, std=std, ready=enough)
+        return out
+
+    @staticmethod
+    def _exec_spreads(book: Optional[Dict], k: float) -> Optional[Dict]:
+        """The spreads an order would actually meet: SELL the spread at
+        k·bid_A − ask_B, BUY it at k·ask_A − bid_B (None where a side of the
+        book is missing). None when there is no book at all."""
+        if not (book and book.get("leg_a") and book.get("leg_b")):
+            return None
+        A, B = book["leg_a"], book["leg_b"]
+        ba, aa, bb, ab = A.get("bid"), A.get("ask"), B.get("bid"), B.get("ask")
+        return {"bid_a": ba, "ask_a": aa, "bid_b": bb, "ask_b": ab,
+                "full": all(v is not None for v in (ba, aa, bb, ab)),
+                "sell": (k * float(ba) - float(ab)) if ba is not None and ab is not None else None,
+                "buy": (k * float(aa) - float(bb)) if aa is not None and bb is not None else None}
+
     def get_signal(self) -> Dict:
         """Return the live signal snapshot — the ONE z the algo + dashboard use."""
         p = self._p()
@@ -748,36 +846,17 @@ class SignalEngine:
         tsN, la, lb, spread = samples[-1]
         now = time.time()
         span_min = (tsN - ts0) / 60.0
-        history_sec, measured = self._coverage(ts, p["sample_interval_sec"])
         spreads = [x[3] for x in samples]
-        enough = history_sec >= p["min_signal_minutes"] * 60.0
-        mean, std = self._window_stats(spreads, enough, now,
-                                       float(p.get("stats_update_interval_sec", 0) or 0))
+        lb_ = self._live_bands(samples, p, now, all_timeframes=True)
+        mean, std, enough = lb_["mean"], lb_["std"], lb_["ready"]
+        history_sec, measured = lb_["history_sec"], lb_["measured"]
         # The tick window's own mean/σ are always published (a position opened
         # in tick mode keeps them if the band source is switched to candles).
-        out["tick_mean"], out["tick_std"] = round(mean, 4), round(std, 6)
-        src, tf, n_len = self._band_params()
-        k_now = p.get("hedge_ratio", 1.0) or 1.0
-        bands_all: Dict[str, Dict] = {}
-        if self.candles is not None:
-            from arrow_statarb.core.candles import TIMEFRAMES
-            for _tf in TIMEFRAMES:
-                try:
-                    b = self.candles.bands(_tf, n_len, k_now)
-                except Exception:
-                    b = {"ready": False, "mean": None, "std": None, "count": 0}
-                bands_all[_tf] = {"mean": b.get("mean"), "std": b.get("std"),
-                                  "ready": bool(b.get("ready")), "count": b.get("count", 0),
-                                  "status": b.get("status")}
-        out.update(band_source=src, band_timeframe=tf, band_length=n_len, bands=bands_all)
+        out["tick_mean"], out["tick_std"] = round(lb_["tick_mean"], 4), round(lb_["tick_std"], 6)
+        src, tf, n_len = lb_["src"], lb_["tf"], lb_["n"]
+        out.update(band_source=src, band_timeframe=tf, band_length=n_len, bands=lb_["bands"])
         if src == "candles":
-            b = bands_all.get(tf) or {}
-            if b.get("ready"):
-                mean, std = float(b["mean"]), float(b["std"])
-            else:
-                std = 0.0                                 # not tradeable until N candles exist
-            enough = bool(b.get("ready"))
-            out["candles_have"], out["candles_need"] = b.get("count", 0), n_len
+            out["candles_have"], out["candles_need"] = lb_["count"], n_len
         hl = self.half_life(spreads)
         usable = std > 1e-12
         z = (spread - mean) / std if usable else 0.0
@@ -798,20 +877,16 @@ class SignalEngine:
         )
 
         # Executable spreads from the book (None where a side is missing).
-        if book and book.get("leg_a") and book.get("leg_b"):
-            k = p.get("hedge_ratio", 1.0) or 1.0
-            A, B = book["leg_a"], book["leg_b"]
-            ba, aa, bb, ab = A.get("bid"), A.get("ask"), B.get("bid"), B.get("ask")
-            out.update(bid_a=ba, ask_a=aa, bid_b=bb, ask_b=ab,
-                       book=all(v is not None for v in (ba, aa, bb, ab)))
-            if ba is not None and ab is not None:
-                sell = k * float(ba) - float(ab)
-                out["sell_spread"] = round(sell, 4)
-                out["z_sell"] = round((sell - mean) / std, 4) if usable else None
-            if aa is not None and bb is not None:
-                buy = k * float(aa) - float(bb)
-                out["buy_spread"] = round(buy, 4)
-                out["z_buy"] = round((buy - mean) / std, 4) if usable else None
+        ex = self._exec_spreads(book, p.get("hedge_ratio", 1.0) or 1.0)
+        if ex is not None:
+            out.update(bid_a=ex["bid_a"], ask_a=ex["ask_a"], bid_b=ex["bid_b"], ask_b=ex["ask_b"],
+                       book=ex["full"])
+            if ex["sell"] is not None:
+                out["sell_spread"] = round(ex["sell"], 4)
+                out["z_sell"] = round((ex["sell"] - mean) / std, 4) if usable else None
+            if ex["buy"] is not None:
+                out["buy_spread"] = round(ex["buy"], 4)
+                out["z_buy"] = round((ex["buy"] - mean) / std, 4) if usable else None
 
         reg = self.regime(spreads=spreads, ts_now=tsN)
         out["regime"] = reg["state"]
