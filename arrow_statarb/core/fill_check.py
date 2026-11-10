@@ -95,9 +95,10 @@ def journal_fills(trades: Iterable[Dict], date_from: Optional[str] = None,
         sym_a, sym_b = parts[0].strip(), parts[1].strip()
         long_ = rec.get("direction") == "LONG_SPREAD"
         buy_a = long_ if action == "OPEN" else not long_
-        lots = float(rec.get("lots") or 0)
-        for sym, px, side in ((sym_a, rec.get("leg_a_price"), "buy" if buy_a else "sell"),
-                              (sym_b, rec.get("leg_b_price"), "sell" if buy_a else "buy")):
+        lots_a = float(rec.get("lots") or 0)
+        lots_b = float(rec.get("lots_b") or lots_a)      # an unbalanced (imported) trade
+        for sym, px, side, lots in ((sym_a, rec.get("leg_a_price"), "buy" if buy_a else "sell", lots_a),
+                                    (sym_b, rec.get("leg_b_price"), "sell" if buy_a else "buy", lots_b)):
             if not px or lots <= 0:
                 continue
             mult = None
@@ -201,27 +202,133 @@ def _rows_from_table(table: List[List]) -> List[Dict]:
                      "columns was found in the file")
 
 
-def read_pnl_report(data: bytes, filename: str = "") -> List[Dict]:
-    """Per-contract rows from Arrow's P&L report download (CSV, or XLSX when
-    openpyxl is installed). Quantities are as the report shows them — P&L units
-    (CRUDEOILM: barrels), so value = qty × price."""
+def _tables(data: bytes, filename: str = "") -> List[List[List]]:
+    """Every table in a download: the CSV, or each sheet of an XLSX."""
     name = filename.lower()
     if name.endswith((".xlsx", ".xlsm")) or data[:2] == b"PK":
         try:
             import openpyxl  # noqa: WPS433 — optional dependency
         except ImportError as exc:
             raise ValueError("reading .xlsx needs openpyxl (pip install openpyxl) — "
-                             "or save the report as CSV") from exc
+                             "or save the file as CSV") from exc
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        for ws in wb.worksheets:
-            table = [list(r) for r in ws.iter_rows(values_only=True)]
-            try:
-                return _rows_from_table(table)
-            except ValueError:
-                continue
-        raise ValueError("no sheet in the workbook has the P&L table")
+        return [[list(r) for r in ws.iter_rows(values_only=True)] for ws in wb.worksheets]
     text = data.decode("utf-8-sig", errors="replace")
-    return _rows_from_table(list(csv.reader(io.StringIO(text))))
+    return [list(csv.reader(io.StringIO(text)))]
+
+
+def read_pnl_report(data: bytes, filename: str = "") -> List[Dict]:
+    """Per-contract rows from Arrow's P&L report download (CSV, or XLSX when
+    openpyxl is installed). Quantities are as the report shows them — P&L units
+    (CRUDEOILM: barrels), so value = qty × price."""
+    for table in _tables(data, filename):
+        try:
+            return _rows_from_table(table)
+        except ValueError:
+            continue
+    raise ValueError("no table with Symbol / Buy Qty / Sell Qty / Buy & Sell Value (or Avg) "
+                     "columns was found in the file")
+
+
+_TB_COLS = {"symbol": ("symbol", "tradingsymbol", "scrip", "instrument", "contract"),
+            "exchange": ("exchange", "exch", "segment", "exchangesegment"),
+            "date": ("date", "tradedate", "orderdate"),
+            "time": ("time", "tradetime", "ordertime", "exchtime", "exchangetime"),
+            "side": ("buysell", "side", "transactiontype", "tradetype", "type", "bs"),
+            "order_id": ("orderid", "orderno", "ordernumber", "exchangeorderid"),
+            "trade_id": ("tradeid", "tradeno", "tradenumber", "fillid"),
+            "qty": ("qty", "quantity", "tradedqty", "filledqty"),
+            "price": ("avgprice", "price", "tradeprice", "tradedprice", "fillprice", "rate")}
+
+_DATE_FORMATS = ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d %b %Y", "%d-%b-%Y", "%d-%m-%y")
+
+
+def _parse_ts(date_v, time_v) -> Optional[float]:
+    """IST epoch from the tradebook's date and time cells (a date cell may
+    already carry the time, or be a datetime from a spreadsheet)."""
+    if isinstance(date_v, datetime):
+        d = date_v
+        if time_v is not None and not isinstance(time_v, str) and hasattr(time_v, "hour"):
+            d = d.replace(hour=time_v.hour, minute=time_v.minute, second=time_v.second)
+        elif isinstance(time_v, str) and time_v.strip():
+            h, m, *sec = [int(float(x)) for x in time_v.strip().split(":")]
+            d = d.replace(hour=h, minute=m, second=(sec[0] if sec else 0))
+        return d.replace(tzinfo=_IST).timestamp()
+    ds = str(date_v or "").strip()
+    ts_ = str(time_v or "").strip() if not hasattr(time_v, "hour") else time_v.strftime("%H:%M:%S")
+    if " " in ds and not ts_ and re.search(r"\d:\d", ds):
+        ds, ts_ = ds.rsplit(" ", 1)
+    for fmt in _DATE_FORMATS:
+        try:
+            day = datetime.strptime(ds, fmt)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    if ts_:
+        parts = [int(float(x)) for x in ts_.split(":")]
+        day = day.replace(hour=parts[0], minute=parts[1] if len(parts) > 1 else 0,
+                          second=parts[2] if len(parts) > 2 else 0)
+    return day.replace(tzinfo=_IST).timestamp()
+
+
+def _tradebook_from_table(table: List[List]) -> List[Dict]:
+    """Fills from Arrow's tradebook download: one row per exchange trade
+    (Symbol, Exchange, Date, Time, Buy sell, Order ID, Trade ID, Qty, Avg
+    price). Qty is in P&L units, as in the P&L report."""
+    for i, row in enumerate(table):
+        heads = [_norm_header(c) for c in row]
+        idx: Dict[str, int] = {}
+        for field, names in _TB_COLS.items():
+            for j, h in enumerate(heads):
+                if h in names:
+                    idx.setdefault(field, j)
+        if not {"symbol", "side", "qty", "price", "date"} <= idx.keys():
+            continue
+        out = []
+        for r in table[i + 1:]:
+            cell = lambda f: r[idx[f]] if f in idx and idx[f] < len(r) else None  # noqa: E731
+            sym = str(cell("symbol") or "").strip()
+            side = _side(cell("side"))
+            qty, px = _num(cell("qty")), _num(cell("price"))
+            ts = _parse_ts(cell("date"), cell("time"))
+            if not sym or side is None or not qty or not px or ts is None:
+                continue
+            out.append({"key": contract_key(sym), "symbol": sym, "side": side,
+                        "units": abs(qty), "price": px, "ts": ts,
+                        "exchange": str(cell("exchange") or "").strip().upper(),
+                        "order_id": str(cell("order_id") or "").strip(),
+                        "trade_id": str(cell("trade_id") or "").strip(),
+                        "date": _ist_day(ts)})
+        out.sort(key=lambda f: (f["ts"], f["trade_id"]))
+        return out
+    raise ValueError("not a tradebook")
+
+
+def read_tradebook(data: bytes, filename: str = "") -> List[Dict]:
+    """Fills from Arrow's tradebook download (CSV or XLSX)."""
+    for table in _tables(data, filename):
+        try:
+            return _tradebook_from_table(table)
+        except ValueError:
+            continue
+    raise ValueError("no tradebook table (Symbol / Date / Buy-Sell / Qty / Price) was found")
+
+
+def read_arrow_file(data: bytes, filename: str = "") -> Dict:
+    """Either Arrow download, told apart by its columns:
+    {"kind": "tradebook", "fills": [...]} or {"kind": "pnl", "rows": [...]}."""
+    try:
+        return {"kind": "tradebook", "fills": read_tradebook(data, filename)}
+    except ValueError:
+        pass
+    try:
+        return {"kind": "pnl", "rows": read_pnl_report(data, filename)}
+    except ValueError:
+        raise ValueError("this is neither Arrow's tradebook (Symbol, Date, Time, Buy sell, "
+                         "Order ID, Qty, Avg price) nor its P&L report (Symbol, Buy Qty, "
+                         "Buy Value/Avg, Sell Qty, Sell Value/Avg)") from None
 
 
 # ── comparison ────────────────────────────────────────────────────────────────

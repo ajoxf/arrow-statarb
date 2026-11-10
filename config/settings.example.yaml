@@ -201,6 +201,17 @@ costs:
   #   etf:    { stt_sell_pct: 0.001 }
   #   nse_fo: { stt_sell_pct: 0.02, txn_pct: 0.0019, stamp_buy_pct: 0.002, sebi_pct: 0.0001 }
   #   mcx_fo: { stt_sell_pct: 0.01, txn_pct: 0.0021, stamp_buy_pct: 0.002, sebi_pct: 0.0001 }
+  # ── the trade journal on Arrow's rate card ──
+  # Each settled round trip is charged the way Arrow's statement charges it:
+  # brokerage per EXECUTED ORDER (a 20-qty order once), txn/SEBI on turnover,
+  # CTT/STT on sells, stamp on buys, GST — from the segment rates above
+  # (always, whatever use_segment_costs says; that one only drives the algo).
+  journal_rate_card: true
+  brokerage_per_order: 20     # ₹ per executed order (default: filters.brokerage_per_lot)
+  # On every start, rows saved at ×1 for MCX are rescaled to the contract
+  # multiplier and settled round trips are re-costed on the rate card
+  # (idempotent; data/trades.before-repair.*.json is kept).
+  journal_auto_repair: true
 
 # Risk management.
 risk:

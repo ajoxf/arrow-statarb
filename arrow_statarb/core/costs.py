@@ -96,3 +96,46 @@ def round_trip_cost(rates_a: Dict[str, float], notional_a: float,
     return (leg_round_trip_cost(rates_a, notional_a, brokerage_leg, gst_pct)
             + leg_round_trip_cost(rates_b, notional_b, brokerage_leg, gst_pct)
             + slippage)
+
+
+#: Exchange names in Arrow's tradebook → the cost table's segment keys.
+EXCHANGE_COST_KEYS = {"MCX": "mcx_fo", "MCXFO": "mcx_fo", "NFO": "nse_fo", "NSEFO": "nse_fo",
+                      "BFO": "bse_fo", "BSEFO": "bse_fo", "NSE": "nse_cm", "BSE": "bse_cm"}
+
+
+def fills_charges(fills, rates_for, brokerage_per_order: float = 20.0,
+                  gst_pct: float = GST_PCT) -> Dict[str, float]:
+    """Arrow's charges on ACTUAL fills, line by line as its contract note
+    and P&L report charge them:
+
+      brokerage  flat ₹ per EXECUTED ORDER (one order of 20 qty is charged
+                 once), shared pro rata when one order is split across trades;
+      txn, SEBI  % of every turnover;  CTT/STT  % of sells (+buys if delivery);
+      stamp      % of buys;  GST  on brokerage + txn + SEBI.
+
+    ``fills``: dicts with side ('buy'/'sell'), units, price, and optionally
+    symbol, order_id and order_units (the order's total, for the brokerage
+    share; default = this fill is the whole order). ``rates_for(fill)`` gives
+    that fill's rate dict (see DEFAULT_SEGMENT_COSTS)."""
+    out = {"brokerage": 0.0, "txn": 0.0, "sebi": 0.0, "stt": 0.0, "stamp": 0.0, "gst": 0.0}
+    for f in fills or []:
+        r = rates_for(f) or {}
+        units, px = float(f.get("units") or 0), float(f.get("price") or 0)
+        turnover = abs(units * px)
+        whole = float(f.get("order_units") or units or 1)
+        out["brokerage"] += float(brokerage_per_order or 0) * (units / whole if whole else 1.0)
+        out["txn"] += float(r.get("txn_pct", 0) or 0) / 100.0 * turnover
+        out["sebi"] += float(r.get("sebi_pct", 0) or 0) / 100.0 * turnover
+        # stt_factor / stamp_factor: the contract note rounds CTT/STT and stamp
+        # to whole rupees per day; a factor spreads that day's rounding back
+        # over its fills so per-trade charges add up to the statement.
+        sf, mf = float(f.get("stt_factor", 1.0)), float(f.get("stamp_factor", 1.0))
+        if f.get("side") == "sell":
+            out["stt"] += float(r.get("stt_sell_pct", 0) or 0) / 100.0 * turnover * sf
+        else:
+            out["stt"] += float(r.get("stt_buy_pct", 0) or 0) / 100.0 * turnover * sf
+            out["stamp"] += float(r.get("stamp_buy_pct", 0) or 0) / 100.0 * turnover * mf
+    out["gst"] = float(gst_pct) / 100.0 * (out["brokerage"] + out["txn"] + out["sebi"])
+    out = {k: round(v, 2) for k, v in out.items()}
+    out["total"] = round(sum(out.values()), 2)
+    return out

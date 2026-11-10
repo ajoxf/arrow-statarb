@@ -10,6 +10,8 @@ This rescales each affected row to the contract multiplier (``pairs.
 multiplier_b`` from settings if set, else the MCX contract spec), keeping per-lot
 brokerage as it was and recomputing STT, CGT and net.
 
+    # Nexus now runs this repair itself on every start (costs.journal_auto_repair)
+    # — this script is for a journal you want to fix without starting Nexus.
     # stop Nexus first (it holds the journal in memory and would overwrite it)
     python scripts/fix_mcx_trade_pnl.py            # dry run: show what changes
     python scripts/fix_mcx_trade_pnl.py --apply    # write it (backup kept)

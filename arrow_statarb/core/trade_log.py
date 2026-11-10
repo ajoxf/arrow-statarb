@@ -80,6 +80,11 @@ class TradeLog:
         # path=None → in-memory only (no file IO), used by the backtester.
         self.path = Path(path) if path is not None else None
         self.brokerage_per_lot = brokerage_per_lot
+        # Optional settle_hook(open_rec, close_rec, capital_gains_pct): re-costs
+        # a just-settled round trip (the app sets it to Arrow's rate card —
+        # core.journal_sync). Called under the lock; a failure keeps the
+        # estimate below.
+        self.settle_hook = None
         self._lock = threading.Lock()
         self._trades: List[Dict] = self._load()
 
@@ -230,6 +235,16 @@ class TradeLog:
                             rec["outcome"] = _outcome_tag(exit_reason, rec["net_pnl"],
                                                           prev.get("zscore"), zscore)
                             prev["_closed"] = True
+                            # The CLOSE's net already deducts the entry's
+                            # brokerage: clear the OPEN's placeholder so day
+                            # P&L and totals count it once, not twice.
+                            prev["net_pnl"] = 0.0
+                            prev["charges_on_close"] = True
+                            if self.settle_hook is not None:
+                                try:
+                                    self.settle_hook(prev, rec, capital_gains_pct)
+                                except Exception as exc:          # noqa: BLE001
+                                    logger.warning("TradeLog: rate-card settle failed — {}", exc)
                         break
             else:
                 rec["net_pnl"] = round(-brokerage, 2)
