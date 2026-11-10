@@ -121,7 +121,7 @@
 <div class="sec" style="flex-wrap: wrap"><b>Arrow check</b><span class="muted" id="rc-sum">— fills at Arrow that the journal does not hold (gross, before charges)</span>
     <span class="flex-grow-1"></span>
     <button class="btn btn-outline-primary btn-x" id="rc-today" title="Today's Arrow order book vs today's LIVE journal rows">Check today</button>
-    <span class="muted">or Arrow P&amp;L report</span><input type="file" id="rc-file" accept=".csv,.xlsx" style="font-size: .7rem; max-width: 14rem">
+    <span class="muted" title="Arrow's tradebook (every fill — can also update the journal) or its P&amp;L report (totals per contract)">or an Arrow download</span><input type="file" id="rc-file" accept=".csv,.xlsx" style="font-size: .7rem; max-width: 14rem">
     <span class="muted">from</span><input type="date" id="rc-from"><span class="muted">to</span><input type="date" id="rc-to">
     <button class="btn btn-outline-primary btn-x" id="rc-run" title="Compare the downloaded report with the journal over these dates">Compare</button></div>
 <div class="tw" style="max-height: 18vh">
@@ -131,6 +131,7 @@
 </tr></thead><tbody id="rc-body"><tr><td colspan="7" class="empty">Run a check — today's order book, or a P&amp;L report for any dates</td></tr></tbody></table>
 </div>
 <div class="foot" id="rc-foot"></div>
+<div class="foot" id="rc-imp" style="display:none; border: 1px solid var(--bs-border-color); border-radius: .2rem; padding: .25rem .45rem; margin-top: .25rem; color: var(--bs-body-color)"></div>
 </div>
 {% endblock %}
 
@@ -268,15 +269,19 @@
             set('tr-sum', trips.length ? `— ${trips.length} closed · ${won} in profit · net ${rs(j.total_pnl)}` : '— no closed trades yet');
             $('tr-body').innerHTML = !trips.length ? '<tr><td colspan="12" class="empty">No completed trades yet</td></tr>'
                 : trips.map(x => {
-                    const who = (x.entry_source || x.source) === 'algo' ? 'Algo' : 'Manual';
+                    const src = x.entry_source || x.source;
+                    const who = src === 'algo' ? 'Algo' : src === 'arrow'
+                        ? '<span class="rep" title="Placed outside Nexus — rebuilt from Arrow\'s tradebook">Arrow</span>' : 'Manual';
+                    const lots = x.unbalanced ? `<span class="rep" title="Unbalanced: leg A ${x.lots} lot(s), leg B ${x.lots_b} lot(s)">${x.lots} / ${x.lots_b}</span>` : (x.lots ?? DASH);
+                    const ok = x.arrow_verified ? ` <span class="pos" title="Fills and charges checked against Arrow's tradebook${x.charges ? ' — charges ₹' + num(x.charges.total) : ''}">✓</span>` : '';
                     const exit = x.exit_source && x.exit_source !== 'algo'
                         ? (x.exit_reason && x.exit_reason !== 'manual' ? x.exit_reason : 'closed by the trader')
                         : (EXIT[x.exit_reason] || x.exit_reason || DASH);
-                    return `<tr><td>${when(x.ts)}</td><td>${side(x.direction)}</td><td>${who}</td><td class="n">${x.lots ?? DASH}</td>
+                    return `<tr><td>${when(x.ts)}</td><td>${side(x.direction)}</td><td>${who}</td><td class="n">${lots}</td>
                         <td class="n">${num(x.entry_zscore)} → ${num(x.exit_zscore)}</td><td class="n">${num(x.entry_spread)} → ${num(x.exit_spread)}</td>
                         <td class="n">${num(x.entry_leg_a)} → ${num(x.exit_leg_a)}</td><td class="n">${num(x.entry_leg_b)} → ${num(x.exit_leg_b)}</td>
                         <td class="n">${held(x.held_sec)}</td><td title="${exit}">${String(exit).slice(0, 34)}${String(exit).length > 34 ? '…' : ''}</td>
-                        <td class="n ${cls(x.net_pnl)}">${rs(x.net_pnl)}</td><td class="n ${cls(x.cum_pnl)}">${rs(x.cum_pnl)}</td></tr>`;
+                        <td class="n ${cls(x.net_pnl)}" title="${x.charges ? `gross ₹${num(x.spread_pnl)} − charges ₹${num(x.charges.total)} (brokerage ${num(x.charges.brokerage)}, CTT/STT ${num(x.charges.stt)}, txn ${num(x.charges.txn)}, stamp ${num(x.charges.stamp)}, SEBI ${num(x.charges.sebi)}, GST ${num(x.charges.gst)})` : ''}">${rs(x.net_pnl)}${ok}</td><td class="n ${cls(x.cum_pnl)}">${rs(x.cum_pnl)}</td></tr>`;
                 }).join('');
         } catch (e) {}
     }
@@ -368,6 +373,48 @@
             ma.length ? 'Journal fills Arrow does not show: ' + ma.map(f => `${when(f.ts)} ${f.side} ${num(f.units, 0)} ${esc(f.symbol)} @ ${num(f.price)}${f.estimated ? ' (estimated exit)' : ''}`).join(' · ') : '',
             (j.unvalued || []).length ? `Not valued in ₹ (unknown contract size): ${j.unvalued.map(esc).join(', ')}` : '',
         ].filter(Boolean).join('<br>');
+        renderImport(j.import_plan, j.arrow_net);
+    }
+    function renderImport(p, arrowNet) {
+        const box = $('rc-imp');
+        if (!p) { box.style.display = 'none'; return; }
+        box.style.display = '';
+        const a = p.arrow || {}, b = p.journal_before || {}, af = p.journal_after || {};
+        const line = (lbl, x) => `${lbl} gross ${rs(x.gross)} · charges ₹${num(x.charges)} · <b>net ${rs(x.net)}</b>`;
+        const parts = [`<b>Journal vs Arrow's tradebook</b> <span class="muted">(${esc(a.date_from)} → ${esc(a.date_to)}, ${a.fills} fills in ${a.orders} orders; charges on Arrow's rate card)</span>`,
+            line('Arrow:', a), line('Journal now:', b)];
+        if (!p.changes) {
+            parts.push('<span class="pos">✓ The journal already matches this tradebook.</span>');
+        } else {
+            parts.push(line('Journal after the update:', af));
+            (p.corrections || []).forEach(c => parts.push(`• correct ${esc(c.action)} of ${esc(c.when)}: ${c.changes.map(esc).join('; ')}`));
+            (p.new_trips || []).forEach(t => parts.push(`• add ${t.direction === 'SHORT_SPREAD' ? 'H→L' : 'L→H'} ${esc(t.name)} ${esc(t.opened)} → ${esc(t.closed)}: ` +
+                `gross ${rs(t.gross)} − ₹${num(t.charges)} = <b class="${cls(t.net)}">${rs(t.net)}</b>${t.balanced ? '' : ` <span class="rep">unbalanced: leg A ${t.leg_a.lots} / leg B ${t.leg_b.lots} lots</span>`}`));
+            if (p.resettled) parts.push(`• re-cost ${p.resettled} journal round trip(s) with Arrow's actual orders`);
+            parts.push(`<button class="btn btn-primary btn-x mt-1" id="rc-apply">Update the journal from this tradebook</button> <span class="muted">a backup of the journal is kept</span>`);
+        }
+        (p.unmatched_journal || []).forEach(u => parts.push(`<span class="rep">• journal ${esc(u.action)} ${esc(u.when)} (${esc(u.side)} ${num(u.units, 0)} @ ${num(u.price)}) has no matching Arrow fill — left as journaled</span>`));
+        if ((p.still_open || []).length) parts.push(`<span class="rep">• still open at the end of the tradebook (not added): ${p.still_open.map(f => `${esc(f.when)} ${f.side} ${num(f.units, 0)} ${esc(f.symbol)} @ ${num(f.price)}`).join(' · ')}</span>`);
+        box.innerHTML = parts.join('<br>');
+        const btn = $('rc-apply');
+        if (btn) btn.addEventListener('click', applyImport);
+    }
+    async function applyImport() {
+        const f = $('rc-file').files[0];
+        if (!f) return;
+        const ok = await uiConfirm({ title: 'Update the journal from Arrow?', variant: 'warning',
+            body: 'Journal rows are corrected to Arrow\'s fills and charges, and trades placed outside Nexus are added. A backup of the journal is saved first.',
+            confirmText: 'Update journal' });
+        if (!ok) return;
+        const fd = new FormData();
+        fd.append('file', f); fd.append('apply', '1');
+        try {
+            const r = await fetch('/api/trades/import-arrow', {method: 'POST', body: fd}).then(x => x.json());
+            if (!r.ok) { set('rc-sum', '— ' + (r.error || 'import failed')); return; }
+            const res = r.result || {};
+            uiToast(`Journal updated: ${res.updated || 0} row(s) corrected, ${res.added || 0} trade(s) added`, 'success');
+            loadTrades(); loadMini(); $('rc-run').click();
+        } catch (e) { set('rc-sum', '— could not reach the server'); }
     }
     $('rc-today').addEventListener('click', async () => {
         set('rc-sum', '— reading Arrow\'s order book…');
@@ -376,7 +423,7 @@
     });
     $('rc-run').addEventListener('click', async () => {
         const f = $('rc-file').files[0];
-        if (!f) { set('rc-sum', '— choose the P&L report you downloaded from Arrow first'); return; }
+        if (!f) { set('rc-sum', '— choose the tradebook or P&L report you downloaded from Arrow first'); return; }
         const fd = new FormData();
         fd.append('file', f); fd.append('date_from', $('rc-from').value); fd.append('date_to', $('rc-to').value);
         set('rc-sum', '— comparing…');

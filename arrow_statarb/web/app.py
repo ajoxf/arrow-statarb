@@ -51,6 +51,7 @@ from arrow_statarb.core import beta_monitor
 from arrow_statarb.core import sessions
 from arrow_statarb.core.contracts import mcx_multiplier
 from arrow_statarb.core import fill_check
+from arrow_statarb.core import journal_sync
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
@@ -3761,28 +3762,127 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                    unvalued=sorted({f["symbol"] for f in arrow if not f.get("valued")}))
         return jsonify(out)
 
-    @app.route("/api/reconcile/report", methods=["POST"])
-    def api_reconcile_report():
-        """Compare an uploaded Arrow P&L report (CSV/XLSX download) with the
-        journal over the report's date range (``date_from``/``date_to``,
-        YYYY-MM-DD, IST, inclusive)."""
+    # ── journal ↔ Arrow: rate card, tradebook import ────────────────────────
+    def _journal_multiplier(sym: str) -> Optional[float]:
+        """₹ per point per lot for a journaled contract: the pair's own (with
+        its settings override) for a current leg, else the MCX spec."""
+        legs = _read_legs()
+        for lk in ("leg_a", "leg_b"):
+            if str((legs.get(lk) or {}).get("symbol", "")).upper() == str(sym).upper():
+                return _price_multiplier(lk)
+        return mcx_multiplier(sym)
+
+    def _segment_cost_key(sym: str) -> Optional[str]:
+        legs = _read_legs()
+        for lk in ("leg_a", "leg_b"):
+            e = legs.get(lk) or {}
+            if str(e.get("symbol", "")).upper() == str(sym).upper():
+                return e.get("cost_key") or e.get("segment") or None
+        return None
+
+    def _rate_card() -> Dict:
+        co = cfg.section("costs") or {}
+        return {"rates_for": journal_sync.default_rates_for(_segment_cost_key, co.get("segments") or {}),
+                # Arrow charges brokerage per executed ORDER (a 20-qty order once)
+                "brokerage_per_order": float(co.get("brokerage_per_order",
+                                                    cfg.get("filters.brokerage_per_lot", 20)) or 0),
+                "gst_pct": float(co.get("gst_pct", costs.GST_PCT) or costs.GST_PCT),
+                "cgt_pct": float(cfg.get("filters.capital_gains_pct", 0) or 0)}
+
+    def _settle_on_rate_card(op: Dict, cl: Dict, cgt_pct: float) -> None:
+        """TradeLog.settle_hook: every new round trip is costed the way Arrow
+        charges it (journal_sync.settle_close), not on the planning estimate."""
+        if not bool(cfg.get("costs.journal_rate_card", True)):
+            return
+        rc = _rate_card()
+        syms = journal_sync.pair_symbols(cl) or ("", "")
+        m = float(cl.get("lot_size") or 1)
+        fills = journal_sync.journal_round_trip_fills(
+            op, cl, _journal_multiplier(syms[0]) or m, _journal_multiplier(syms[1]) or m)
+        if not fills:
+            return
+        ch = costs.fills_charges(fills, rc["rates_for"], rc["brokerage_per_order"], rc["gst_pct"])
+        journal_sync.settle_close(cl, fills, ch, cgt_pct, op)
+
+    trade_log.settle_hook = _settle_on_rate_card
+
+    def _read_upload():
         f = request.files.get("file")
         if f is None:
-            return jsonify({"ok": False, "error": "attach Arrow's P&L report file"}), 400
+            return None, (jsonify({"ok": False, "error": "attach a file downloaded from Arrow"}), 400)
+        try:
+            return fill_check.read_arrow_file(f.read(), f.filename or ""), None
+        except ValueError as exc:
+            return None, (jsonify({"ok": False, "error": str(exc)}), 400)
+
+    def _import_plan(fills: List[Dict]) -> Dict:
+        rc = _rate_card()
+        legs = _read_legs()
+        pair = ((legs["leg_a"]["symbol"], legs["leg_b"]["symbol"])
+                if _have_both_legs(legs) else None)
+        with trade_log._lock:
+            snapshot = [dict(r) for r in trade_log._trades]
+        return journal_sync.plan_import(
+            snapshot, fills, multiplier_for=_journal_multiplier, rates_for=rc["rates_for"],
+            brokerage_per_order=rc["brokerage_per_order"], gst_pct=rc["gst_pct"],
+            cgt_pct=rc["cgt_pct"], pair=pair)
+
+    def _plan_summary(plan: Dict) -> Dict:
+        return {k: v for k, v in plan.items() if k not in ("updates", "new_rows")}
+
+    @app.route("/api/reconcile/report", methods=["POST"])
+    def api_reconcile_report():
+        """Compare an Arrow download with the journal. Either file works:
+        the P&L report (per-contract totals) or the tradebook (every fill —
+        also yields an import plan for /api/trades/import-arrow). Dates
+        (``date_from``/``date_to``, YYYY-MM-DD, IST, inclusive) default to the
+        tradebook's own range."""
         d0 = (request.form.get("date_from") or "").strip() or None
         d1 = (request.form.get("date_to") or "").strip() or None
         for d in (d0, d1):
             if d and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
                 return jsonify({"ok": False, "error": f"bad date {d!r} — use YYYY-MM-DD"}), 400
-        try:
-            rows = fill_check.read_pnl_report(f.read(), f.filename or "")
-        except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+        parsed, err = _read_upload()
+        if err:
+            return err
+        if parsed["kind"] == "tradebook":
+            fills = [f for f in parsed["fills"]
+                     if (not d0 or f["date"] >= d0) and (not d1 or f["date"] <= d1)]
+            if fills:
+                d0 = d0 or min(f["date"] for f in fills)
+                d1 = d1 or max(f["date"] for f in fills)
+            journal = fill_check.journal_fills(trade_log.all(), d0, d1,
+                                               units_per_lot=_fill_units_per_lot)
+            out = fill_check.reconcile(fills, journal)
+            plan = _import_plan(fills)
+            out.update(ok=True, source="tradebook", kind="tradebook", date_from=d0, date_to=d1,
+                       charges=plan["arrow"]["charges"], arrow_net=plan["arrow"]["net"],
+                       import_plan=_plan_summary(plan))
+            return jsonify(out)
+        rows = parsed["rows"]
         journal = fill_check.journal_fills(trade_log.all(), d0, d1,
                                            units_per_lot=_fill_units_per_lot)
         out = fill_check.reconcile(rows, journal)
-        out.update(ok=True, source="report", date_from=d0, date_to=d1,
+        out.update(ok=True, source="report", kind="pnl", date_from=d0, date_to=d1,
                    charges=round(sum(r.get("charges") or 0 for r in rows), 2))
+        return jsonify(out)
+
+    @app.route("/api/trades/import-arrow", methods=["POST"])
+    def api_trades_import_arrow():
+        """Bring the journal in line with Arrow's tradebook: correct journal
+        legs to the fills Arrow actually made, re-cost them on Arrow's rate
+        card, and add the round trips Nexus never journaled (source 'arrow').
+        ``apply`` = 1 writes it (backup kept); otherwise a preview."""
+        parsed, err = _read_upload()
+        if err:
+            return err
+        if parsed["kind"] != "tradebook":
+            return jsonify({"ok": False, "error": "importing needs Arrow's TRADEBOOK (every fill) — "
+                            "the P&L report has totals only"}), 400
+        plan = _import_plan(parsed["fills"])
+        out = {"ok": True, "plan": _plan_summary(plan)}
+        if str(request.form.get("apply", "")).lower() in ("1", "true", "yes"):
+            out["result"] = journal_sync.apply_import(trade_log, plan)
         return jsonify(out)
 
     @app.route("/api/expectancy", methods=["GET"])
@@ -3982,5 +4082,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                "working_orders": working_orders,
                                "refresh_broker_cache": _refresh_broker_cache,
                                "trade_log": trade_log, "study": signal_study}
+
+    # Bring the journal up to date on every start: MCX rows saved at ×1 are
+    # rescaled, and settled round trips are re-costed on Arrow's rate card.
+    # Idempotent; the file is backed up before anything is rewritten.
+    if bool(cfg.get("costs.journal_auto_repair", True)):
+        try:
+            rc = _rate_card()
+            journal_sync.repair_on_start(trade_log, _journal_multiplier, rc["rates_for"],
+                                         rc["brokerage_per_order"], rc["gst_pct"], rc["cgt_pct"])
+        except Exception as exc:                          # noqa: BLE001 — never block startup
+            logger.warning("Journal repair skipped — {}", exc)
 
     return app, socketio

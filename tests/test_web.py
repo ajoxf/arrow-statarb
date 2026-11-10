@@ -1316,3 +1316,81 @@ def test_reconcile_fills_today_from_the_order_book(tmp_path):
     # Arrow: buy 10 @ 8432, sell 10 @ 8450 → +₹180, none of it in the journal
     assert nov["arrow"]["realised"] == pytest.approx(180.0)
     assert nov["untracked_pnl"] == pytest.approx(180.0)
+
+
+def _mcx_app_with_journal(tmp_path):
+    """The app started over a journal written at ×1 (before the MCX fix)."""
+    from tests.test_journal_sync import journal_as_nexus_wrote_it
+    journal_as_nexus_wrote_it(tmp_path / "trades.json")
+    import arrow_statarb.web.app as appmod
+    (tmp_path / "leg_assignments.yaml").write_text(
+        "leg_a:\n  mapping_id: mcx_fo|CRUDEOILM19NOV26F\n  ratio: 1\n"
+        "leg_b:\n  mapping_id: mcx_fo|CRUDEOILM19JAN27F\n  ratio: 1\n")
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("mode: dry_run\nbroker:\n  name: arrow\n")
+    for k, v in dict(LEG_ASSIGNMENTS_FILE="leg_assignments.yaml", TRADES_FILE="trades.json",
+                     SHADOW_FILE="shadow.json", HEARTBEAT_FILE="hb.txt",
+                     SIGNAL_WINDOW_FILE="sw.json", EXECUTION_LOG_FILE="el.jsonl").items():
+        setattr(appmod, k, tmp_path / v)
+    app, _ = appmod.create_app(Config(settings))
+    return app
+
+
+def test_startup_repairs_a_x1_journal_without_running_anything(tmp_path):
+    app = _mcx_app_with_journal(tmp_path)
+    rt = app.test_client().get("/api/trades/journal").get_json()
+    assert sorted(t["spread_pnl"] for t in rt["trips"]) == [-190.0, 130.0, 595.0]
+    assert all(t["charges_model"] == "arrow_rate_card" for t in rt["trips"])
+    assert list(tmp_path.glob("trades.before-repair.*.json"))       # backup kept
+
+
+def test_tradebook_import_preview_then_apply(tmp_path):
+    import io
+    from tests.test_journal_sync import TRADEBOOK
+    app = _mcx_app_with_journal(tmp_path)
+    c = app.test_client()
+    up = lambda **extra: {"file": (io.BytesIO(TRADEBOOK.encode()), "Tradebook.csv"), **extra}  # noqa: E731
+
+    chk = c.post("/api/reconcile/report", data=up(), content_type="multipart/form-data").get_json()
+    assert chk["kind"] == "tradebook" and chk["date_from"] == "2026-10-30"
+    assert chk["totals"]["untracked"] == pytest.approx(295.0)
+    plan = chk["import_plan"]
+    assert len(plan["new_trips"]) == 2 and plan["journal_after"]["gross"] == 830.0
+
+    prev = c.post("/api/trades/import-arrow", data=up(), content_type="multipart/form-data").get_json()
+    assert prev["ok"] and "result" not in prev
+    assert c.get("/api/trades/journal").get_json()["count"] == 3       # preview wrote nothing
+
+    done = c.post("/api/trades/import-arrow", data=up(apply="1"),
+                  content_type="multipart/form-data").get_json()
+    assert done["result"]["added"] == 2
+    rt = c.get("/api/trades/journal").get_json()
+    assert rt["count"] == 5 and rt["total_pnl"] == pytest.approx(208.03, abs=0.05)
+    chk2 = c.post("/api/reconcile/report", data=up(), content_type="multipart/form-data").get_json()
+    assert chk2["matches"] is True and chk2["import_plan"]["changes"] is False
+
+
+def test_import_refuses_a_pnl_report(tmp_path):
+    import io
+    from tests.test_fill_check import REPORT
+    app = _mcx_app_with_journal(tmp_path)
+    r = app.test_client().post("/api/trades/import-arrow",
+                               data={"file": (io.BytesIO(REPORT.encode()), "pnl.csv")},
+                               content_type="multipart/form-data")
+    assert r.status_code == 400 and "TRADEBOOK" in r.get_json()["error"]
+
+
+def test_a_new_close_is_costed_on_arrows_rate_card(tmp_path):
+    app, broker = _mcx_app(tmp_path)
+    c = app.test_client()
+    px = {"CRUDEOILM19NOV26F": 8432.0, "CRUDEOILM19JAN27F": 8259.0}
+    broker.get_ltp = lambda instruments: dict(px)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    px.update({"CRUDEOILM19NOV26F": 8232.0, "CRUDEOILM19JAN27F": 8078.0})
+    c.post("/api/manual-trade/close", json={"direction": "LONG_SPREAD", "lots": 1})
+    close = [t for t in app.extensions["arrow"]["trade_log"].all() if t["action"] == "CLOSE"][0]
+    assert close["charges_model"] == "arrow_rate_card"
+    ch = close["charges"]
+    assert ch["brokerage"] == 80.0                      # 4 orders × ₹20
+    assert ch["stt"] == pytest.approx(0.0001 * (8259 + 8232) * 10, abs=0.01)   # CTT on the sells
+    assert close["net_pnl"] == pytest.approx(-190.0 - ch["total"], abs=0.01)
