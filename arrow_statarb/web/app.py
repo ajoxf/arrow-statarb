@@ -49,6 +49,7 @@ from arrow_statarb.core import costs
 from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core import beta_monitor
 from arrow_statarb.core import sessions
+from arrow_statarb.core.contracts import mcx_multiplier
 from arrow_statarb.core import spread_ladder
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
@@ -366,10 +367,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return meta
         meta["name"] = f'{legs["leg_a"]["symbol"]} − {legs["leg_b"]["symbol"]}'
         try:
-            # Contract leg (leg_b) drives the σ→₹ / P&L multiplier in the
-            # hedge-scaled spread; for a same-lot calendar this equals leg_a.
-            meta["lot_size"] = int(broker.resolve_lot_size(
-                legs["leg_b"]["segment"], legs["leg_b"]["symbol"]))
+            # The journal's lot_size is the ₹-per-point P&L multiplier of the
+            # contract leg (leg_b) — the SAME number the live P&L and exits use.
+            # NOT the broker order lot: MCX reports an order lot of 1, which
+            # valued a CRUDEOILM point at ₹1 instead of ₹10.
+            meta["lot_size"] = max(1, int(round(_price_multiplier("leg_b"))))
         except Exception:
             pass
         # Executed fill prices from the live executor results, keyed by symbol.
@@ -1050,7 +1052,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         For NSE the broker lot size already equals this. For MCX the broker
         reports an order-lot of 1 that is NOT the P&L multiplier, so an explicit
         pairs.multiplier_a/_b overrides it here. This NEVER changes the order
-        quantity (that uses _resolve_lot_size). 0/unset = auto = broker lot size."""
+        quantity (that uses _resolve_lot_size). 0/unset = auto: the contract
+        spec for a known MCX contract (core.contracts), else the broker lot size."""
         key = "multiplier_a" if lk == "leg_a" else "multiplier_b"
         override = float(cfg.get(f"pairs.{key}", 0) or 0)
         if override > 0:
@@ -1058,6 +1061,10 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         legs = _read_legs()
         if lk not in legs:
             return 1.0
+        if sessions.is_mcx(legs[lk]["segment"]):
+            spec = mcx_multiplier(legs[lk]["symbol"])
+            if spec:
+                return spec
         return _resolve_lot_size(legs[lk]["segment"], legs[lk]["symbol"])
 
     def _lot_multiplier() -> float:
