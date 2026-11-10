@@ -116,6 +116,20 @@
         <div class="row2"><span>max <span class="n neg" id="d-max">—</span></span><span>current <span class="n" id="d-cur">—</span></span></div>
         <div class="row2"><span>peak equity <span class="n" id="d-peak">—</span></span><span>max DD <span class="n" id="d-pct">—</span></span></div></div>
 </div>
+
+<div class="sec" style="flex-wrap: wrap"><b>Arrow check</b><span class="muted" id="rc-sum">— fills at Arrow that the journal does not hold (gross, before charges)</span>
+    <span class="flex-grow-1"></span>
+    <button class="btn btn-outline-primary btn-x" id="rc-today" title="Today's Arrow order book vs today's LIVE journal rows">Check today</button>
+    <span class="muted">or Arrow P&amp;L report</span><input type="file" id="rc-file" accept=".csv,.xlsx" style="font-size: .7rem; max-width: 14rem">
+    <span class="muted">from</span><input type="date" id="rc-from"><span class="muted">to</span><input type="date" id="rc-to">
+    <button class="btn btn-outline-primary btn-x" id="rc-run" title="Compare the downloaded report with the journal over these dates">Compare</button></div>
+<div class="tw" style="max-height: 18vh">
+<table><thead><tr>
+    <th>Contract</th><th class="n">Arrow ₹</th><th class="n">Journal ₹</th>
+    <th class="n">Not journaled: bought</th><th class="n">sold</th><th class="n">open qty</th><th class="n">Untracked ₹</th>
+</tr></thead><tbody id="rc-body"><tr><td colspan="7" class="empty">Run a check — today's order book, or a P&amp;L report for any dates</td></tr></tbody></table>
+</div>
+<div class="foot" id="rc-foot"></div>
 </div>
 {% endblock %}
 
@@ -313,6 +327,49 @@
         if (!ok) return;
         try { await fetch('/api/signal/excursions/reset', {method: 'POST'}); loadTouches(); } catch (e) {}
     };
+
+    // ── Arrow check: fills Arrow holds that the journal does not ─────────────
+    const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+    const qty = (u, avg) => (!u || Math.abs(u) < 1e-9) ? DASH
+        : `${num(u, Number.isInteger(u) ? 0 : 2)}${avg != null ? ' @ ' + num(avg) : ''}`;
+    function renderCheck(j) {
+        if (!j.ok) { set('rc-sum', '— ' + (j.error || 'check failed')); return; }
+        const t = j.totals || {}, span = j.date_from === j.date_to ? (j.date_from || '') : `${j.date_from || '…'} → ${j.date_to || '…'}`;
+        set('rc-sum', j.matches ? `— ${span}: Arrow and the journal agree (${rs(t.arrow)})`
+            : `— ${span}: Arrow ${rs(t.arrow)} · journal ${rs(t.journal)} · not journaled ${rs(t.untracked)}`
+              + (j.charges ? ` · Arrow charges ₹${num(j.charges)}` : ''));
+        const rows = j.contracts || [];
+        $('rc-body').innerHTML = !rows.length ? '<tr><td colspan="7" class="empty">No fills in this range</td></tr>'
+            : rows.map(c => {
+                const r = c.residual || {}, extra = r.journal_has_extra
+                    ? ' <span class="rep" title="The journal holds fills Arrow does not show — an exit Nexus estimated, or a row outside the report\'s dates">journal &gt; Arrow</span>' : '';
+                return `<tr><td>${esc(c.symbol)}${extra}</td><td class="n ${cls(c.arrow.realised)}">${rs(c.arrow.realised)}</td>
+                    <td class="n ${cls(c.journal.realised)}">${rs(c.journal.realised)}</td>
+                    <td class="n">${qty(r.buy_units > 0 ? r.buy_units : 0, r.buy_avg)}</td><td class="n">${qty(r.sell_units > 0 ? r.sell_units : 0, r.sell_avg)}</td>
+                    <td class="n">${r.open_units ? num(r.open_units, 0) : DASH}</td>
+                    <td class="n ${cls(c.untracked_pnl)}">${c.matches ? '✓' : rs(c.untracked_pnl)}</td></tr>`;
+            }).join('');
+        const nj = j.not_in_journal || [], ma = j.missing_at_arrow || [];
+        $('rc-foot').innerHTML = [
+            nj.length ? 'Arrow fills not in the journal: ' + nj.map(f => `${f.time ? esc(f.time.slice(-8)) + ' ' : ''}${f.side} ${num(f.units, 0)} ${esc(f.symbol)} @ ${num(f.price)}`).join(' · ') : '',
+            ma.length ? 'Journal fills Arrow does not show: ' + ma.map(f => `${when(f.ts)} ${f.side} ${num(f.units, 0)} ${esc(f.symbol)} @ ${num(f.price)}${f.estimated ? ' (estimated exit)' : ''}`).join(' · ') : '',
+            (j.unvalued || []).length ? `Not valued in ₹ (unknown contract size): ${j.unvalued.map(esc).join(', ')}` : '',
+        ].filter(Boolean).join('<br>');
+    }
+    $('rc-today').addEventListener('click', async () => {
+        set('rc-sum', '— reading Arrow\'s order book…');
+        try { renderCheck(await fetch('/api/reconcile/fills').then(x => x.json())); }
+        catch (e) { set('rc-sum', '— could not reach the server'); }
+    });
+    $('rc-run').addEventListener('click', async () => {
+        const f = $('rc-file').files[0];
+        if (!f) { set('rc-sum', '— choose the P&L report you downloaded from Arrow first'); return; }
+        const fd = new FormData();
+        fd.append('file', f); fd.append('date_from', $('rc-from').value); fd.append('date_to', $('rc-to').value);
+        set('rc-sum', '— comparing…');
+        try { renderCheck(await fetch('/api/reconcile/report', {method: 'POST', body: fd}).then(x => x.json())); }
+        catch (e) { set('rc-sum', '— could not reach the server'); }
+    });
 
     loadSignals(); loadTrades(); loadMini();
     setInterval(loadSignals, 4000); setInterval(loadTrades, 6000); setInterval(loadMini, 15000);
