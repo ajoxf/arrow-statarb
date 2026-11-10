@@ -130,7 +130,7 @@ def test_state_file_holds_counts_and_arming_together(tmp_path):
     _stretched_then_restarted(path)
     d = json.loads(path.read_text())
     assert set(d["arming"]) == {"_arm_2u", "_arm_3u", "_arm_2d", "_arm_3d",
-                                "_active_up", "_active_dn"}
+                                "_active_up", "_active_dn", "_arm_eu", "_arm_ed"}
     assert d["exc"]["touch_2_up"] >= 1 and "z_prev" in d and d["events"]
 
 
@@ -213,7 +213,7 @@ def test_in_candle_mode_the_tally_counts_on_the_candle_bands():
     for i, s in enumerate([1003.0] * 50):                 # flat: the tick window sees no stretch
         eng.push(s + 1000.0, 1000.0, ts=float(i))
     x = eng.get_excursions()
-    assert x["touch_2_up"] == 1 and x["touch_3_up"] == 1 and x["basis"] == "candles:15m:20"
+    assert x["touch_2_up"] == 1 and x["touch_3_up"] == 1 and x["basis"] == "candles:15m:20:exec"
 
 
 def test_control_in_tick_mode_the_same_flat_spread_touches_nothing():
@@ -221,4 +221,120 @@ def test_control_in_tick_mode_the_same_flat_spread_touches_nothing():
     for i, s in enumerate([1003.0] * 50):
         eng.push(s + 1000.0, 1000.0, ts=float(i))
     x = eng.get_excursions()
-    assert x["touch_2_up"] == 0 and x["basis"] == "ticks"
+    assert x["touch_2_up"] == 0 and x["basis"] == "ticks:exec"
+
+
+# ── the Excursion Log matches the Desk: executable sell / buy z, entry band ───
+
+def _book_engine(book, entry=2.5):
+    """Candle bands mean 1000, σ 1 (as _Bands) and a top-of-book feed: the
+    Desk's sell spread is bid_A − ask_B, its buy spread ask_A − bid_B."""
+    p = {"window_minutes": 120.0, "sample_interval_sec": 0.5, "min_signal_minutes": 0.0,
+         "band_source": "candles", "band_timeframe": "15m", "band_length": 20,
+         "entry_zscore": entry}
+    return SignalEngine(lambda: (None, None), lambda: p, candles=_Bands(),
+                        book_provider=lambda: book)
+
+
+def _quote(bid_a, ask_a, bid_b=1000.0, ask_b=1000.0):
+    return {"leg_a": {"bid": bid_a, "ask": ask_a}, "leg_b": {"bid": bid_b, "ask": ask_b}}
+
+
+def test_upper_touches_count_on_the_sell_z_not_the_mid():
+    book = _quote(2001.7, 2002.7)            # sell z +1.7 · mid z +2.2 · buy z +2.7
+    eng = _book_engine(book)
+    for i in range(5):
+        eng.sample_once(now=float(i))
+    sig = eng.get_signal()
+    assert sig["zscore"] == pytest.approx(2.2) and sig["z_sell"] == pytest.approx(1.7)
+    assert eng.get_excursions()["touch_2_up"] == 0   # the mid alone is not a short entry
+
+    book.update(_quote(2002.6, 2003.6))      # sell z +2.6: past +2σ and the +2.5 entry
+    eng.sample_once(now=10.0)
+    x = eng.get_excursions()
+    assert x["touch_2_up"] == 1 and x["touch_entry_up"] == 1 and x["touch_3_up"] == 0
+    desk = eng.get_signal()["z_sell"]
+    for ev in x["events"]:
+        assert ev["side"] == "sell" and ev["z"] == pytest.approx(round(desk, 2))
+        assert ev["spread"] == pytest.approx(1002.6)
+    entry_ev = [ev for ev in x["events"] if ev["type"] == "touch_entry_up"][0]
+    assert entry_ev["band"] == 2.5 and entry_ev["entry"] is True
+
+
+def test_lower_touch_on_the_buy_z_and_reversion_on_the_closing_side():
+    book = _quote(1997.0, 1998.0)            # buy z −2.0 · mid −2.5 · sell −3.0
+    eng = _book_engine(book)
+    for i in range(3):
+        eng.sample_once(now=float(i))
+    x = eng.get_excursions()
+    assert x["touch_2_down"] == 1 and x["touch_entry_down"] == 0 and x["touch_3_down"] == 0
+    assert x["events"][0]["side"] == "buy" and x["events"][0]["band"] == -2.0
+
+    # mid crosses the mean but the SELL spread (where a long closes) is still below it
+    book.update(_quote(1999.6, 2000.6))      # sell z −0.4 · mid +0.1
+    eng.sample_once(now=5.0)
+    assert eng.get_excursions()["reversions"] == 0
+    book.update(_quote(2000.2, 2001.2))      # sell z +0.2 → a long would close here
+    eng.sample_once(now=6.0)
+    x = eng.get_excursions()
+    assert x["reversions"] == 1 and x["events"][0]["type"] == "reversion"
+    assert x["events"][0]["side"] == "sell"
+
+
+def test_entry_band_equal_to_2_sigma_is_not_counted_twice():
+    eng = _book_engine(_quote(2002.1, 2002.1), entry=2.0)
+    for i in range(3):
+        eng.sample_once(now=float(i))
+    x = eng.get_excursions()
+    assert x["touch_2_up"] == 1 and x["touch_entry_up"] == 0
+    assert x["events"][0]["entry"] is True and x["entry_zscore"] == 2.0
+
+
+def test_no_book_counts_both_sides_on_the_mid():
+    eng = _candle_engine("candles")
+    for i, s in enumerate([1002.2] * 5):
+        eng.push(s + 1000.0, 1000.0, ts=float(i))
+    assert eng.get_excursions()["touch_2_up"] == 1
+
+
+def test_a_state_file_from_before_the_entry_band_still_restores(tmp_path):
+    path = tmp_path / "exc.json"
+    path.write_text(json.dumps({
+        "version": 1, "basis": "candles:15m:20",
+        "exc": {"touch_2_up": 7, "touch_2_down": 3, "touch_3_up": 1, "touch_3_down": 0,
+                "reversions": 4, "max_z": 3.2, "min_z": -2.4, "since": 1.0},
+        "arming": {"_arm_2u": False, "_arm_3u": True, "_arm_2d": True, "_arm_3d": True,
+                   "_active_up": True, "_active_dn": False},
+        "z_prev": 2.4, "events": []}))
+    eng = _engine(path)
+    x = eng.get_excursions()
+    assert x["touch_2_up"] == 7 and x["reversions"] == 4 and x["touch_entry_up"] == 0
+    assert eng._arm_2u is False and eng._arm_eu is True
+
+
+class _TrackingCandles:
+    """Bands whose mean trails the LAST price fed to them by 2.1 (σ 1): the
+    tally sees z +2.1 only if the candle took this sample before it counted."""
+    def __init__(self):
+        self.last = None
+
+    def update(self, now, ta, tb, k=1.0):
+        self.last = k * ta - tb
+
+    def bands(self, tf, n, k=1.0):
+        if self.last is None:
+            return {"ready": False, "mean": None, "std": None, "count": 0}
+        return {"ready": True, "mean": self.last - 2.1, "std": 1.0, "count": n}
+
+
+def test_the_candle_takes_the_sample_before_the_tally_counts_it():
+    p = {"window_minutes": 120.0, "sample_interval_sec": 0.5, "min_signal_minutes": 0.0,
+         "band_source": "candles", "band_timeframe": "15m", "band_length": 20}
+    px = iter([(2000.0, 1000.0), (1990.0, 1000.0)])
+    eng = SignalEngine(lambda: next(px), lambda: p, candles=_TrackingCandles())
+    eng.sample_once(now=0.0)
+    eng.sample_once(now=1.0)
+    x = eng.get_excursions()
+    # the Desk's z after sample 2 is +2.1; a stale candle would have seen −7.9
+    assert eng.get_signal()["zscore"] == pytest.approx(2.1)
+    assert x["touch_2_up"] == 1 and x["touch_2_down"] == 0
