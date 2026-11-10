@@ -50,6 +50,7 @@ from arrow_statarb.core import fairvalue, sizing, performance, scenarios
 from arrow_statarb.core import beta_monitor
 from arrow_statarb.core import sessions
 from arrow_statarb.core.contracts import mcx_multiplier
+from arrow_statarb.core import fill_check
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
 from arrow_statarb.core.exits import ExitLadder
@@ -3706,6 +3707,83 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def api_trades_journal():
         """Round-trip trades with full entry/exit detail for the Trade Journal."""
         return jsonify(trade_log.round_trips())
+
+    # ── untracked-fills check: Arrow's fills vs the journal ──────────────────
+    def _fill_units_per_lot(sym: str, rec: Dict) -> Optional[float]:
+        """P&L units per journaled lot of ``sym``: the pair's own multiplier
+        for a current leg, the MCX contract spec, else the journaled lot_size."""
+        legs = _read_legs()
+        for lk in ("leg_a", "leg_b"):
+            if str((legs.get(lk) or {}).get("symbol", "")).upper() == sym.upper():
+                return _price_multiplier(lk)
+        return mcx_multiplier(sym) or rec.get("lot_size")
+
+    def _fill_units_per_qty(order: Dict) -> Optional[float]:
+        """Order-book quantity → P&L units. A leg: its multiplier ÷ the broker
+        order lot (what Nexus sends). Another MCX contract: its spec (MCX order
+        lot is 1); unknown MCX → None (not valued). Anything else: 1."""
+        sym = str(order.get("symbol") or "")
+        legs = _read_legs()
+        for lk in ("leg_a", "leg_b"):
+            e = legs.get(lk) or {}
+            if str(e.get("symbol", "")).upper() == sym.upper():
+                lot = _resolve_lot_size(e["segment"], e["symbol"]) or 1.0
+                return _price_multiplier(lk) / lot
+        spec = mcx_multiplier(sym)
+        if spec:
+            return spec
+        return None if sessions.is_mcx(order.get("exchange")) else 1.0
+
+    def _today_ist() -> str:
+        return datetime.now(_IST).strftime("%Y-%m-%d")
+
+    @app.route("/api/reconcile/fills", methods=["GET"])
+    def api_reconcile_fills():
+        """Today's Arrow fills (order book) vs the journal's LIVE leg fills:
+        per-contract realised P&L on both sides, the residual Nexus never
+        journaled, and the individual Arrow fills left unmatched. Read-only."""
+        broker = active.get()
+        if _mode() != "live" or not broker or not hasattr(broker, "get_order_book"):
+            return jsonify({"ok": False, "error": "needs live mode with Arrow connected — "
+                            "the order book is the exchange's; dry-run and live-sim have none"})
+        try:
+            orders = broker.get_order_book() or []
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("reconcile/fills: order book failed — {}", exc)
+            return jsonify({"ok": False, "error": "could not read Arrow's order book"})
+        day = _today_ist()
+        arrow = fill_check.broker_fills_from_orders(orders, _fill_units_per_qty)
+        journal = fill_check.journal_fills(trade_log.all(), day, day,
+                                           units_per_lot=_fill_units_per_lot)
+        out = fill_check.reconcile(arrow, journal)
+        out.update(fill_check.unmatched_fills(arrow, journal))
+        out.update(ok=True, source="order_book", date_from=day, date_to=day,
+                   unvalued=sorted({f["symbol"] for f in arrow if not f.get("valued")}))
+        return jsonify(out)
+
+    @app.route("/api/reconcile/report", methods=["POST"])
+    def api_reconcile_report():
+        """Compare an uploaded Arrow P&L report (CSV/XLSX download) with the
+        journal over the report's date range (``date_from``/``date_to``,
+        YYYY-MM-DD, IST, inclusive)."""
+        f = request.files.get("file")
+        if f is None:
+            return jsonify({"ok": False, "error": "attach Arrow's P&L report file"}), 400
+        d0 = (request.form.get("date_from") or "").strip() or None
+        d1 = (request.form.get("date_to") or "").strip() or None
+        for d in (d0, d1):
+            if d and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                return jsonify({"ok": False, "error": f"bad date {d!r} — use YYYY-MM-DD"}), 400
+        try:
+            rows = fill_check.read_pnl_report(f.read(), f.filename or "")
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        journal = fill_check.journal_fills(trade_log.all(), d0, d1,
+                                           units_per_lot=_fill_units_per_lot)
+        out = fill_check.reconcile(rows, journal)
+        out.update(ok=True, source="report", date_from=d0, date_to=d1,
+                   charges=round(sum(r.get("charges") or 0 for r in rows), 2))
+        return jsonify(out)
 
     @app.route("/api/expectancy", methods=["GET"])
     def api_expectancy():

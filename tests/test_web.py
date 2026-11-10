@@ -1254,3 +1254,65 @@ def test_mcx_multiplier_is_automatic_and_overridable(tmp_path):
     c.post("/api/settings", json={"pairs": {"multiplier_a": 7, "multiplier_b": 7}})
     a = c.get("/api/pair-analytics").get_json()
     assert a["contract_a"] == 7 and a["contract_b"] == 7        # settings still win
+
+
+def test_reconcile_report_upload_finds_untracked_fills(tmp_path):
+    # Arrow's P&L report (any date range) vs the journal: the residual is
+    # what Arrow filled that Nexus never journaled.
+    import io
+    from tests.test_fill_check import REPORT, _journal
+    app, _ = _mcx_app(tmp_path)
+    tl = app.extensions["arrow"]["trade_log"]
+    tl._trades = _journal()
+    r = app.test_client().post("/api/reconcile/report", data={
+        "file": (io.BytesIO(REPORT.encode()), "pnl.csv"),
+        "date_from": "2026-10-01", "date_to": "2026-11-09"},
+        content_type="multipart/form-data").get_json()
+    assert r["ok"] is True
+    assert r["totals"] == {"arrow": 830.0, "journal": 535.0, "untracked": 295.0}
+    assert r["charges"] == pytest.approx(546.0)
+
+
+def test_reconcile_report_rejects_bad_input(tmp_path):
+    import io
+    app, _ = _mcx_app(tmp_path)
+    c = app.test_client()
+    assert c.post("/api/reconcile/report").status_code == 400
+    r = c.post("/api/reconcile/report", data={"file": (io.BytesIO(b"a,b\n1,2\n"), "x.csv")},
+               content_type="multipart/form-data")
+    assert r.status_code == 400 and "Symbol" in r.get_json()["error"]
+
+
+def test_reconcile_fills_needs_live_mode(tmp_path):
+    app, _ = _mcx_app(tmp_path)                    # dry run: no exchange book
+    r = app.test_client().get("/api/reconcile/fills").get_json()
+    assert r["ok"] is False and "live" in r["error"]
+
+
+def test_reconcile_fills_today_from_the_order_book(tmp_path):
+    import time as _t
+    app, broker = _app(tmp_path, mode="live")
+    (tmp_path / "leg_assignments.yaml").write_text(
+        "leg_a:\n  mapping_id: mcx_fo|CRUDEOILM19NOV26F\n  ratio: 1\n"
+        "leg_b:\n  mapping_id: mcx_fo|CRUDEOILM19JAN27F\n  ratio: 1\n")
+    broker.resolve_lot_size = lambda seg, sym: 1
+    now = _t.time()
+    app.extensions["arrow"]["trade_log"]._trades = [
+        {"action": "OPEN", "direction": "LONG_SPREAD", "lots": 1, "lot_size": 10, "ts": now - 60,
+         "status": "LIVE", "dry_run": False, "leg_a_price": 8432.0, "leg_b_price": 8259.0,
+         "name": "CRUDEOILM19NOV26F − CRUDEOILM19JAN27F"}]
+    broker.get_order_book = lambda: [
+        {"status": "COMPLETE", "side": "BUY", "symbol": "CRUDEOILM19NOV26F", "fill_qty": 1,
+         "fill_price": 8432.0, "exchange": "MCX", "order_id": "A"},
+        {"status": "COMPLETE", "side": "SELL", "symbol": "CRUDEOILM19JAN27F", "fill_qty": 1,
+         "fill_price": 8259.0, "exchange": "MCX", "order_id": "B"},
+        # placed in Arrow's own app — not in the journal
+        {"status": "COMPLETE", "side": "SELL", "symbol": "CRUDEOILM19NOV26F", "fill_qty": 1,
+         "fill_price": 8450.0, "exchange": "MCX", "order_id": "C", "time": "10:01:02"}]
+    r = app.test_client().get("/api/reconcile/fills").get_json()
+    assert r["ok"] is True and r["missing_at_arrow"] == []
+    assert [(f["order_id"], f["units"]) for f in r["not_in_journal"]] == [("C", 10)]
+    nov = {c["key"]: c for c in r["contracts"]}["CRUDEOILM 19NOV26"]
+    # Arrow: buy 10 @ 8432, sell 10 @ 8450 → +₹180, none of it in the journal
+    assert nov["arrow"]["realised"] == pytest.approx(180.0)
+    assert nov["untracked_pnl"] == pytest.approx(180.0)
