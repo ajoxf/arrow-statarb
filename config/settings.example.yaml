@@ -229,6 +229,11 @@ risk:
                               # exposure for 1 lot of the spread). 0 = just > 0.
   capital_at_risk_inr: 0      # your SPAN+exposure margin per trade (₹), the basis
                               # for %-of-capital stop/target. 0 = %-forms disabled.
+  capital_at_risk_auto: true  # use Arrow's "Required (both legs)" margin for one
+                              # trade at lots_per_trade instead (refreshed every
+                              # 5 min); capital_at_risk_inr is then the fallback
+                              # until Arrow answers. A trade keeps the value it
+                              # opened with.
   # ── Tier A: loss-streak circuit breaker (consecutive losing closes) ──
   loss_streak_reduce_at: 0    # after N consecutive losing closes, cut size by
                               # loss_streak_reduce_pct. 0 = off.

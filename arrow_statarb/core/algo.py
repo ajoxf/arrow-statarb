@@ -586,7 +586,8 @@ class ArrowAutoTrader:
         pos = self._pos or {}
         lots = int(pos.get("lots", p.get("lots", 1)) or 1)
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
-        car = float(p.get("capital_at_risk_inr", 0) or 0)
+        # the position's own (frozen at entry) when it has one, else the live value
+        car = float(pos.get("capital_at_risk_inr") or p.get("capital_at_risk_inr", 0) or 0)
         # ── target ──
         target = float(p.get("profit_target_inr", 0) or 0)
         sfrac = float(p.get("profit_target_sigma_frac", 0) or 0)
@@ -1204,6 +1205,10 @@ class ArrowAutoTrader:
                 "direction": direction, "lots": lots,
                 "entry_z": z, "entry_spread": round(spread, 2),
                 "entry_std": (self._signal() or {}).get("std"),   # σ frozen at entry
+                # capital at risk frozen at entry too: with it auto-filled from
+                # Arrow's margin, a margin change mid-trade must not move the
+                # %-of-capital stop / target of a position already open
+                "capital_at_risk_inr": float(p.get("capital_at_risk_inr", 0) or 0),
                 "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),
