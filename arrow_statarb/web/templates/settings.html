@@ -210,9 +210,18 @@
                         <div class="form-text">Halt auto-exit retries & alert after this many consecutive failed exits. 0 = retry indefinitely.</div>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label">Capital at Risk (₹)</label>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <label class="form-label mb-1" for="r-car">Capital at Risk (₹)</label>
+                            <div class="form-check form-switch mb-1">
+                                <input class="form-check-input" type="checkbox" id="r-car-auto" role="switch">
+                                <label class="form-check-label small" for="r-car-auto">Auto from Arrow margin</label>
+                            </div>
+                        </div>
                         <input type="number" class="form-control" id="r-car">
-                        <div class="form-text">SPAN margin per trade — basis for %-of-capital stop/target. 0 = off.</div>
+                        <div class="form-text">SPAN margin per trade — basis for %-of-capital stop/target. 0 = off.
+                            Auto: Arrow's "Required (both legs)" for one trade at Lots per trade, refreshed every
+                            5 min; this field is the fallback until Arrow answers. A trade keeps the value it opened with.</div>
+                        <div class="form-text fw-semibold" id="r-car-live"></div>
                     </div>
                     <div class="col-md-4">
                         <label class="form-label">Loss-streak reduce at</label>
@@ -906,6 +915,29 @@
     // blank field → null (clears an optional override); else its number
     function _blankNull(id) { const el = document.getElementById(id); return (!el || el.value === '') ? null : +el.value; }
 
+    // What the %-of-capital exits are measured on right now, and where it came from.
+    async function refreshCapitalAtRisk() {
+        const el = document.getElementById('r-car-live');
+        if (!el) return;
+        try {
+            const m = await fetch('/api/arrow-margin').then(r => r.json());
+            const c = m.capital_at_risk || {};
+            const inr = v => '₹' + Number(v).toLocaleString('en-IN', {maximumFractionDigits: 0});
+            if (c.source === 'arrow') {
+                const at = c.as_of ? new Date(c.as_of * 1000).toLocaleTimeString('en-IN', {hour: '2-digit', minute: '2-digit'}) : '';
+                el.className = 'form-text fw-semibold text-success';
+                el.textContent = `In use: ${inr(c.value)} — Arrow margin for ${c.lots} lot(s), both legs${at ? ' · ' + at : ''}`;
+            } else if (c.source === 'manual') {
+                el.className = 'form-text fw-semibold';
+                el.textContent = `In use: ${inr(c.value)} — the value above` + (c.auto ? ' (Arrow has not answered for this pair yet)' : '');
+            } else {
+                el.className = 'form-text fw-semibold text-warning';
+                el.textContent = c.auto ? 'Not set: waiting for Arrow\'s margin, and the fallback above is 0 — %-of-capital exits are off'
+                                        : 'Off — %-of-capital stop and take-profit are inactive';
+            }
+        } catch (e) { el.textContent = ''; }
+    }
+
     async function loadSettings() {
         const s = await fetch('/api/settings').then(r => r.json());
         _set('s-window', s.signal.window_minutes);
@@ -941,6 +973,8 @@
         _set('r-mdl', s.risk.max_daily_loss);
         _set('r-minmargin', s.risk.min_live_margin);
         _set('r-car', s.risk.capital_at_risk_inr);
+        _setChk('r-car-auto', s.risk.capital_at_risk_auto !== false);
+        refreshCapitalAtRisk();
         _set('r-lsreduce', s.risk.loss_streak_reduce_at);
         _set('r-lspct', s.risk.loss_streak_reduce_pct);
         _set('r-lspause', s.risk.loss_streak_pause_at);
@@ -1107,6 +1141,7 @@
                 max_daily_loss: +document.getElementById('r-mdl').value,
                 min_live_margin: +document.getElementById('r-minmargin').value,
                 capital_at_risk_inr: +document.getElementById('r-car').value,
+                capital_at_risk_auto: document.getElementById('r-car-auto').checked,
                 loss_streak_reduce_at: +document.getElementById('r-lsreduce').value,
                 loss_streak_reduce_pct: +document.getElementById('r-lspct').value,
                 loss_streak_pause_at: +document.getElementById('r-lspause').value,

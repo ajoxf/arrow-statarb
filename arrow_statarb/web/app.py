@@ -1176,7 +1176,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "cost_floor_mult": float(xo.get("cost_floor_mult", 0) or 0),
             "stop_capital_pct": float(xo.get("stop_capital_pct", 0) or 0),
             "stop_rr": float(xo.get("stop_rr", 0) or 0),
-            "capital_at_risk_inr": float(r.get("capital_at_risk_inr", 0) or 0),
+            "capital_at_risk_inr": _capital_at_risk()["value"],
             "stop_cooldown": float(cfg.get("execution.stop_cooldown_sec", 0) or 0),
             "z_reset_after_stop": bool(cfg.section("execution").get("z_reset_after_stop", False)),
             "loss_streak": int(trade_log.loss_streak()),
@@ -1825,7 +1825,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     def _w3_trade_row(rec, is_open, tid):
         """One trade_log record → the reference trades-table row shape. 'spot'
         maps to leg A, 'futures' to leg B (Arrow has no real spot)."""
-        cap = float(cfg.get("risk.capital_at_risk_inr", 0) or 0)
+        cap = _capital_at_risk()["value"]
         net = float(rec.get("net_pnl", 0) or 0)
         return {
             "id": tid,
@@ -1974,7 +1974,109 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             "used_margin": funds.get("used"),
         })
 
-    _margin_cache: Dict[str, Any] = {"key": None, "at": 0.0, "value": None}
+    _margin_cache: Dict[str, Any] = {"key": None, "at": 0.0, "value": None,
+                                      "good": None, "good_at": 0.0}
+    _margin_refreshing = threading.Lock()
+
+    def _pair_margin(broker) -> Optional[Dict]:
+        """SPAN + exposure for ONE trade of the pair at risk.lots_per_trade,
+        asked of Arrow for both legs together (calendar-spread benefit
+        included) and each leg alone. Cached 60 s (5 min after a refusal);
+        the last GOOD answer is kept apart, for capital at risk."""
+        legs = _read_legs()
+        if broker is None or not _have_both_legs(legs) or not hasattr(broker, "get_pair_margin"):
+            return None
+        lots = max(1, int(float(cfg.get("risk.lots_per_trade", 1) or 1)))
+        key = (legs["leg_a"]["symbol"], legs["leg_b"]["symbol"], lots)
+        now = time.time()
+        ttl = 300 if (_margin_cache.get("value") or {}).get("error") else 60
+        if _margin_cache["key"] == key and now - _margin_cache["at"] < ttl:
+            return _margin_cache["value"]
+        la, lb = _leg_prices()
+        spec = []
+        for lk, side, px in (("leg_a", "buy", la), ("leg_b", "sell", lb)):
+            seg, sym = legs[lk]["segment"], legs[lk]["symbol"]
+            units = int(lots * _resolve_lot_size(seg, sym))
+            spec.append({"segment": seg, "symbol": sym, "side": side,
+                         "quantity": units, "price": px or 0})
+        try:
+            res = broker.get_pair_margin(
+                spec, product=str(cfg.get("execution.product", "NRML")))
+        except Exception as exc:
+            res = {"basket": None, "legs": [], "error": str(exc)}
+        outright = [(x or {}).get("total") for x in res.get("legs") or []]
+        basket = (res.get("basket") or {}).get("total")
+        pair = {
+            "lots": lots,
+            "legs": [legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]],
+            "basket_total": basket,
+            "basket_span": (res.get("basket") or {}).get("span"),
+            "basket_exposure": (res.get("basket") or {}).get("exposure"),
+            "leg_a_outright": outright[0] if len(outright) > 0 else None,
+            "leg_b_outright": outright[1] if len(outright) > 1 else None,
+            "spread_benefit": (round(sum(outright) - basket, 2)
+                               if basket is not None and len(outright) == 2
+                               and all(v is not None for v in outright) else None),
+            "error": res.get("error"),
+            "routes": res.get("routes") or [],
+        }
+        _margin_cache.update(key=key, at=now, value=pair)
+        if basket is not None and float(basket) > 0 and not pair["error"]:
+            _margin_cache.update(good=dict(pair, key=key), good_at=now)
+        return pair
+
+    #: Arrow's margin older than this is refreshed (in the background)
+    _CAR_REFRESH_SEC = 300.0
+
+    def _refresh_margin_async() -> None:
+        """Refresh the pair margin off the caller's thread — the algo reads
+        capital at risk every tick and must never wait on Arrow."""
+        now = time.time()
+        if now - float(_margin_cache.get("tried_at") or 0) < 60.0:
+            return                                    # at most one attempt a minute
+        if not _margin_refreshing.acquire(blocking=False):
+            return                                    # one refresh at a time
+        _margin_cache["tried_at"] = now
+
+        def run():
+            try:
+                _pair_margin(active.get())
+            except Exception as exc:                  # noqa: BLE001
+                logger.debug("capital at risk: margin refresh failed — {}", exc)
+            finally:
+                _margin_refreshing.release()
+        threading.Thread(target=run, daemon=True, name="margin-refresh").start()
+
+    def _capital_at_risk() -> Dict:
+        """The capital the %-of-capital stop and take-profit are measured on.
+
+        risk.capital_at_risk_auto (default on): Arrow's "Required (both legs)"
+        margin for one trade of the CURRENT pair at risk.lots_per_trade — the
+        SPAN + exposure Arrow blocks, spread benefit included. The last good
+        answer is used (refreshed every few minutes in the background); the
+        manual risk.capital_at_risk_inr is the fallback when Arrow has not
+        answered for this pair. Auto off: the manual value alone. 0 = off."""
+        manual = float(cfg.get("risk.capital_at_risk_inr", 0) or 0)
+        out = {"value": manual, "source": "manual" if manual > 0 else "off",
+               "manual": manual, "auto": bool(cfg.get("risk.capital_at_risk_auto", True)),
+               "arrow": None, "lots": None, "as_of": None}
+        if not out["auto"]:
+            return out
+        legs = _read_legs()
+        if not _have_both_legs(legs):
+            return out
+        lots = max(1, int(float(cfg.get("risk.lots_per_trade", 1) or 1)))
+        key = (legs["leg_a"]["symbol"], legs["leg_b"]["symbol"], lots)
+        good = _margin_cache.get("good")
+        if time.time() - float(_margin_cache.get("good_at") or 0) > _CAR_REFRESH_SEC \
+                or not good or good.get("key") != key:
+            if active.get() is not None:
+                _refresh_margin_async()
+        if good and good.get("key") == key:
+            out.update(value=round(float(good["basket_total"]), 2), source="arrow",
+                       arrow=round(float(good["basket_total"]), 2), lots=good.get("lots"),
+                       as_of=_margin_cache.get("good_at"))
+        return out
 
     @app.route("/api/arrow-margin", methods=["GET"])
     def api_arrow_margin():
@@ -1985,12 +2087,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         Arrow for both legs together (the exchange's calendar-spread benefit
         included) and for each leg alone. No leverage, liquidation price or
         IMR/MMR — those are CFD/crypto concepts an exchange-margined futures
-        account does not have. Anything Arrow did not answer is null."""
+        account does not have. Anything Arrow did not answer is null.
+        ``capital_at_risk``: what the %-of-capital exits are measured on."""
         broker = active.get()
         out: Dict[str, Any] = {"connected": broker is not None, "cash": None,
                                "used": None, "available": None, "utilisation_pct": None,
                                "pair": None}
         if broker is None:
+            out["capital_at_risk"] = _capital_at_risk()
             return jsonify(out)
         try:
             funds = broker.get_funds() or {}
@@ -2000,52 +2104,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         out.update(cash=funds.get("cash"), used=used, available=avail)
         if used is not None and avail is not None and (used + avail) > 0:
             out["utilisation_pct"] = round(used / (used + avail) * 100.0, 2)
-
-        legs = _read_legs()
-        if not _have_both_legs(legs) or not hasattr(broker, "get_pair_margin"):
-            return jsonify(out)
-        lots = max(1, int(float(cfg.get("risk.lots_per_trade", 1) or 1)))
-        la, lb = _leg_prices()
-        key = (legs["leg_a"]["symbol"], legs["leg_b"]["symbol"], lots)
-        now = time.time()
-        # 60 s for a good answer; 5 min after a refusal, so an unaccepted
-        # symbol does not cost a round of margin calls every poll.
-        ttl = 300 if (_margin_cache.get("value") or {}).get("error") else 60
-        if _margin_cache["key"] == key and now - _margin_cache["at"] < ttl:
-            pair = _margin_cache["value"]
-        else:
-            spec = []
-            for lk, side, px in (("leg_a", "buy", la), ("leg_b", "sell", lb)):
-                seg, sym = legs[lk]["segment"], legs[lk]["symbol"]
-                units = int(lots * _resolve_lot_size(seg, sym))
-                spec.append({"segment": seg, "symbol": sym, "side": side,
-                             "quantity": units, "price": px or 0})
-            try:
-                res = broker.get_pair_margin(
-                    spec, product=str(cfg.get("execution.product", "NRML")))
-            except Exception as exc:
-                res = {"basket": None, "legs": [], "error": str(exc)}
-            outright = [(x or {}).get("total") for x in res.get("legs") or []]
-            basket = (res.get("basket") or {}).get("total")
-            pair = {
-                "lots": lots,
-                "legs": [legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]],
-                "basket_total": basket,
-                "basket_span": (res.get("basket") or {}).get("span"),
-                "basket_exposure": (res.get("basket") or {}).get("exposure"),
-                "leg_a_outright": outright[0] if len(outright) > 0 else None,
-                "leg_b_outright": outright[1] if len(outright) > 1 else None,
-                "spread_benefit": (round(sum(outright) - basket, 2)
-                                   if basket is not None and len(outright) == 2
-                                   and all(v is not None for v in outright) else None),
-                "error": res.get("error"),
-                "routes": res.get("routes") or [],
-            }
-            _margin_cache.update(key=key, at=now, value=pair)
+        pair = _pair_margin(broker)
         if pair and pair.get("basket_total") is not None and avail is not None:
             pair = dict(pair, headroom_trades=(int(avail // pair["basket_total"])
                                                if pair["basket_total"] > 0 else None))
         out["pair"] = pair
+        out["capital_at_risk"] = _capital_at_risk()
         return jsonify(out)
 
     @app.route("/api/active-orders", methods=["GET"])
@@ -2540,7 +2604,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         rt_cost = (float(f.get("brokerage_per_lot", 20) or 0) * max(1, lots_b) * 4.0
                    + 2.0 * (float(f.get("stt_pct", 0) or 0) / 100.0) * notional_b
                    + 4.0 * (float(f.get("other_cost_pct", 0) or 0) / 100.0) * notional_b)
-        capital = float(cfg.get("risk.capital_at_risk_inr", 0) or 0) or None
+        capital = _capital_at_risk()["value"] or None
 
         ladder = ExitLadder(exits_cfg, signals_cfg, target_fraction=frac or 0.5)
         levels = plan = None
@@ -3319,6 +3383,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "loss_streak_reduce_pct": r.get("loss_streak_reduce_pct", 20),
                     "loss_streak_pause_at": r.get("loss_streak_pause_at", 0),
                     "capital_at_risk_inr": r.get("capital_at_risk_inr", 0),
+                    "capital_at_risk_auto": bool(r.get("capital_at_risk_auto", True)),
                 },
                 "trading_hours": {
                     "enabled": bool(th.get("enabled", False)),
@@ -3400,6 +3465,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                      ("capital_at_risk_inr", 0)):
             if k in (data.get("risk") or {}):
                 rk[k] = _num(data["risk"][k], d)
+        if "capital_at_risk_auto" in (data.get("risk") or {}):
+            rk["capital_at_risk_auto"] = bool(data["risk"]["capital_at_risk_auto"])
 
         th = raw.setdefault("trading_hours", {})
         td = data.get("trading_hours") or {}
@@ -3924,7 +3991,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             brokerage_per_lot=float(f.get("brokerage_per_lot", 20)),
             slippage_per_lot=float(f.get("slippage_per_lot", 5)),
             lots=int(_algo_lots["lots"]),
-            capital=float(cfg.get("risk.capital_at_risk_inr", 0) or 0) or None,
+            capital=_capital_at_risk()["value"] or None,
             hedge_ratio=float(cfg.get("signal.hedge_ratio", 1) or 1),
             stt_pct=float(f.get("stt_pct", 0.02) or 0),
             other_cost_pct=float(f.get("other_cost_pct", 0) or 0),

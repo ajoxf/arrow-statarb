@@ -1394,3 +1394,66 @@ def test_a_new_close_is_costed_on_arrows_rate_card(tmp_path):
     assert ch["brokerage"] == 80.0                      # 4 orders × ₹20
     assert ch["stt"] == pytest.approx(0.0001 * (8259 + 8232) * 10, abs=0.01)   # CTT on the sells
     assert close["net_pnl"] == pytest.approx(-190.0 - ch["total"], abs=0.01)
+
+
+def _margin_app(tmp_path, basket=15240.0, error=None, manual=0.0, auto=None):
+    """An MCX pair whose broker answers the pair-margin question."""
+    app, broker = _mcx_app(tmp_path)
+    calls = []
+
+    def get_pair_margin(spec, product="NRML"):
+        calls.append(spec)
+        if error:
+            return {"basket": None, "legs": [], "error": error}
+        return {"basket": {"total": basket, "span": basket * 0.8, "exposure": basket * 0.2},
+                "legs": [{"total": 60000.0}, {"total": 61000.0}]}
+    broker.get_pair_margin = get_pair_margin
+    broker.get_funds = lambda: {"cash": 100000.0, "used": 0.0, "available": 100000.0}
+    risk = {"capital_at_risk_inr": manual}
+    if auto is not None:
+        risk["capital_at_risk_auto"] = auto
+    app.test_client().post("/api/settings", json={"risk": risk})
+    return app, broker, calls
+
+
+def test_capital_at_risk_auto_fills_from_arrows_margin(tmp_path):
+    app, _, _ = _margin_app(tmp_path, basket=15240.0, manual=50000.0)
+    m = app.test_client().get("/api/arrow-margin").get_json()
+    car = m["capital_at_risk"]
+    assert car["source"] == "arrow" and car["value"] == 15240.0 and car["lots"] == 1
+    assert m["pair"]["basket_total"] == 15240.0
+    # the algo is handed Arrow's figure, not the manual 50k
+    p = app.extensions["arrow"]["algo"]._params()
+    assert p["capital_at_risk_inr"] == 15240.0
+
+
+def test_capital_at_risk_falls_back_to_the_manual_value(tmp_path):
+    app, _, _ = _margin_app(tmp_path, error="symbol not accepted", manual=50000.0)
+    car = app.test_client().get("/api/arrow-margin").get_json()["capital_at_risk"]
+    assert car["source"] == "manual" and car["value"] == 50000.0
+    (tmp_path / "b").mkdir()
+    app2, _, _ = _margin_app(tmp_path / "b", error="down", manual=0.0)
+    car2 = app2.test_client().get("/api/arrow-margin").get_json()["capital_at_risk"]
+    assert car2["source"] == "off" and car2["value"] == 0.0
+
+
+def test_capital_at_risk_auto_can_be_switched_off(tmp_path):
+    app, _, _ = _margin_app(tmp_path, basket=15240.0, manual=50000.0, auto=False)
+    c = app.test_client()
+    car = c.get("/api/arrow-margin").get_json()["capital_at_risk"]
+    assert car["source"] == "manual" and car["value"] == 50000.0
+    assert c.get("/api/settings").get_json()["risk"]["capital_at_risk_auto"] is False
+
+
+def test_capital_at_risk_refreshes_in_the_background_for_the_algo(tmp_path):
+    import time as _t
+    app, _, calls = _margin_app(tmp_path, basket=15240.0, manual=50000.0)
+    algo = app.extensions["arrow"]["algo"]
+    # no page has asked for the margin yet: the manual value, and a refresh starts
+    assert algo._params()["capital_at_risk_inr"] == 50000.0
+    for _ in range(50):
+        if calls:
+            break
+        _t.sleep(0.02)
+    _t.sleep(0.05)
+    assert calls and algo._params()["capital_at_risk_inr"] == 15240.0

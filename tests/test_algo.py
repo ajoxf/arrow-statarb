@@ -671,6 +671,24 @@ def test_sigma_fraction_target_precedence():
     assert target == 390.0
 
 
+def test_capital_at_risk_is_frozen_at_entry():
+    # Capital at risk can now follow Arrow's margin; a margin change while a
+    # trade is open must not move that trade's %-of-capital stop / target.
+    algo, _, _ = _pnl_make({"capital_at_risk_inr": 50000.0,
+                            "tp_capital_pct": 0.5, "stop_capital_pct": 1.5})
+    algo._pos = {"lots": 1, "entry_z": -3.0, "entry_std": 0.0,
+                 "capital_at_risk_inr": 20000.0}            # what it opened with
+    stop, target = algo._effective_exit_levels(algo._params())
+    assert stop == 300.0 and target == 100.0                # 1.5% / 0.5% of 20k, not 50k
+
+
+def test_entry_records_the_capital_at_risk_it_opened_with():
+    algo, state, calls = _make(params_over={"capital_at_risk_inr": 18000.0,
+                                            "cooldown": 0})
+    state["sig"] = _sig(-2.5); algo._tick()
+    assert calls["execute"] and algo._pos["capital_at_risk_inr"] == 18000.0
+
+
 def test_capital_pct_stop_and_target():
     algo, _, _ = _pnl_make({"capital_at_risk_inr": 100000.0,
                             "tp_capital_pct": 0.5, "stop_capital_pct": 1.5})
