@@ -1457,3 +1457,20 @@ def test_capital_at_risk_refreshes_in_the_background_for_the_algo(tmp_path):
         _t.sleep(0.02)
     _t.sleep(0.05)
     assert calls and algo._params()["capital_at_risk_inr"] == 15240.0
+
+
+def test_an_instrument_change_starts_the_new_pair_warmup(tmp_path):
+    import json as _json
+    app, _ = _app(tmp_path)
+    c = app.test_client()
+    marker = tmp_path / "pair_warmup.json"
+    same = {"leg_a": {"mapping_id": "nse_fo|NIFTY30JUN26F", "ratio": 1},
+            "leg_b": {"mapping_id": "nse_fo|NIFTY28JUL26F", "ratio": 1}}
+    c.post("/api/leg-assignments", json=same)
+    assert not marker.exists()                       # same pair: no warm-up
+    c.post("/api/leg-assignments", json={"leg_b": {"mapping_id": "nse_fo|NIFTY25AUG26F", "ratio": 1}})
+    d = _json.loads(marker.read_text())
+    assert d["active"] is True and d["key"].endswith("NIFTY25AUG26F")
+    # the setting round-trips through the Settings API
+    c.post("/api/settings", json={"signal": {"warmup_after_pair_change": False}})
+    assert c.get("/api/settings").get_json()["signal"]["warmup_after_pair_change"] is False

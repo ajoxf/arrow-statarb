@@ -46,7 +46,16 @@ class SignalEngine:
         session_provider: Optional[Callable[[], bool]] = None,
         candles=None,
         excursions_path: Optional[Path] = None,
+        pair_warmup_path: Optional[Path] = None,
     ):
+        # After an INSTRUMENT CHANGE the candle bands are ready as soon as the
+        # new pair's history loads, while its live quotes are minutes old. A
+        # pair warm-up then also requires the "Warm-up before trading"
+        # (min_signal_minutes) of live samples on the new pair. Kept in its own
+        # file so a restart part-way through cannot skip it.
+        self._pw_path = Path(pair_warmup_path) if pair_warmup_path else None
+        self._pw: Optional[Dict] = None          # {"key": series key, "since": ts}
+        self._pw_loaded = False
         # Where the excursion tally AND its arming state live between runs.
         # None = in memory only (tests, backtests).
         self._exc_path = Path(excursions_path) if excursions_path else None
@@ -751,6 +760,70 @@ class SignalEngine:
         self._stats_cache = (mean, std, now) if ready else None
         return mean, std
 
+    # ── warm-up after an instrument change ───────────────────────────────────
+    def begin_pair_warmup(self, now: Optional[float] = None) -> None:
+        """Called when the legs change: the new pair must collect the warm-up
+        of live samples before it is ready, even when candle history makes
+        its bands ready at once. Off with signal.warmup_after_pair_change."""
+        if not self._pair_warmup_enabled():
+            return
+        key = self._series_key()
+        with self._lock:
+            self._pw = {"key": key, "since": time.time() if now is None else now}
+            self._pw_loaded = True
+        self._pw_save()
+        logger.info("SignalEngine: new pair {} — trading waits for {:.0f} min of live data",
+                    key or "?", self._p()["min_signal_minutes"])
+
+    def _pair_warmup_enabled(self) -> bool:
+        try:
+            raw = self._params() or {}
+        except Exception:
+            raw = {}
+        v = raw.get("warmup_after_pair_change", True)
+        return str(v).lower() not in ("0", "false", "no", "off") if v is not None else True
+
+    def _pair_warmup(self) -> Optional[Dict]:
+        """The active pair warm-up, if any (loaded once from disk; ignored when
+        it belongs to another pair or the setting is off)."""
+        if not self._pw_loaded:
+            self._pw_loaded = True
+            try:
+                if self._pw_path and self._pw_path.exists():
+                    d = json.loads(self._pw_path.read_text() or "{}")
+                    if d.get("active"):
+                        self._pw = {"key": d.get("key"), "since": float(d.get("since") or 0)}
+            except Exception as exc:                       # noqa: BLE001
+                logger.warning("SignalEngine: pair warm-up state unreadable — {}", exc)
+        pw = self._pw
+        if pw is None or not self._pair_warmup_enabled():
+            return None
+        key = self._series_key()
+        if key and pw.get("key") and pw["key"] != key:
+            return None                       # a marker for another pair: not ours
+        return pw
+
+    def _end_pair_warmup(self) -> None:
+        with self._lock:
+            if self._pw is None:
+                return
+            self._pw = None
+        self._pw_save()
+        logger.info("SignalEngine: new-pair warm-up complete — signal ready")
+
+    def _pw_save(self) -> None:
+        if not self._pw_path:
+            return
+        pw = self._pw
+        body = {"active": pw is not None, **(pw or {})}
+        try:
+            self._pw_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._pw_path.with_suffix(self._pw_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(body))
+            os.replace(tmp, self._pw_path)
+        except Exception as exc:                           # noqa: BLE001
+            logger.warning("SignalEngine: could not save pair warm-up state — {}", exc)
+
     def _live_bands(self, samples: List, p: Dict, now: float,
                     all_timeframes: bool = False) -> Dict:
         """The mean/σ the algo trades on, and whether they are usable yet —
@@ -789,6 +862,19 @@ class SignalEngine:
                 std = 0.0                                 # not tradeable until N candles exist
             enough = bool(b.get("ready"))
             out["count"] = b.get("count", 0)
+            # After an instrument change the bands alone are not enough: the
+            # new pair also needs the warm-up of LIVE samples (option 2).
+            pw = self._pair_warmup()
+            if pw is not None:
+                need = p["min_signal_minutes"] * 60.0
+                if history_sec >= need:
+                    self._end_pair_warmup()
+                else:
+                    out["pair_warmup"] = {"since": pw.get("since"),
+                                          "have_sec": round(history_sec, 1), "need_sec": need}
+                    enough = False
+        elif self._pw is not None and enough:
+            self._end_pair_warmup()           # tick mode: its own warm-up already covered it
         out.update(src=src, tf=tf, n=n_len, mean=mean, std=std, ready=enough)
         return out
 
@@ -857,6 +943,7 @@ class SignalEngine:
         out.update(band_source=src, band_timeframe=tf, band_length=n_len, bands=lb_["bands"])
         if src == "candles":
             out["candles_have"], out["candles_need"] = lb_["count"], n_len
+        out["pair_warmup"] = lb_.get("pair_warmup")       # None unless a new pair is warming up
         hl = self.half_life(spreads)
         usable = std > 1e-12
         z = (spread - mean) / std if usable else 0.0

@@ -76,6 +76,12 @@ signal:
                               # tick (bands drift). ~300 (5 min) for steady bands.
   display_refresh_ms: 300     # dashboard live-price poll cadence (min 100ms; 300 = 0.3 s)
   min_signal_minutes: 120     # history required before any trade (2h warm-up gate)
+                              # — tick bands. With candle bands, ready = N candles
+                              # loaded; this warm-up then applies only after an
+                              # instrument change (below).
+  warmup_after_pair_change: true   # candle bands: after the legs change, also wait
+                              # min_signal_minutes of LIVE data on the new pair
+                              # (its history makes the bands ready at once)
   # Window persistence: save the rolling window to data/signal_window.json so a
   # quick restart resumes the warm-up instead of re-collecting it. Restore is
   # REFUSED if the legs changed or the newest saved sample is older than
