@@ -707,7 +707,12 @@ class ArrowAutoTrader:
         # ready) — so its readiness, not the setting's, gates the exit logic.
         pos_bands = self._position_bands(sig)
         if not sig.get("ready") and pos_bands is None:
-            if sig.get("band_source") == "candles":
+            pw = sig.get("pair_warmup")
+            if pw:
+                snap["status"] = (f"new pair warm-up: collecting live data "
+                                  f"({float(pw.get('have_sec') or 0) / 60.0:.1f}/"
+                                  f"{float(pw.get('need_sec') or 0) / 60.0:.0f} min) — candle bands ready")
+            elif sig.get("band_source") == "candles":
                 snap["status"] = (f"loading candles ({sig.get('candles_have', 0)}/"
                                   f"{sig.get('candles_need', 0)} on {sig.get('band_timeframe')})")
             else:

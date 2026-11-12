@@ -11,11 +11,13 @@
         <div class="card h-100">
             <div class="card-header"><i class="bi bi-graph-up me-2"></i>Signal Parameters</div>
             <div class="card-body">
+                <div class="alert alert-info py-2 small mb-3" id="s-mode-note" style="display:none"></div>
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label">Collection Window <span class="badge bg-secondary">min</span></label>
                         <input type="number" step="1" class="form-control" id="s-window">
-                        <div class="form-text">Rolling lookback for mean / std / z. Keep a little above the warm-up below (it trims at exactly its length). ~150 for a 2h warm-up.</div>
+                        <div class="form-text" id="s-window-help">Rolling lookback for mean / std / z. Keep a little above the warm-up below (it trims at exactly its length). ~150 for a 2h warm-up.</div>
+                        <div class="form-text text-danger fw-semibold" id="s-window-warn" style="display:none"></div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Tick Interval (sec)</label>
@@ -25,12 +27,16 @@
                     <div class="col-md-6">
                         <label class="form-label">Stats Update Interval (sec)</label>
                         <input type="number" step="1" class="form-control" id="s-statsint">
-                        <div class="form-text">Recompute mean/std every N s so the bands stay steady (z still uses the live spread). 0 = every tick. ~300 for stable bands.</div>
+                        <div class="form-text" id="s-statsint-help">Recompute mean/std every N s so the bands stay steady (z still uses the live spread). 0 = every tick. ~300 for stable bands.</div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Warm-up before trading <span class="badge bg-secondary">min</span></label>
                         <input type="number" step="1" class="form-control" id="s-minhist">
-                        <div class="form-text">Collect this much data before ANY trade (the "ready" gate). 120 = 2 hours. Must be below the Collection Window.</div>
+                        <div class="form-text" id="s-minhist-help">Collect this much data before ANY trade (the "ready" gate). 120 = 2 hours. Must be below the Collection Window.</div>
+                        <div class="form-check form-switch mt-1">
+                            <input class="form-check-input" type="checkbox" id="s-pairwarm" role="switch">
+                            <label class="form-check-label small" for="s-pairwarm">Also after an instrument change (candle bands)</label>
+                        </div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Min Hold (sec)</label>
@@ -942,6 +948,7 @@
         const s = await fetch('/api/settings').then(r => r.json());
         _set('s-window', s.signal.window_minutes);
         _set('s-minhist', s.signal.min_signal_minutes);
+        _setChk('s-pairwarm', s.signal.warmup_after_pair_change !== false);
         _set('s-minhold', s.signal.min_hold_sec);
         _set('s-tick', s.signal.sample_interval_sec);
         _set('s-entry', s.signal.entry_zscore);
@@ -956,6 +963,7 @@
         _set('s-band-tf', s.signal.band_timeframe || '15m');
         _set('s-band-length', s.signal.band_length || 20);
         _set('s-max-hold-candles', s.signal.max_hold_candles || 0);
+        applyBandMode();
         refreshBandStatus();
         _set('s-zdiv', s.signal.max_entry_z_divergence);
         _set('s-sdiv', s.signal.max_entry_spread_divergence);
@@ -1110,6 +1118,7 @@
             signal: {
                 window_minutes: +document.getElementById('s-window').value,
                 min_signal_minutes: +document.getElementById('s-minhist').value,
+                warmup_after_pair_change: document.getElementById('s-pairwarm').checked,
                 min_hold_sec: +document.getElementById('s-minhold').value,
                 hedge_ratio: +document.getElementById('s-hedge').value,
                 stats_update_interval_sec: +document.getElementById('s-statsint').value,
@@ -1317,6 +1326,50 @@
     }
 
     // What history is loaded per timeframe (so a choice is never made blind).
+    // Which Signal Parameters actually apply depends on the band source: with
+    // candle bands the mean/σ come from N candles, so the tick window's
+    // stats interval is unused and "ready" means the candles are loaded —
+    // the warm-up then applies only after an instrument change.
+    const HELP = {};
+    function applyBandMode() {
+        const $ = id => document.getElementById(id);
+        ['s-window-help', 's-statsint-help', 's-minhist-help'].forEach(id => {
+            if ($(id) && !(id in HELP)) HELP[id] = $(id).innerHTML; });
+        const candles = ($('s-band-source') || {}).value === 'candles';
+        const tf = ($('s-band-tf') || {}).value || '15m', n = +(($('s-band-length') || {}).value || 20);
+        const win = +($('s-window').value || 0), warm = +($('s-minhist').value || 0);
+        const pairWarm = $('s-pairwarm') && $('s-pairwarm').checked;
+        const note = $('s-mode-note');
+        $('s-statsint').disabled = candles;
+        $('s-pairwarm').disabled = !candles;
+        if (candles) {
+            note.style.display = '';
+            note.innerHTML = `<b>Bands: ${n} × ${tf} candles (BB, EMA basis).</b> The signal is ready when ${n} candles are loaded — ` +
+                `from Arrow's history, usually within minutes of a start. ` +
+                (pairWarm ? `After an <b>instrument change</b> it also waits for the ${warm || 0}-min warm-up of live data on the new pair.`
+                          : `The warm-up is <b>not</b> applied, not even after an instrument change.`);
+            $('s-window-help').innerHTML = `Candle mode: the bands do not use this window. It holds the live samples the ` +
+                `new-pair warm-up counts, so keep it above the warm-up.`;
+            $('s-statsint-help').innerHTML = 'Not used with candle bands — the EMA / σ come from the candles.';
+            $('s-minhist-help').innerHTML = pairWarm
+                ? `Candle mode: applied only after an <b>instrument change</b> (live data on the new pair). A restart is ready as soon as ${n} candles are loaded.`
+                : 'Candle mode: not applied (switch below is off) — ready as soon as the candles are loaded.';
+        } else {
+            note.style.display = 'none';
+            Object.keys(HELP).forEach(id => { $(id).innerHTML = HELP[id]; });
+        }
+        const warn = $('s-window-warn');
+        const counts = !candles || pairWarm;
+        if (counts && win > 0 && warm > 0 && win < warm) {
+            warn.style.display = '';
+            warn.textContent = `The window (${win} min) is shorter than the warm-up (${warm} min): the warm-up could never complete.`;
+        } else { warn.style.display = 'none'; }
+    }
+    ['s-band-source', 's-band-tf', 's-band-length', 's-window', 's-minhist', 's-pairwarm'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.addEventListener('change', applyBandMode); el.addEventListener('input', applyBandMode); }
+    });
+
     async function refreshBandStatus() {
         const el = document.getElementById('s-band-status');
         if (!el) return;

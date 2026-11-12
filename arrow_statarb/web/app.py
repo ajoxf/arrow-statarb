@@ -964,6 +964,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             # mean/σ source: "ticks" (the rolling window) or "candles"
             # (TradingView BB with an EMA basis on a chosen timeframe)
             "band_source": str(s.get("band_source", "ticks") or "ticks"),
+            # after an instrument change, candle mode also waits for the
+            # warm-up of live data on the new pair (min_signal_minutes)
+            "warmup_after_pair_change": bool(s.get("warmup_after_pair_change", True)),
             "band_timeframe": str(s.get("band_timeframe", "15m") or "15m"),
             "band_length": int(s.get("band_length", 20) or 20),
         }
@@ -1005,7 +1008,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     signal_engine = SignalEngine(prices_provider=_leg_prices, params_provider=_signal_params,
                                  persist_path=SIGNAL_WINDOW_FILE, series_key_provider=_series_key,
                                  book_provider=_leg_book, session_provider=_session_open,
-                                 candles=spread_candles, excursions_path=EXCURSIONS_FILE)
+                                 candles=spread_candles, excursions_path=EXCURSIONS_FILE,
+                                 # beside the window file, so tests' temp paths carry it
+                                 pair_warmup_path=SIGNAL_WINDOW_FILE.with_name("pair_warmup.json"))
 
     def _candle_backfill_loop() -> None:
         """Back-fill candle history once Arrow is connected and the master is
@@ -2519,6 +2524,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             changed = any(_norm(before[lk]) != _norm(assigns.get(lk)) for lk in ("leg_a", "leg_b"))
             if changed:
                 signal_engine.reset()
+                signal_engine.begin_pair_warmup()   # candle mode: wait for live data too
             logger.info("Leg assignments saved: {} ({})", assigns,
                         "pair changed — lookback window restarted" if changed
                         else "same pair — collected data kept")
@@ -3468,6 +3474,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     "hedge_ratio": s.get("hedge_ratio", 1.0),
                     "display_refresh_ms": s.get("display_refresh_ms", 500),
                     "persist_window": bool(s.get("persist_window", True)),
+                    "warmup_after_pair_change": bool(s.get("warmup_after_pair_change", True)),
                     "resume_max_gap_min": s.get("resume_max_gap_min", 120),
                     "persist_interval_sec": s.get("persist_interval_sec", 30),
                     "min_hold_sec": s.get("min_hold_sec", 0),
@@ -3548,6 +3555,8 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         sd = data.get("signal") or {}
         if "persist_window" in sd:
             sig["persist_window"] = bool(sd["persist_window"])
+        if "warmup_after_pair_change" in sd:
+            sig["warmup_after_pair_change"] = bool(sd["warmup_after_pair_change"])
         if "trade_direction" in sd:
             td = str(sd["trade_direction"] or "").lower()
             if td not in TRADE_DIRECTIONS:
