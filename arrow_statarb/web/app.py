@@ -2179,19 +2179,68 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
             out["markers"] = lv
             out["position"] = {"owner": op["owner"], "direction": op["direction"],
                                "lots": op["lots"]}
+        # No bid/ask (market closed, or the feed not up yet): still draw the
+        # price column, centred on the LAST KNOWN spread, with no sizes. The
+        # reference is for the eye only — it is not a quote, and it is never
+        # handed back as sell/buy, so nothing that decides can read it.
+        ref = None
+        if sell is None or buy is None:
+            ref = _ladder_reference(k)
+        row_sell, row_buy = (sell, buy) if ref is None else (ref["level"], ref["level"])
         out.update(
-            rows=spread_ladder.build(da, db, k, ua, ub, sell, buy, inc, count, anchor),
+            rows=spread_ladder.build(da, db, k, ua, ub, row_sell, row_buy, inc, count, anchor),
+            reference=ref,
             sell_spread=sell, buy_spread=buy, z_sell=sig.get("z_sell"), z_buy=sig.get("z_buy"),
             increment=inc, book=bool(da and db),
             entry_threshold=float(cfg.get("signal.entry_zscore", 2.0) or 2.0),
             trade_direction=_trade_direction(),
             lots=int(float(cfg.get("risk.lots_per_trade", 1) or 1)),
             legs=[legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]])
-        if not out["rows"]:
+        if ref is not None:
+            for r in out["rows"]:                       # no touch to mark: not a quote
+                r["is_best_ask"] = r["is_best_bid"] = False
+            out["error"] = (("Market closed" if not _session_open() else "No live bid/ask yet")
+                            + f" — centred on the last spread {ref['level']:g} ({ref['source']}); "
+                            "sizes return with the quotes.")
+        elif not out["rows"]:
             out["error"] = ("No Sell/Buy spread yet — waiting for both legs' bid and ask."
                             if sell is None or buy is None else "Cannot build the ladder.")
         out.update(_ladder_extras(legs, la, lb, k))
         return jsonify(out)
+
+    _ref_cache: Dict[str, Any] = {"ts": 0.0, "val": None}
+
+    def _ladder_reference(k: float) -> Optional[Dict]:
+        """The last known spread, for centring an empty ladder: the newest
+        spread candle's close, else both legs' last traded prices (REST,
+        asked at most once a minute), else the last fill. None when nothing
+        is known — then the ladder stays empty rather than invent a price."""
+        try:
+            for tf in ("1m", "5m", "15m"):
+                bars = spread_candles.closes(tf, k)
+                if bars:
+                    return {"level": round(float(bars[-1][1]), 4), "source": "last candle close"}
+        except Exception:
+            pass
+        now = time.time()
+        if now - _ref_cache["ts"] > 60:
+            _ref_cache["ts"] = now
+            try:
+                a, b = _leg_prices()
+                _ref_cache["val"] = (round(k * float(a) - float(b), 4)
+                                     if a is not None and b is not None else None)
+            except Exception:
+                _ref_cache["val"] = None
+        if _ref_cache["val"] is not None:
+            return {"level": _ref_cache["val"], "source": "legs' last traded prices"}
+        try:
+            for r in trade_log.all():                       # newest first
+                lvl = r.get("exit_spread") if r.get("action") == "CLOSE" else r.get("entry_spread")
+                if lvl is not None and str(r.get("status", "")).upper() not in ("FAILED", "REJECTED"):
+                    return {"level": float(lvl), "source": "last fill"}
+        except Exception:
+            pass
+        return None
 
     def _ladder_extras(legs: Dict, la: Dict, lb: Dict, k: float) -> Dict:
         """What the Mirror ladder window shows around the grid: the two legs'

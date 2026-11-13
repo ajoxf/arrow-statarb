@@ -955,6 +955,8 @@
       var td = e.target.closest('td[data-col]');
       if (!td) { return; }
       if ((S.algo || {}).manual_block) { toast(S.algo.manual_block, 'danger'); return; }
+      // a ladder drawn round the LAST spread (no live bid/ask) is for looking only
+      if ((S.ladder || {}).reference) { toast('No live bid/ask — the ladder shows the last spread; orders wait for live quotes.', 'danger'); return; }
       var level = Number(td.parentNode.dataset.level);
       if (!isFinite(level)) { return; }
       var side = sideForColumn(td.dataset.col);

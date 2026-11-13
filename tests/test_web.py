@@ -1676,3 +1676,33 @@ def test_the_algo_window_reads_nothing_into_an_order(tmp_path):
     n = len(broker.orders)
     c.get("/api/desk/algo"); c.get("/api/desk/backtest?days=3")
     assert len(broker.orders) == n and algo.running is False
+
+
+def test_a_closed_market_still_draws_the_ladder_round_the_last_spread(tmp_path):
+    """No bid/ask (after hours): the price column is drawn round the legs' last
+    traded prices, with no sizes — and that reading is NOT a quote: sell/buy
+    stay None, so nothing that decides can pick it up."""
+    app, broker, c, algo = _lock_app(tmp_path)
+    broker.get_streamed_book = lambda syms: {}
+    broker.get_streamed_ltp = lambda syms: {}
+    broker.start_price_stream = lambda syms: True
+    broker.get_ltp = lambda instruments: {"NIFTY30JUN26F": 110.0, "NIFTY28JUL26F": 10.0}
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["sell_spread"] is None and d["buy_spread"] is None
+    assert d["reference"] == {"level": 100.0, "source": "legs' last traded prices"}
+    levels = [r["level"] for r in d["rows"]]
+    assert len(levels) == 21 and 100.0 in levels
+    assert all(r["ask_size"] is None and r["bid_size"] is None for r in d["rows"])
+    assert not any(r["is_best_ask"] or r["is_best_bid"] for r in d["rows"])
+    assert "last spread 100" in d["error"]
+
+
+def test_control_with_nothing_known_the_ladder_stays_empty(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    broker.get_streamed_book = lambda syms: {}
+    broker.get_streamed_ltp = lambda syms: {}
+    broker.start_price_stream = lambda syms: True
+    broker.get_ltp = lambda instruments: {}
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["rows"] == [] and d["reference"] is None
+    assert "waiting for both legs" in d["error"]
