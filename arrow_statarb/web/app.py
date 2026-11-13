@@ -2409,7 +2409,9 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
             pos = {"direction": op["direction"], "lots": op["lots"], "entry_spread": entry,
                    "entry_fill_spread": entry,
                    "entry_leg_a": ap.get("entry_leg_a") if ap else j.get("leg_a_price"),
-                   "entry_leg_b": ap.get("entry_leg_b") if ap else j.get("leg_b_price")}
+                   "entry_leg_b": ap.get("entry_leg_b") if ap else j.get("leg_b_price"),
+                   # the ATR its exits were sized on: frozen at entry, never today's
+                   "entry_atr": ap.get("entry_atr") if ap else j.get("entry_atr")}
             lv = (st.get("spread_levels") if op["owner"] == "algo" else None) or \
                 arrow_algo._spread_levels(p, float(p.get("profit_target_inr", 0) or 0),
                                           float(p.get("dollar_stop_inr", 0) or 0), pos=pos) or {}
