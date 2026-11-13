@@ -504,25 +504,36 @@ class ArrowAutoTrader:
             if hl_max > 0 and hl_sec > hl_max:
                 return (f"half-life {hl_sec:.0f}s > max {hl_max:.0f}s — "
                         f"reverts too slowly to hold")
+        e = self.edge_numbers(z, std, lots, sig, p)
+        return e["reason"]
+
+    def edge_numbers(self, z: float, std: float, lots: int, sig: Dict, p: Dict) -> Dict:
+        """The edge filter's own numbers at (z, σ, lots) — what the entry gate
+        decides on: after-tax expected capture vs min_edge_multiple × the
+        round-trip cost, and the cost-floor sanity check. ``reason`` is the
+        gate's block message, or None when it would let the trade through."""
         lot_m = float(p.get("lot_multiplier", 1.0) or 1.0)
         cost = self._round_trip_cost(p, lots=lots, ref_price=sig.get("leg_a"),
                                      ref_b=sig.get("leg_b"))
         full_move = abs(z) * float(std) * lots * lot_m
         cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
         min_mult = float(p.get("min_edge_multiple", 0) or 0)
-        if min_mult > 0:
-            # target fraction: the exit's σ-fraction if set, else a conservative
-            # 0.5 (you rarely capture the full |z|×σ move).
-            tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
-            capture = tfrac * full_move * (1.0 - cgt)         # net of tax
-            if capture < min_mult * cost:
-                return (f"edge filter: after-tax capture ₹{capture:.0f} < "
-                        f"{min_mult:g}× cost ₹{cost:.0f} — not worth it")
+        # target fraction: the exit's σ-fraction if set, else a conservative
+        # 0.5 (you rarely capture the full |z|×σ move).
+        tfrac = float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5
+        capture = tfrac * full_move * (1.0 - cgt)             # net of tax
+        out = {"capture": round(capture, 2), "cost": round(cost, 2), "min_mult": min_mult,
+               "needed": round(min_mult * cost, 2), "full_move": round(full_move, 2),
+               "reason": None}
+        if min_mult > 0 and capture < min_mult * cost:
+            out["reason"] = (f"edge filter: after-tax capture ₹{capture:.0f} < "
+                             f"{min_mult:g}× cost ₹{cost:.0f} — not worth it")
+            return out
         cfm = float(p.get("cost_floor_mult", 0) or 0)
         if cfm > 0 and cfm * cost > full_move:
-            return (f"cost floor ₹{cfm * cost:.0f} exceeds plausible reversion "
-                    f"₹{full_move:.0f} — trade can never win")
-        return None
+            out["reason"] = (f"cost floor ₹{cfm * cost:.0f} exceeds plausible reversion "
+                             f"₹{full_move:.0f} — trade can never win")
+        return out
 
     def edge_preview(self, sig: Dict) -> Dict:
         """Standing pre-trade economics for the dashboard Filters panel — the

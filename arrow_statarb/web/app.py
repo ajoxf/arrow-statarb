@@ -52,6 +52,7 @@ from arrow_statarb.core import sessions
 from arrow_statarb.core.contracts import mcx_multiplier
 from arrow_statarb.core import fill_check
 from arrow_statarb.core import journal_sync
+from arrow_statarb.core.touch_study import TouchStudy
 from arrow_statarb.core import spread_ladder
 from arrow_statarb.core import volume as volume_tracker
 from arrow_statarb.core.signals import ZSignalGenerator
@@ -1239,6 +1240,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     outcome_study = SignalStudy(SIGNAL_OUTCOMES_FILE, signal_engine.get_signal,
                                 lambda: outcome_params(_algo_params()),
                                 prices_provider=_leg_prices, pair_provider=_pair_name)
+    # Every σ touch played out as the trade it could have been (a reading —
+    # the algo's own exit code on a paper position; see core/touch_study.py).
+    touch_study = TouchStudy(SIGNAL_WINDOW_FILE.with_name("touch_study.json"),
+                             signal_engine.get_signal, _algo_params, pair_provider=_pair_name)
+    signal_engine.on_event.append(touch_study.on_event)
     _derive_job: Dict[str, Any] = {"state": "idle", "message": "", "count": 0}
 
     def _derive(days: int) -> None:
@@ -1269,7 +1275,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             _derive_job.update(state="error", message=str(exc))
             logger.warning("Signal study: derive failed — {}", exc)
 
+    # Background loops start while create_app is still defining the helpers
+    # they call (e.g. _algo_params → _capital_at_risk); they wait for this.
+    _app_ready = threading.Event()
+
     def _study_loop() -> None:
+        _app_ready.wait(timeout=60)
         while True:
             interval = 0.5
             try:
@@ -1277,6 +1288,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 if signal_engine.running:
                     signal_study.tick()
                     outcome_study.tick()
+                    touch_study.tick()
             except Exception:                                  # noqa: BLE001
                 logger.exception("SignalStudy: loop error")
             time.sleep(interval)
@@ -2830,7 +2842,14 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             n = max(1, min(500, int(request.args.get("n", 100))))
         except (TypeError, ValueError):
             n = 100
-        return jsonify(signal_engine.get_excursions(max_events=n))
+        out = signal_engine.get_excursions(max_events=n)
+        # each touch's played-out trade (instrument, side, edge, levels, legs,
+        # z / σ / spread in→out, status, why, net) beside its event
+        from arrow_statarb.core.touch_study import event_key
+        trades = touch_study.rows_for([event_key(e) for e in out.get("events") or []])
+        for e in out.get("events") or []:
+            e["trade"] = trades.get(event_key(e))
+        return jsonify(out)
 
     @app.route("/api/analysis/signals", methods=["GET"])
     def api_analysis_signals():
@@ -4293,4 +4312,5 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception as exc:                          # noqa: BLE001 — never block startup
             logger.warning("Journal repair skipped — {}", exc)
 
+    _app_ready.set()
     return app, socketio

@@ -54,6 +54,13 @@ class SignalEngine:
         # (min_signal_minutes) of live samples on the new pair. Kept in its own
         # file so a restart part-way through cannot skip it.
         self._pw_path = Path(pair_warmup_path) if pair_warmup_path else None
+        # Market context of the sample being tallied (mean, σ, both legs'
+        # bid/ask, pair) — stamped on every touch event, so a touch can be
+        # studied as the trade it could have been. Subscribers get each new
+        # event (on_event callbacks; they must be quick — they run in the
+        # sampling thread).
+        self._tally_ctx: Dict = {}
+        self.on_event: List[Callable[[Dict], None]] = []
         self._pw: Optional[Dict] = None          # {"key": series key, "since": ts}
         self._pw_loaded = False
         # Where the excursion tally AND its arming state live between runs.
@@ -378,11 +385,18 @@ class SignalEngine:
     def _log_event(self, etype: str, z: float, ts: float, band: Optional[float] = None,
                    side: Optional[str] = None, spread: Optional[float] = None,
                    entry: bool = False) -> None:
-        self._exc_events.append({"ts": ts, "basis": getattr(self, "_exc_basis", "ticks"),
-                                 "time": time.strftime("%H:%M:%S", time.localtime(ts)),
-                                 "type": etype, "z": round(z, 2),
-                                 "band": band, "side": side, "entry": bool(entry),
-                                 "spread": round(spread, 4) if spread is not None else None})
+        ev = {"ts": ts, "basis": getattr(self, "_exc_basis", "ticks"),
+              "time": time.strftime("%H:%M:%S", time.localtime(ts)),
+              "type": etype, "z": round(z, 2), "z_exact": z,
+              "band": band, "side": side, "entry": bool(entry),
+              "spread": round(spread, 4) if spread is not None else None,
+              **getattr(self, "_tally_ctx", {})}
+        self._exc_events.append(ev)
+        for cb in list(getattr(self, "on_event", []) or []):
+            try:
+                cb(dict(ev))
+            except Exception as exc:                       # noqa: BLE001 — never stop sampling
+                logger.debug("SignalEngine: on_event subscriber failed — {}", exc)
 
     # ── sampling loop ────────────────────────────────────────────────────────
     def _loop(self) -> None:
@@ -525,12 +539,21 @@ class SignalEngine:
             return
         z_mid = (self._samples[-1][3] - mean) / std
         ex = self._exec_spreads(self._book, p.get("hedge_ratio", 1.0) or 1.0)
-        if ex is None:                        # LTP-only feed: both sides on the mid
-            self._tally_sides(z_mid, z_mid, z_mid, ts, spreads=(self._samples[-1][3],) * 2)
-            return
-        zs = (ex["sell"] - mean) / std if ex["sell"] is not None else None
-        zb = (ex["buy"] - mean) / std if ex["buy"] is not None else None
-        self._tally_sides(zs, zb, z_mid, ts, spreads=(ex["sell"], ex["buy"]))
+        _, la, lb, sp_mid = self._samples[-1]
+        self._tally_ctx = {"mean": round(mean, 4), "std": round(std, 6), "series": self._series_key(),
+                           "mid_a": la, "mid_b": lb, "spread_mid": round(sp_mid, 4),
+                           "k": float(p.get("hedge_ratio", 1.0) or 1.0)}
+        try:
+            if ex is None:                    # LTP-only feed: both sides on the mid
+                self._tally_sides(z_mid, z_mid, z_mid, ts, spreads=(sp_mid,) * 2)
+                return
+            self._tally_ctx.update(bid_a=ex["bid_a"], ask_a=ex["ask_a"],
+                                   bid_b=ex["bid_b"], ask_b=ex["ask_b"])
+            zs = (ex["sell"] - mean) / std if ex["sell"] is not None else None
+            zb = (ex["buy"] - mean) / std if ex["buy"] is not None else None
+            self._tally_sides(zs, zb, z_mid, ts, spreads=(ex["sell"], ex["buy"]))
+        finally:
+            self._tally_ctx = {}
 
     def _trim(self, now: float, window_sec: float) -> None:
         while self._samples and (now - self._samples[0][0]) > window_sec:
