@@ -36,10 +36,10 @@
             </a>
             <div class="navbar-nav">
                 <a class="nav-link fw-semibold" href="/desk">Desk</a>
-                <a class="nav-link {% block nav_dash %}{% endblock %}" href="/dashboard">Dashboard</a>
-                <a class="nav-link {% block nav_settings %}{% endblock %}" href="/settings">Settings</a>
-                <a class="nav-link {% block nav_setup %}{% endblock %}" href="/">Setup</a>
-                <a class="nav-link {% block nav_analysis %}{% endblock %}" href="/analysis">Analysis</a>
+                <a class="nav-link {% block nav_dash %}{% endblock %}" href="{{ request.script_root }}/dashboard">Dashboard</a>
+                <a class="nav-link {% block nav_settings %}{% endblock %}" href="{{ request.script_root }}/settings">Settings</a>
+                <a class="nav-link {% block nav_setup %}{% endblock %}" href="{{ request.script_root }}/">Setup</a>
+                <a class="nav-link {% block nav_analysis %}{% endblock %}" href="{{ request.script_root }}/analysis">Analysis</a>
             </div>
             <div class="ms-auto d-flex align-items-center gap-2">
                 <span id="health-badge" class="badge rounded-pill bg-secondary" title="Liveness — loop heartbeat + price feed">health</span>

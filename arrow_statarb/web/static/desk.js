@@ -14,7 +14,7 @@
   'use strict';
 
   var DASH = '—';
-  var LAYOUT_KEY = 'nexus-desk-layout-v4';   // v4: Mirror's ladder + algo box
+  var LAYOUT_KEY = 'nexus-desk-layout-v6';   // v6: Mirror's Algo window per pair
   var PREF_KEY = 'nexus-desk-prefs-v1';
 
   // ── tiny helpers ───────────────────────────────────────────────────────
@@ -47,7 +47,7 @@
   // click and even a plain link waits behind them. So: a poll whose previous
   // request is still out is skipped, polls use at most 4 connections (the
   // rest stay free for what YOU click), and a request is cut off at 10 s.
-  var inflight = {}, inflightN = 0, POLL_MAX = 4, slowUntil = 0;
+  var inflight = {}, inflightN = 0, POLL_MAX = 6, slowUntil = 0;
   function getJSON(url, userAsked) {
     var key = url.split('?')[0];
     if (!userAsked && (inflight[key] || inflightN >= POLL_MAX)) {
@@ -152,32 +152,49 @@
 
   var DEFS = [
     // id, title, default left/top/width/height, builder
-    // Mirror's two windows per pair: the ladder and its algo box.
-    {id: 'ladder', title: 'Ladder', x: 2, y: 2, w: 390, h: 900, mirror: 'ladder', group: 'ladder'},
-    {id: 'fair', title: 'Algo box', x: 396, y: 2, w: 250, h: 330, mirror: 'fairwin', group: 'ladder'},
     // The Arrow-StatArb windows, as they were — open or close each from +.
-    {id: 'signal', title: 'Signal & Position', x: 652, y: 2, w: 470, h: 360, note: 'z on both sides, position, levels'},
-    {id: 'stats', title: 'Statistics & Filters', x: 1128, y: 2, w: 330, h: 360, note: 'lookback, edge filter, algo state'},
-    {id: 'bands', title: 'Spread', x: 652, y: 368, w: 470, h: 272, note: 'the spread in candles, with the entry bands'},
-    {id: 'charts', title: 'Z-Score & Spread', x: 652, y: 368, w: 470, h: 272, closed: true, note: 'z and spread lines'},
-    {id: 'margin', title: 'Margin', x: 1464, y: 2, w: 300, h: 300, note: 'Arrow\'s pair margin and funds'},
-    {id: 'fills', title: 'Fills & Slippage', x: 396, y: 646, w: 420, h: 250, flush: true, note: 'executed orders, slip per lot'},
-    {id: 'workorders', title: 'Working Orders', x: 822, y: 646, w: 412, h: 250, flush: true, note: 'resting spread orders'},
-    {id: 'trades', title: 'Trades', x: 1128, y: 368, w: 636, h: 272, flush: true, note: 'closed round trips'},
-    {id: 'orders', title: 'Order Log (Arrow)', x: 1240, y: 646, w: 524, h: 250, flush: true, note: 'Arrow\'s own order book'},
+    {id: 'signal', title: 'Signal & Position', x: 812, y: 2, w: 470, h: 360, note: 'z on both sides, position, levels'},
+    {id: 'stats', title: 'Statistics & Filters', x: 1288, y: 2, w: 330, h: 360, note: 'lookback, edge filter, algo state'},
+    {id: 'bands', title: 'Spread', x: 812, y: 368, w: 470, h: 272, note: 'the spread in candles, with the entry bands'},
+    {id: 'charts', title: 'Z-Score & Spread', x: 812, y: 368, w: 470, h: 272, closed: true, note: 'z and spread lines'},
+    {id: 'margin', title: 'Margin', x: 1624, y: 2, w: 296, h: 300, note: 'Arrow\'s pair margin and funds'},
+    {id: 'fills', title: 'Fills & Slippage', x: 396, y: 646, w: 410, h: 250, flush: true, note: 'executed orders, slip per lot'},
+    {id: 'workorders', title: 'Working Orders', x: 812, y: 646, w: 470, h: 250, flush: true, note: 'resting spread orders'},
+    {id: 'trades', title: 'Trades', x: 1288, y: 368, w: 632, h: 272, flush: true, note: 'closed round trips'},
+    {id: 'orders', title: 'Order Log (Arrow)', x: 1288, y: 646, w: 632, h: 250, flush: true, note: 'Arrow\'s own order book'},
     {id: 'settings', title: 'Settings', x: 120, y: 60, w: 900, h: 640, flush: true, iframe: '/settings?embed=1', closed: true, note: 'signal, algo, risk, costs'},
     {id: 'setup', title: 'Setup · pair', x: 160, y: 80, w: 900, h: 600, flush: true, iframe: '/?embed=1', closed: true, note: 'choose the two legs'},
     {id: 'analysis', title: 'Analysis', x: 200, y: 100, w: 1000, h: 640, flush: true, iframe: '/analysis?embed=1', closed: true, note: 'did reaching the entry z make money'},
   ];
 
-  function defOf(id) { return DEFS.filter(function (d) { return d.id === id; })[0]; }
+  // Mirror's two windows PER PAIR: the ladder and its algo box. One pair:
+  // ladder, algo box, then the Arrow windows beside them. More pairs: the
+  // ladders in a row and the algo boxes stacked at the right — Mirror's desk.
+  function pairDefs() {
+    var n = ORDER.length, out = [];
+    ORDER.forEach(function (k, i) {
+      var lw = n <= 3 ? 390 : Math.max(280, Math.floor((1916 - 420) / n) - 2);
+      var x0 = 2 + n * (lw + 2);
+      out.push({id: 'ladder:' + k, pair: k, kind: 'ladder', title: 'Ladder', x: 2 + i * (lw + 2), y: 2, w: lw, h: 900, mirror: 'ladder'});
+      // Mirror's Algo window beside the ladders; with several pairs, one
+      // behind the other, each a step down — bring one forward from its tab
+      out.push({id: 'algo:' + k, pair: k, kind: 'algo', title: 'Algo', mirror: 'algowin',
+                x: n === 1 ? 396 : x0, y: n === 1 ? 2 : 2 + i * 26, w: 410, h: 640});
+      out.push({id: 'fair:' + k, pair: k, kind: 'fair', title: 'Fair spread', mirror: 'fairwin', closed: true,
+                x: n === 1 ? 810 : x0, y: n === 1 ? 2 : 680, w: 258, h: 300});
+    });
+    return out;
+  }
+  function allDefs() { return pairDefs().concat(DEFS); }
+  function defOf(id) { return allDefs().filter(function (d) { return d.id === id; })[0]; }
 
   // The default layout is drawn for a ~1500 × 910 desktop; on a smaller or
   // zoomed screen it is scaled down to fit (a moved window keeps its place).
   function fit(d) {
     var dk = $('#desktop');
-    var sx = Math.min(1, (dk.clientWidth - 4) / 1770), sy = Math.min(1, (dk.clientHeight - 4) / 1000);
+    var sx = Math.min(1, (dk.clientWidth - 4) / 1924), sy = Math.min(1, (dk.clientHeight - 4) / 1000);
     if (d.mirror === 'ladder') { sy = Math.min(1, (dk.clientHeight - 4) / d.h); }
+    if (d.pair) { sx = Math.min(1, (dk.clientWidth - 4) / 1916); }
     return {x: Math.round(d.x * sx), y: Math.round(d.y * sy), w: Math.round(d.w * sx), h: Math.round(d.h * sy)};
   }
 
@@ -193,13 +210,15 @@
     if (!d) { return; }
     if (W[id]) { raise(W[id].node); return; }
     var node = document.createElement('section');
-    node.className = 'window floating sized' + (d.mirror ? ' ' + d.mirror : '');
+    node.className = 'window floating sized' + (d.mirror ? ' ' + d.mirror : '') +
+      (d.pair && d.kind === 'ladder' && d.pair !== ACTIVE ? ' inactive' : '');
     node.dataset.id = id;
     if (d.mirror) {
-      node.innerHTML = (d.mirror === 'ladder' ? MIRROR_LADDER : MIRROR_FAIR) + '<div class="grip"></div>';
+      node.innerHTML = (d.mirror === 'ladder' ? MIRROR_LADDER : d.mirror === 'algowin' ? MIRROR_ALGO : MIRROR_FAIR) +
+        '<div class="grip"></div>';
     } else node.innerHTML =
       '<div class="titlebar"><span class="title">' + esc(d.title) + '</span>' +
-      (d.iframe ? '<a class="winbtn" href="' + d.iframe.replace(/[?&]embed=1/, '') +
+      (d.iframe ? '<a class="winbtn" href="' + S.base + d.iframe.replace(/[?&]embed=1/, '') +
                   '" target="_blank" title="Open as a full page">↗</a>' : '') +
       '<span class="winbtns"><button class="winbtn close" title="Close">×</button></span></div>' +
       '<div class="wbody' + (d.flush ? ' flush' : '') + '"></div><div class="grip"></div>';
@@ -212,12 +231,22 @@
     var body = d.mirror ? node : node.querySelector('.wbody');
     W[id] = {def: d, node: node, body: body};
     node.querySelector('.close').onclick = function () { closeWindow(id); };
-    if (d.mirror === 'fairwin') { node.style.height = 'auto'; }
-    node.addEventListener('pointerdown', function (e) { raise(node); startDrag(e, node); });
-    if (d.iframe) {
-      body.innerHTML = '<iframe class="embed" src="' + d.iframe + '"></iframe>';
+    if (d.mirror === 'fairwin') { node.style.height = 'auto'; if (!L.w) { node.style.width = ''; } }
+    node.addEventListener('pointerdown', function (e) {
+      if (d.pair) { setActive(d.pair); }
+      raise(node); startDrag(e, node);
+    });
+    if (d.pair) {
+      var ctx = P[d.pair];
+      if (d.kind === 'ladder') { ctx.win = W[id]; BUILD.ladder(node, ctx); refreshLadder(ctx); }
+      else if (d.kind === 'algo') { ctx.algoWin = W[id]; BUILD.algo(node, ctx); refreshAlgo(ctx); }
+      else { ctx.fairWin = W[id]; BUILD.fair(node, ctx); refreshFair(ctx); }
+    } else if (d.iframe) {
+      body.innerHTML = '<iframe class="embed" src="' + S.base + d.iframe + '"></iframe>';
+      retitle(id);
     } else {
       BUILD[id](body);
+      retitle(id);
       REFRESH[id] && REFRESH[id]();
     }
     layout[id] = Object.assign({}, layout[id], {open: true});
@@ -227,6 +256,8 @@
 
   function closeWindow(id) {
     if (!W[id]) { return; }
+    var d = W[id].def;
+    if (d.pair && P[d.pair]) { P[d.pair][{ladder: 'win', algo: 'algoWin', fair: 'fairWin'}[d.kind]] = null; }
     W[id].node.remove();
     delete W[id];
     layout[id] = Object.assign({}, layout[id], {open: false});
@@ -277,32 +308,39 @@
   function renderTabs() {
     var tabs = $('#tabs');
     tabs.innerHTML = '';
-    var pair = pairTitle(S.ladder && S.ladder.legs);
-    DEFS.forEach(function (d) {
-      if (!W[d.id]) { return; }
+    allDefs().forEach(function (d) {
+      if (!W[d.id] || d.kind === 'fair') { return; }      // Mirror: a tab per ladder and per Algo window
       var b = document.createElement('button');
-      b.className = 'tab' + (d.id === 'ladder' ? ' on' : '');
-      var n = d.id === 'ladder' ? ((S.wo && S.wo.active) || []).length : 0;
-      b.innerHTML = esc(d.id === 'ladder' ? pair : d.id === 'fair' ? pair + ' · algo' : d.title) +
+      var c = d.pair ? P[d.pair] : null;
+      b.className = 'tab' + (c && c === S && d.kind === 'ladder' ? ' on' : '');
+      var n = c && d.kind === 'ladder' ? ((c.wo && c.wo.active) || []).length : 0;
+      b.innerHTML = esc(c ? pairName(c) + (d.kind === 'algo' ? ' · Algo' : '') : d.title) +
         (n ? '<span class="badge">' + n + '</span>' : '');
-      b.onclick = function () { raise(W[d.id].node); };
+      b.onclick = function () { if (c) { setActive(c.key); } raise(W[d.id].node); };
       tabs.appendChild(b);
     });
-    // Mirror's + menu: the ladders, then the windows. The Arrow-StatArb
-    // windows are ticked when open — untick to close one.
+    // Mirror's + menu: every pair's ladder and algo box, then the windows.
+    // The Arrow-StatArb windows show the ACTIVE pair; ticked = open.
     var menu = $('#add-menu');
-    var lad = DEFS.filter(function (d) { return d.group === 'ladder'; });
-    var rest = DEFS.filter(function (d) { return !d.group; });
-    menu.innerHTML = '<div class="menu-title">Ladders</div>' + lad.map(function (d) {
-      var legs = (S.ladder && S.ladder.legs) || [];
-      return '<button data-id="' + d.id + '">' + esc(d.id === 'ladder' ? pair : pair + ' · algo box') +
-        '<small>' + esc(d.id === 'ladder' ? (legs[0] || '?') + ' / ' + (legs[1] || '?') : 'fair spread, exit levels, auto') +
+    var html = '<div class="menu-title">Ladders</div>';
+    pairDefs().forEach(function (d) {
+      var c = P[d.pair], legs = c.legs && c.legs.length ? c.legs : ((c.ladder && c.ladder.legs) || []);
+      html += '<button data-id="' + d.id + '">' + esc(pairName(c) + (d.kind === 'algo' ? ' · Algo' : d.kind === 'fair' ? ' · Fair spread' : '')) +
+        '<small>' + esc(d.kind === 'ladder' ? (legs[0] || 'legs not set') + ' / ' + (legs[1] || '—')
+                        : d.kind === 'algo' ? 'signal & position, statistics, filters, backtest' : 'what the carry says, exit levels') +
         (W[d.id] ? ' · open' : '') + '</small></button>';
-    }).join('') + '<div class="menu-title">Arrow-StatArb windows</div>' + rest.map(function (d) {
+    });
+    html += '<button data-href="/p/main/">+ New pair<small>add one on Setup → Pairs</small></button>';
+    html += '<div class="menu-title">Arrow-StatArb windows' + (ORDER.length > 1 ? ' · ' + esc(pairName(S)) : '') + '</div>';
+    html += DEFS.map(function (d) {
       return '<button data-id="' + d.id + '" data-toggle="1"><input type="checkbox" tabindex="-1"' + (W[d.id] ? ' checked' : '') +
         ' style="float:left;margin:2px 6px 0 0;pointer-events:none"> ' + esc(d.title) +
         '<small style="margin-left:22px">' + esc(d.note || '') + (W[d.id] ? ' · open' : '') + '</small></button>';
-    }).join('') + '<div class="menu-note">Ticked = open; untick to close it. Where you put a window is where it is after a reload; Tidy puts them back.</div>';
+    }).join('');
+    html += '<div class="menu-note">Ticked = open; untick to close it.' +
+      (ORDER.length > 1 ? ' These windows show the pair whose ladder you clicked last.' : '') +
+      ' Where you put a window is where it is after a reload; Tidy puts them back.</div>';
+    menu.innerHTML = html;
     Array.prototype.forEach.call(menu.querySelectorAll('button[data-id]'), function (b) {
       b.onclick = function (e) {
         e.stopPropagation();
@@ -311,6 +349,8 @@
         if (!b.dataset.toggle) { menu.classList.add('hidden'); }
       };
     });
+    var np = menu.querySelector('button[data-href]');
+    if (np) { np.onclick = function () { window.location.href = np.dataset.href; }; }
   }
 
   $('#add-panel').onclick = function (e) { e.stopPropagation(); renderTabs(); $('#add-menu').classList.toggle('hidden'); };
@@ -327,39 +367,89 @@
     resizeCharts();
   };
 
-  // ── shared state from the server ──────────────────────────────────────
-  var S = {status: null, algo: null, ladder: null, statusAt: 0};
+  // ── the pairs: one state per pair; S is the ACTIVE one ─────────────────
+  // Every pair is its own engine at /p/<key>/. A ladder and its algo box talk
+  // to THEIR pair; the other windows (Signal & Position, the Spread chart,
+  // Trades …) show the ACTIVE pair — the ladder last clicked.
+  var P = {}, ORDER = [], ACTIVE = 'main';
+  function newCtx(key, base) {
+    return {key: key, base: base, name: '', legs: [], status: null, algo: null, ladder: null,
+            statusAt: 0, wo: null, woSeen: null, armed: {buy: null, sell: null}, anchor: null,
+            filtered: false, win: null, fairWin: null, algoWin: null};
+  }
+  P.main = newCtx('main', ''); ORDER = ['main'];
+  var S = P.main;
+
+  // A plain fetch('/api/…') from a window that follows the active pair (and
+  // the shared ALGO control in the taskbar) goes to the ACTIVE pair. Calls
+  // that name a pair (/p/<key>/api/…) and the registry pass through.
+  (function () {
+    var f = window.fetch;
+    window.fetch = function (u, o) {
+      if (typeof u === 'string' && u.indexOf('/api/') === 0 && u.indexOf('/api/pairs') !== 0) { u = S.base + u; }
+      return f.call(this, u, o);
+    };
+  })();
+
+  function setActive(key) {
+    if (!P[key] || ACTIVE === key) { return; }
+    ACTIVE = key; S = P[key];
+    eachLadder(function (c) { c.win.node.classList.toggle('inactive', c !== S); });
+    Object.keys(W).forEach(function (id) {
+      var d = W[id].def;
+      if (d.pair) { return; }
+      retitle(id);
+      if (d.iframe) { var fr = $('iframe', W[id].body); if (fr) { fr.src = S.base + d.iframe; } }
+      else if (REFRESH[id]) { REFRESH[id](true); }
+    });
+    pollStatus(S); pollAlgo(S);
+    renderTabs(); renderBanners();
+  }
+  function retitle(id) {
+    var w = W[id]; if (!w || w.def.pair) { return; }
+    var t = $('.titlebar .title', w.node);
+    if (t) { t.textContent = w.def.title + (ORDER.length > 1 ? ' · ' + pairName(S) : ''); }
+  }
 
   function algoState() { return (window.AlgoCtl && AlgoCtl.state) || S.algo; }
 
-  function pollStatus() {
-    return getJSON('/api/engine/status').then(function (d) {
-      S.status = d; S.statusAt = Date.now();
-      $('#engine-banner').classList.add('hidden');
-      REFRESH.signal && W.signal && REFRESH.signal();
-      REFRESH.stats && W.stats && REFRESH.stats();
-      renderBanners();
+  function pollStatus(ctx) {
+    var c = ctx || S;
+    return getJSON(c.base + '/api/engine/status').then(function (d) {
+      c.status = d; c.statusAt = Date.now();
+      if (c === S) {
+        $('#engine-banner').classList.add('hidden');
+        REFRESH.signal && W.signal && REFRESH.signal();
+        REFRESH.stats && W.stats && REFRESH.stats();
+        renderBanners();
+      }
+      if (c.win && c.ladder) { renderFooter(c.win.node, c); applyLock(c); }
     }).catch(function (e) {
+      if (c !== S) { return; }
       // A skipped poll is not a dead engine; only a snapshot older than 5 s is.
-      if (S.statusAt && Date.now() - S.statusAt < 5000) { return; }
-      if (/^skipped/.test(String(e && e.message)) && S.statusAt) { return; }
+      if (c.statusAt && Date.now() - c.statusAt < 5000) { return; }
+      if (/^skipped/.test(String(e && e.message)) && c.statusAt) { return; }
       var b = $('#engine-banner');
       b.textContent = 'The engine is not answering — prices and positions on this screen are NOT live.';
       b.classList.remove('hidden');
     });
   }
 
-  function pollAlgo() {
-    return getJSON('/api/algo/state').then(function (d) { S.algo = d; renderBanners(); applyLock(); })
-      .catch(function () {});
+  function pollAlgo(ctx) {
+    var c = ctx || S;
+    return getJSON(c.base + '/api/algo/state').then(function (d) {
+      c.algo = d; applyLock(c);
+      if (c === S) { renderBanners(); }
+    }).catch(function () {});
   }
 
   function renderBanners() {
     var a = S.algo || {};
     var b = $('#lock-banner');
     var msg = '';
+    var who = ORDER.length > 1 ? ' for ' + pairName(S) : '';
     if (a.running) {
-      msg = 'ALGO ON — manual orders are off on every window. Turn the algo OFF to trade by hand.';
+      msg = 'ALGO ON' + who + ' — manual orders are off on its ladder. Turn the algo OFF to trade it by hand.';
     } else if (a.algo_block) {
       msg = a.algo_block;
     }
@@ -377,31 +467,40 @@
     $('#loop-stat').textContent = S.statusAt ? ((Date.now() - S.statusAt) / 1000).toFixed(1) + 's' : DASH;
   }
 
-  // Manual controls follow the lock the server reports.
-  function applyLock() {
-    var a = S.algo || {};
+  // Manual controls follow the lock each pair's server reports: a ladder by
+  // its own pair; the buttons in the other windows by the active pair.
+  function lockButtons(root, c, skipLadders) {
+    var a = c.algo || {};
     var blocked = !!a.manual_block;
-    var flat = !(S.status && S.status.open_trade);
-    Array.prototype.forEach.call(document.querySelectorAll('[data-manual]'), function (el) {
+    var flat = !(c.status && c.status.open_trade);
+    Array.prototype.forEach.call(root.querySelectorAll('[data-manual]'), function (el) {
+      if (skipLadders && el.closest('.window.ladder')) { return; }
       var closer = el.classList.contains('flatten') || el.classList.contains('pos-close');
       el.disabled = blocked || (closer && flat);
       el.title = blocked ? a.manual_block : (closer && flat) ? 'No open position' : (el.dataset.tip || '');
     });
-    if (W.ladder) {
-      W.ladder.node.classList.toggle('locked-manual', blocked);
-      var note = $('.lock-note', W.ladder.node);
-      if (note) { note.classList.toggle('hidden', !blocked); }
+    return blocked;
+  }
+  function applyLock(ctx) {
+    var c = ctx || S;
+    if (c.win) {
+      var blocked = lockButtons(c.win.node, c, false);
+      c.win.node.classList.toggle('locked-manual', blocked);
+      var bar = $('.algo-lock', c.win.node);
+      if (bar) { bar.hidden = !(c.algo && c.algo.running); }
     }
+    if (c === S) { lockButtons(document, S, true); }
   }
 
   // ── manual orders (server enforces the lock and one-position rule) ────
-  function manualOrder(direction) {
-    var qty = lots(direction === 'LONG_SPREAD' ? 'BUY' : 'SELL');
+  function manualOrder(direction, ctx) {
+    var S = ctx || ACTIVE_CTX();
+    var qty = lots(direction === 'LONG_SPREAD' ? 'BUY' : 'SELL', S);
     var lad = S.ladder || {};
     var px = direction === 'LONG_SPREAD' ? lad.buy_spread : lad.sell_spread;
-    var words = (direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread · ' + qty +
+    var words = (direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' ' + pairName(S) + ' · ' + qty +
       ' lot(s) · at ~' + num(px, 2) + ' (' + (direction === 'LONG_SPREAD' ? 'Ask A − Bid B' : 'Bid A − Ask B') + ')';
-    if (debounced('mkt' + direction)) { return; }
+    if (debounced('mkt' + S.key + direction)) { return; }
     var go = wantConfirm()
       ? confirmBox((direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread — market',
                    words + '\n\nTagged MANUAL. The algo cannot start while it is open.',
@@ -409,37 +508,33 @@
       : Promise.resolve(true);
     go.then(function (ok) {
       if (!ok) { return; }
-      postJSON('/api/manual-trade/execute', {direction: direction, lots: qty}).then(function (r) {
+      postJSON(S.base + '/api/manual-trade/execute', {direction: direction, lots: qty}).then(function (r) {
         if (r.success) { toast('MANUAL ' + words + ' — ' + (r.message || 'sent'), 'success'); }
         else { toast('Not sent: ' + (r.error || 'refused'), 'danger'); }
-        refreshAll();
+        refreshAll(S);
       }).catch(function (e) { toast('Order request failed: ' + e, 'danger'); });
     });
   }
+  function ACTIVE_CTX() { return S; }
 
-  function closePosition() {
+  function closePosition(ctx) {
+    var S = ctx || ACTIVE_CTX();
     var t = S.status && S.status.open_trade;
-    if (!t) { toast('No open position.', 'info'); return; }
-    if (debounced('close')) { return; }
+    if (!t) { toast('No open position on ' + pairName(S) + '.', 'info'); return; }
+    if (debounced('close' + S.key)) { return; }
     maybeConfirm('Close position',
-      'Close the ' + (t.owner || '') + ' ' + t.position_type + ' position (' + t.quantity +
+      'Close the ' + (t.owner || '') + ' ' + t.position_type + ' position on ' + pairName(S) + ' (' + t.quantity +
       ' lot(s)) now, at the ' + (t.position_type === 'LONG' ? 'Sell' : 'Buy') + ' spread.', 'Close')
       .then(function (ok) {
         if (!ok) { return; }
-        postJSON('/api/engine/close-position', {}).then(function (r) {
+        postJSON(S.base + '/api/engine/close-position', {}).then(function (r) {
           toast(r.success ? 'Closed.' : 'Not closed: ' + (r.error || 'refused'), r.success ? 'success' : 'danger');
-          refreshAll();
+          refreshAll(S);
         });
       });
   }
 
   // ── working (resting) orders ──────────────────────────────────────────
-  // Which side a click in a column sends. Default (touch): Bids = SELL (hit
-  // the bid), Asks = BUY (lift the offer) — as the ladder always worked here.
-  // 'join' is the classic price-ladder way: Bids = resting BUY, Asks = SELL.
-  // Default 'join': Bids (blue) = BUY, Asks (red) = SELL — red is SELL and
-  // blue is BUY everywhere on the desk. A fresh preference key, so the new
-  // default reaches everyone once; the toggle still offers the other way.
   function clickMode() { return prefs.clickMode || 'join'; }
 
   function sideForColumn(col) {
@@ -451,7 +546,7 @@
   // Mirror's headers stay plain "Bids" / "Asks"; what a click sends is on
   // each cell's tooltip and in the ladder's own settings (⚙).
   function labelColumns(body) {
-    body = body || (W.ladder && W.ladder.node);
+    body = body || (S.win && S.win.node);
     if (!body) { return; }
     var b = $('th.c-bid', body), a = $('th.c-ask', body);
     var bs = sideForColumn('bid'), as = sideForColumn('ask');
@@ -460,16 +555,17 @@
   }
 
 
-  function placeWorking(side, level, qtyOverride) {
-    var qty = qtyOverride || lots(side);
+  function placeWorking(side, level, qtyOverride, ctx) {
+    var S = ctx || ACTIVE_CTX();
+    var qty = qtyOverride || lots(side, S);
     var lad = S.ladder || {};
     var now = side === 'SELL' ? lad.sell_spread : lad.buy_spread;
     var marketable = now != null && (side === 'SELL' ? now >= level : now <= level);
-    var words = side + ' ' + qty + ' lot(s) at ' + num(level, 2) + ' — ' +
+    var words = side + ' ' + pairName(S) + ' ' + qty + ' lot(s) at ' + num(level, 2) + ' — ' +
       (marketable ? 'the market is already there: it fires NOW (both legs at market)'
                   : 'fires when the ' + (side === 'SELL' ? 'Sell' : 'Buy') + ' spread reaches ' + num(level, 2) +
                     ' (now ' + num(now, 2) + ')');
-    if (debounced('wo' + side + level)) { return; }
+    if (debounced('wo' + S.key + side + level)) { return; }
     var go = wantConfirm()
       ? confirmBox(side + ' the spread — ' + (marketable ? 'fires now' : 'working order (GTC)'),
                    words + '\n\nManual order: good till cancelled; turning the algo ON cancels it.',
@@ -477,58 +573,60 @@
       : Promise.resolve(true);
     go.then(function (ok) {
       if (!ok) { return; }
-      postJSON('/api/working-orders', {side: side, price: level, lots: qty}).then(function (r) {
+      postJSON(S.base + '/api/working-orders', {side: side, price: level, lots: qty}).then(function (r) {
         if (r.success) { toast((r.marketable ? 'Sent: ' : 'Working: ') + words, 'success'); }
         else { toast('Not placed: ' + (r.error || 'refused'), 'danger'); }
-        refreshWorking();
+        refreshWorking(S);
       }).catch(function (e) { toast('Order request failed: ' + e, 'danger'); });
     });
   }
 
-  function cancelWorking(ids, via) {
+  function cancelWorking(ids, via, ctx) {
+    var S = ctx || ACTIVE_CTX();
     var list = (S.wo && S.wo.active || []).filter(function (o) { return ids.indexOf(o.id) >= 0; });
     var words = list.map(function (o) { return o.side + ' ' + o.lots + ' @ ' + num(o.price, 2); }).join(', ');
-    maybeConfirm('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + '?', 'Cancel order')
+    maybeConfirm('Cancel working order' + (ids.length > 1 ? 's' : ''), 'Cancel ' + (words || ids.join(', ')) + ' on ' + pairName(S) + '?', 'Cancel order')
       .then(function (ok) {
         if (!ok) { return; }
         Promise.all(ids.map(function (id) {
-          return fetch('/api/working-orders/' + encodeURIComponent(id) + '?via=' + encodeURIComponent(via || 'the desk'),
+          return fetch(S.base + '/api/working-orders/' + encodeURIComponent(id) + '?via=' + encodeURIComponent(via || 'the desk'),
                        {method: 'DELETE'}).then(function (r) { return r.json(); });
-        })).then(function () { toast('Cancelled: ' + words, 'info'); refreshWorking(); });
+        })).then(function () { toast('Cancelled: ' + words, 'info'); refreshWorking(S); });
       });
   }
 
-  function cancelAllWorking(via) {
+  function cancelAllWorking(via, ctx) {
+    var S = ctx || ACTIVE_CTX();
     via = typeof via === 'string' ? via : 'CANCEL ALL';
     var n = (S.wo && S.wo.active || []).length;
-    if (!n) { toast('No working orders.', 'info'); return; }
-    maybeConfirm('Cancel all working orders', 'Cancel all ' + n + ' working order(s)?', 'Cancel all')
+    if (!n) { toast('No working orders on ' + pairName(S) + '.', 'info'); return; }
+    maybeConfirm('Cancel all working orders', 'Cancel all ' + n + ' working order(s) on ' + pairName(S) + '?', 'Cancel all')
       .then(function (ok) {
         if (!ok) { return; }
-        postJSON('/api/working-orders/cancel-all?via=' + encodeURIComponent(via), {via: via}).then(function (r) {
-          toast((r.cancelled || 0) + ' working order(s) cancelled', 'info'); refreshWorking();
+        postJSON(S.base + '/api/working-orders/cancel-all?via=' + encodeURIComponent(via), {via: via}).then(function (r) {
+          toast((r.cancelled || 0) + ' working order(s) cancelled', 'info'); refreshWorking(S);
         });
       });
   }
 
-  function refreshWorking() {
-    return getJSON('/api/working-orders').then(function (d) {
+  function refreshWorking(ctx) {
+    var S = ctx || ACTIVE_CTX();
+    return getJSON(S.base + '/api/working-orders').then(function (d) {
       var before = S.wo ? JSON.stringify(S.wo.active.map(function (o) { return o.id + o.status; })) : '';
       S.wo = d;
       // a fill or a rejection since last time → say so once
       (d.recent || []).forEach(function (o) {
         if (S.woSeen && !S.woSeen[o.id] && (o.status === 'filled' || o.status === 'rejected')) {
-          toast('Working order ' + o.status.toUpperCase() + ': ' + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
+          toast(pairName(S) + ' — working order ' + o.status.toUpperCase() + ': ' + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
                 (o.note ? ' — ' + o.note : ''), o.status === 'filled' ? 'success' : 'danger');
         }
       });
       S.woSeen = S.woSeen || {};
       (d.recent || []).forEach(function (o) { S.woSeen[o.id] = true; });
-      var n = (d.active || []).length;
-      if (W.ladder && S.ladder) { renderRail(W.ladder.node); renderFooter(W.ladder.node, S.ladder); }
-      if (REFRESH.workorders) { REFRESH.workorders(); }
+      if (S.win && S.ladder) { renderRail(S.win.node, S); renderFooter(S.win.node, S); }
+      if (S === ACTIVE_CTX() && REFRESH.workorders) { REFRESH.workorders(); }
       var after = JSON.stringify(d.active.map(function (o) { return o.id + o.status; }));
-      if (before !== after && W.ladder && S.ladder) { drawLadder(W.ladder.node, S.ladder); renderTabs(); }
+      if (before !== after) { if (S.win && S.ladder) { drawLadder(S.win.node, S); } renderTabs(); }
     }).catch(function () {});
   }
 
@@ -541,12 +639,13 @@
   // Work | Bids | Price | Asks | LTQ, the B: S: W: counts, and the footer
   // with the two legs' books. Every order still goes through THIS engine's
   // endpoints, so the MANUAL / ALGO lock and the one-position rule hold.
-  var ladderAnchor = null;
-  var armed = {buy: null, sell: null};
-  var filtered = false;
   var MIRROR_LADDER =
     '<div class="titlebar"><span class="swatch"></span><span class="title"></span>' +
-    '<span class="route">arrow → arrow</span><span class="mode-badge"></span>' +
+    '<span class="route">arrow</span><span class="mode-badge"></span>' +
+    '<span class="algo-switch"><button type="button" class="algo-btn off" title="This ladder\'s Algo — click to turn it on or off">ALGO OFF</button>' +
+    '<span class="algo-menu" hidden><button type="button" data-algo="OFF">Off</button>' +
+    '<button type="button" data-algo="ON" class="on-item">On</button></span></span>' +
+    '<button type="button" class="chart-btn" title="Open this ladder\'s chart: the spread in candles with its bands">Chart</button>' +
     '<span class="winbtns"><button class="winbtn ladder-cog" title="This ladder\'s own settings">&#9881;</button>' +
     '<button class="winbtn close" title="Close this ladder">&times;</button></span></div>' +
     '<div class="quotestrip"><span class="netchg">—</span>' +
@@ -554,8 +653,8 @@
     '<div class="stats"><span><label>O:</label><b class="stat-o">—</b></span>' +
     '<span title="Volume is per LEG"><label>V1:</label><b class="stat-v1">—</b> <label>V2:</label><b class="stat-v2">—</b></span></div>' +
     '<span class="ours" title="H / L / O are the spread\'s own 1-minute bars since the session opened (IST).">ours</span></div>' +
+    '<div class="algo-lock" hidden>ALGO ON — manual orders are off on this ladder, closes included. Turn the Algo off in the title bar to trade by hand.</div>' +
     '<div class="body"><div class="rail">' +
-    '<div class="lock-note hidden">ALGO ON — manual orders off</div>' +
     '<div class="route-box row" title="Leg A and leg B"><div class="route-leg route-a">A <b>—</b></div><div class="route-leg route-b">B <b>—</b></div></div>' +
     '<div class="mode-row"><select class="order-type" title="LIMIT: a click rests a working order at that level. MARKET: a click crosses both legs now.">' +
     '<option value="LIMIT">Limit</option><option value="MARKET">Market</option></select>' +
@@ -596,6 +695,8 @@
     '<span class="pos">flat</span><span class="pnl">—</span><span class="clip"></span><span class="errors"></span>' +
     '<span class="legs">—</span></div>';
 
+  function pairName(ctx) { return (ctx && ctx.name) || pairTitle(ctx && (ctx.legs && ctx.legs.length ? ctx.legs : ctx.ladder && ctx.ladder.legs)); }
+  function eachLadder(fn) { ORDER.forEach(function (k) { if (P[k] && P[k].win) { fn(P[k]); } }); }
   function pairTitle(legs) {
     if (!legs || !legs[0]) { return 'Ladder'; }
     var re = /^([A-Z]+?)(\d{2})([A-Z]{3})(\d{2})/;
@@ -603,63 +704,73 @@
     if (a && b && a[1] === b[1]) { return a[1] + ' ' + a[3] + '−' + b[3]; }
     return legs[0] + ' − ' + (legs[1] || '');
   }
-  function lots(side) {
-    var node = W.ladder && W.ladder.node;
+  function lots(side, ctx) {
+    var node = ctx && ctx.win && ctx.win.node;
     var box = node && $(side === 'SELL' ? '.sell-qty' : '.armed', node);
     return parseInt(box && box.value, 10) || 1;
   }
 
-  BUILD.ladder = function (node) {
-    node.querySelector('.close').onclick = function () { closeWindow('ladder'); };
-    $('.buy-touch', node).onclick = function () { manualOrder('LONG_SPREAD'); };
-    $('.sell-touch', node).onclick = function () { manualOrder('SHORT_SPREAD'); };
-    $('.flatten', node).onclick = closePosition;
+  BUILD.ladder = function (node, ctx) {
+    var S = ctx;
+    node.querySelector('.close').onclick = function () { closeWindow('ladder:' + S.key); };
+    $('.buy-touch', node).onclick = function () { manualOrder('LONG_SPREAD', S); };
+    $('.sell-touch', node).onclick = function () { manualOrder('SHORT_SPREAD', S); };
+    $('.flatten', node).onclick = function () { closePosition(S); };
     $('.close-limit-go', node).onclick = function () {
       var t = S.status && S.status.open_trade;
       var lv = parseFloat($('.close-limit', node).value);
       if (!t) { toast('No open position to close.', 'info'); return; }
       if (!isFinite(lv)) { toast('Type the spread level to close at.', 'info'); return; }
-      placeWorking(t.position_type === 'LONG' ? 'SELL' : 'BUY', lv, t.quantity);
+      placeWorking(t.position_type === 'LONG' ? 'SELL' : 'BUY', lv, t.quantity, S);
     };
     Array.prototype.forEach.call(node.querySelectorAll('.keypad .qty'), function (b) {
       b.onclick = function () {
         var q = b.dataset.qty ? Number(b.dataset.qty) : null;
-        armed.buy = armed.sell = q;
+        S.armed.buy = S.armed.sell = q;
         $('.armed', node).value = q || (S.ladder && S.ladder.lots) || '';
         $('.sell-qty', node).value = q || (S.ladder && S.ladder.lots) || '';
-        renderRail(node);
+        renderRail(node, S);
       };
     });
-    $('.armed', node).oninput = function (e) { armed.buy = Number(e.target.value) || null; };
-    $('.sell-qty', node).oninput = function (e) { armed.sell = Number(e.target.value) || null; };
+    $('.armed', node).oninput = function (e) { S.armed.buy = Number(e.target.value) || null; };
+    $('.sell-qty', node).oninput = function (e) { S.armed.sell = Number(e.target.value) || null; };
     $('.order-type', node).value = prefs.orderType || 'LIMIT';
     $('.order-type', node).onchange = function (e) {
-      prefs.orderType = e.target.value; save(PREF_KEY, prefs); renderRail(node);
+      prefs.orderType = e.target.value; save(PREF_KEY, prefs); renderRail(node, S);
       node.classList.toggle('mode-market', e.target.value === 'MARKET');
     };
     node.classList.toggle('mode-market', (prefs.orderType || 'LIMIT') === 'MARKET');
-    $('.cxl-all', node).onclick = function () { cancelAllWorking('CXL All on the ladder rail'); };
-    $('.cxl-b', node).onclick = function () { cancelSide('BUY'); };
-    $('.cxl-s', node).onclick = function () { cancelSide('SELL'); };
+    $('.cxl-all', node).onclick = function () { cancelAllWorking('CXL All on the ladder rail', S); };
+    $('.cxl-b', node).onclick = function () { cancelSide('BUY', S); };
+    $('.cxl-s', node).onclick = function () { cancelSide('SELL', S); };
     $('.lock-scroll', node).onchange = function (e) {
-      ladderAnchor = e.target.checked && S.ladder && S.ladder.rows && S.ladder.rows.length
+      S.anchor = e.target.checked && S.ladder && S.ladder.rows && S.ladder.rows.length
         ? S.ladder.rows[Math.floor(S.ladder.rows.length / 2)].level : null;
     };
-    $('.filter', node).onchange = function (e) { filtered = e.target.checked; if (S.ladder) { drawLadder(node, S.ladder); } };
+    $('.filter', node).onchange = function (e) { S.filtered = e.target.checked; if (S.ladder) { drawLadder(node, S); } };
     $('.recentre', node).onclick = function () {
-      ladderAnchor = null; $('.lock-scroll', node).checked = false; REFRESH.ladder();
+      S.anchor = null; $('.lock-scroll', node).checked = false; refreshLadder(S);
     };
     $('.refresh-feed', node).onclick = function () {
-      postJSON('/api/desk/refresh-feed', {}).then(function (r) {
+      postJSON(S.base + '/api/desk/refresh-feed', {}).then(function (r) {
         toast(r.success ? 'Feed re-subscribed for both legs.' : 'Feed: ' + (r.error || 'not restarted'), r.success ? 'success' : 'danger');
       });
     };
+    // The Algo's switch, on the ladder: Off / On. On asks first when the
+    // pair is LIVE; the engine still refuses what it cannot do.
+    var menu = $('.algo-menu', node);
+    $('.algo-btn', node).onclick = function (e) { e.stopPropagation(); menu.hidden = !menu.hidden; };
+    Array.prototype.forEach.call(menu.querySelectorAll('button'), function (b) {
+      b.onclick = function (e) { e.stopPropagation(); menu.hidden = true; setAlgo(S, b.dataset.algo === 'ON'); };
+    });
+    document.addEventListener('click', function () { menu.hidden = true; });
+    $('.chart-btn', node).onclick = function () { setActive(S.key); openWindow('bands'); };
     var ls = $('.ladder-settings', node);
     $('.ladder-cog', node).onclick = function () { ls.hidden = !ls.hidden; };
     $('.ls-close', node).onclick = function () { ls.hidden = true; };
     var lc = $('.ls-click', node);
     lc.value = clickMode();
-    lc.onchange = function () { prefs.clickMode = lc.value; save(PREF_KEY, prefs); labelColumns(node); if (S.ladder) { drawLadder(node, S.ladder); } };
+    lc.onchange = function () { prefs.clickMode = lc.value; save(PREF_KEY, prefs); eachLadder(function (c) { labelColumns(c.win.node); if (c.ladder) { drawLadder(c.win.node, c); } }); };
     var cf = $('.ls-confirm', node);
     cf.checked = wantConfirm();
     cf.onchange = function () { prefs.confirmOrders = cf.checked; save(PREF_KEY, prefs); };
@@ -667,7 +778,7 @@
     var tb = $('tbody', node);
     tb.ondblclick = function (e) {
       var w = e.target.closest('td.work');
-      if (w && w.dataset.wo) { cancelWorking(w.dataset.wo.split(','), 'double-click on the ladder Work cell'); }
+      if (w && w.dataset.wo) { cancelWorking(w.dataset.wo.split(','), 'double-click on the ladder Work cell', S); }
     };
     tb.onclick = function (e) {
       var w = e.target.closest('td.work');
@@ -682,19 +793,20 @@
       if (!isFinite(level)) { return; }
       var side = sideForColumn(td.dataset.col);
       if ((prefs.orderType || 'LIMIT') === 'MARKET') {
-        manualOrder(side === 'BUY' ? 'LONG_SPREAD' : 'SHORT_SPREAD');
+        manualOrder(side === 'BUY' ? 'LONG_SPREAD' : 'SHORT_SPREAD', S);
       } else {
-        placeWorking(side, level);
+        placeWorking(side, level, null, S);
       }
     };
-    applyLock();
+    applyLock(S);
   };
 
-  function cancelSide(side) {
+  function cancelSide(side, ctx) {
+    var S = ctx;
     var ids = ((S.wo && S.wo.active) || []).filter(function (o) { return o.side === side; })
       .map(function (o) { return o.id; });
     if (!ids.length) { toast('No working ' + side + ' orders.', 'info'); return; }
-    cancelWorking(ids, 'CXL ' + side[0] + ' on the ladder rail');
+    cancelWorking(ids, 'CXL ' + side[0] + ' on the ladder rail', S);
   }
 
   function rowsThatFit(node) {
@@ -705,24 +817,27 @@
     return n % 2 ? n : n - 1;
   }
 
-  REFRESH.ladder = function () {
-    if (!W.ladder) { return Promise.resolve(); }
-    var node = W.ladder.node;
+  function refreshLadder(ctx) {
+    var S = ctx;
+    if (!S.win) { return Promise.resolve(); }
+    var node = S.win.node;
     var inc = $('.increment', node).value;
-    var q = '/api/ladder?count=' + rowsThatFit(node) + (inc ? '&increment=' + encodeURIComponent(inc) : '') +
-            (ladderAnchor != null ? '&anchor=' + ladderAnchor : '');
+    var q = S.base + '/api/ladder?count=' + rowsThatFit(node) + (inc ? '&increment=' + encodeURIComponent(inc) : '') +
+            (S.anchor != null ? '&anchor=' + S.anchor : '');
     return getJSON(q).then(function (d) {
       S.ladder = d;
-      renderRail(node);
-      drawLadder(node, d);
-      renderFooter(node, d);
-      applyLock();
+      if (d.legs) { S.legs = d.legs; }
+      renderRail(node, S);
+      drawLadder(node, S);
+      renderFooter(node, S);
+      applyLock(S);
     }).catch(function () {});
-  };
+  }
 
-  function renderRail(node) {
+  function renderRail(node, ctx) {
+    var S = ctx;
     var d = S.ladder || {};
-    var title = pairTitle(d.legs);
+    var title = pairName(S);
     $('.title', node).textContent = title;
     $('.ls-pair', node).textContent = ' · ' + title;
     if (d.legs) {
@@ -730,7 +845,14 @@
       $('.route-b b', node).innerHTML = esc(d.legs[1]) + '<div class="hint">arrow</div>';
     }
     var mode = prefs.orderType || 'LIMIT';
-    var algoOn = !!(algoState() || {}).running;
+    var algoOn = !!(S.algo || {}).running;
+    var live = (S.algo || {}).mode === 'live';
+    var ab = $('.algo-btn', node);
+    ab.textContent = algoOn ? (live ? 'ALGO LIVE' : 'ALGO DRY-RUN') : 'ALGO OFF';
+    ab.className = 'algo-btn ' + (algoOn ? (live ? 'live' : 'dry') : 'off');
+    var oi = $('.algo-menu .on-item', node);
+    oi.textContent = live ? 'LIVE — it trades' : 'On — DRY-RUN: simulated, nothing sent';
+    oi.className = 'on-item' + (live ? ' live' : '');
     var badge = $('.mode-badge', node);
     badge.textContent = mode + ' · GTC' + (algoOn ? ' · AUTO' : '');
     badge.classList.toggle('auto', algoOn);
@@ -741,14 +863,14 @@
       : 'LIMIT: rests here · both legs cross when the spread reaches it';
     ['buy', 'sell'].forEach(function (side) {
       var box = $(side === 'buy' ? '.armed' : '.sell-qty', node);
-      if (document.activeElement !== box) { box.value = armed[side] || d.lots || ''; }
-      box.classList.toggle('on', !!armed[side]);
+      if (document.activeElement !== box) { box.value = S.armed[side] || d.lots || ''; }
+      box.classList.toggle('on', !!S.armed[side]);
       var btn = $(side === 'buy' ? '.buy-touch' : '.sell-touch', node);
-      btn.textContent = (side === 'buy' ? 'BUY ' : 'SELL ') + (armed[side] || d.lots || '');
+      btn.textContent = (side === 'buy' ? 'BUY ' : 'SELL ') + (S.armed[side] || d.lots || '');
     });
     Array.prototype.forEach.call(node.querySelectorAll('.keypad .qty'), function (b) {
       var q = parseFloat(b.dataset.qty);
-      b.classList.toggle('on', armed.buy === q && armed.sell === q);
+      b.classList.toggle('on', S.armed.buy === q && S.armed.sell === q);
     });
     var act = (S.wo && S.wo.active) || [];
     var nb = act.filter(function (o) { return o.side === 'BUY'; }).length;
@@ -772,7 +894,9 @@
     $('.stat-v2', node).textContent = (lb.b && lb.b.volume != null) ? lb.b.volume : DASH;
   }
 
-  function renderFooter(node, d) {
+  function renderFooter(node, ctx) {
+    var S = ctx;
+    var d = S.ladder || {};
     var lb = d.legbook || {};
     var ages = [lb.a && lb.a.age, lb.b && lb.b.age].filter(function (x) { return x != null; });
     var worst = ages.length ? Math.max.apply(null, ages) : null;
@@ -834,7 +958,9 @@
     return best;
   }
 
-  function drawLadder(node, d) {
+  function drawLadder(node, ctx) {
+    var S = ctx;
+    var d = S.ladder || {};
     var rows = d.rows || [];
     var tb = $('tbody', node);
     var inc = d.increment || 0;
@@ -863,7 +989,7 @@
       var inBid = sell != null && r.level <= sell + 1e-9;
       var inAsk = buy != null && r.level >= buy - 1e-9;
       var wo = woAt[r.level] || [];
-      if (filtered && !wo.length && !r.is_best_bid && !r.is_best_ask) { return ''; }
+      if (S.filtered && !wo.length && !r.is_best_bid && !r.is_best_ask) { return ''; }
       var cls = [];
       if (inBid) { cls.push('in-bid'); }
       if (inAsk) { cls.push('in-ask'); }
@@ -893,62 +1019,357 @@
   // Mirror's per-pair floating window: "Fair spread" and "Exit", B and S.
   var MIRROR_FAIR =
     '<div class="titlebar"><span class="swatch"></span><span class="title fw-pair"></span>' +
-    '<span class="winbtns"><button class="winbtn fw-cog" title="This ladder\'s own settings">&#9881;</button>' +
-    '<button class="winbtn close" title="Close">&times;</button></span></div>' +
-    '<div class="fw-body"><div class="fair" title="What the carry says this spread should be. A reference reading — it feeds nothing.">' +
-    '<label class="rail-label">Fair spread<button type="button" class="cog open-exits" title="Settings">&#9881;</button></label>' +
+    '<span class="winbtns"><button class="winbtn fw-cog" title="This ladder&#8217;s own settings">&#9881;</button>' +
+    '<button class="winbtn close" title="Close — and turn this window off for this ladder">&times;</button></span></div>' +
+    '<div class="fw-body">' +
+    '<div class="fair" title="What the carry says this basis should be. A reference reading — it feeds nothing.">' +
+    '<label class="rail-label">Fair spread<button type="button" class="cog open-exits" title="Settings — this ladder&#8217;s own settings">&#9881;</button></label>' +
     '<table class="exits fairs"><tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>' +
     '<tr><th>Fair</th><td class="fair-buy">—</td><td class="fair-sell">—</td></tr>' +
     '<tr><th>Gap</th><td class="gap-buy">—</td><td class="gap-sell">—</td></tr></table>' +
-    '<div class="fair-kind hint"></div><div class="fair-note hint"></div></div>' +
-    '<div class="exit"><label class="rail-label">Exit<button type="button" class="cog open-exits" title="Costs, targets and stops — Settings">&#9881;</button></label>' +
+    '<div class="fair-kind hint"></div><div class="fair-note hint"></div>' +
+    '<div class="fair-warn" hidden><span class="fair-warn-text"></span><button type="button" class="fair-fix" hidden></button></div></div>' +
+    '<div class="exit"><label class="rail-label">Exit<button type="button" class="cog open-exits" title="Set commission, the slippage allowance and the target — Settings">&#9881;</button></label>' +
     '<table class="exits"><tr><th>B-A Sp</th><td class="x-width" colspan="2">—</td></tr>' +
     '<tr><th>Comm</th><td class="x-comm" colspan="2">—</td></tr>' +
+    '<tr hidden><th>Slip</th><td class="x-slip" colspan="2">—</td></tr>' +
+    '<tr hidden><th>Swap</th><td class="x-swap" colspan="2">—</td></tr>' +
     '<tr><th>P% on M</th><td class="x-target" colspan="2">—</td></tr>' +
+    '<tr hidden><th title="target distance in spread, against the session range">Reach</th><td class="x-reach" colspan="2">—</td></tr>' +
     '<tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>' +
     '<tr><th>B/E</th><td class="be-buy">—</td><td class="be-sell">—</td></tr>' +
     '<tr><th>TP</th><td class="tp-buy">—</td><td class="tp-sell">—</td></tr>' +
-    '<tr><th>SL</th><td class="sl-buy">—</td><td class="sl-sell">—</td></tr>' +
     '<tr><th>o/n</th><td class="x-overnight" colspan="2">—</td></tr>' +
     '<tr><th>Auto</th><td class="auto-route-state" colspan="2">off</td></tr></table>' +
     '<div class="exit-note hint"></div></div></div>';
 
-  BUILD.fair = function (node) {
-    node.querySelector('.close').onclick = function () { closeWindow('fair'); };
+  // Mirror's digits: as many as the ladder's increment needs.
+  function digitsFor(increment) {
+    if (!increment) { return 4; }
+    return Math.min(6, Math.max(0, Math.ceil(-Math.log10(increment))));
+  }
+  function fmtD(v, d) { return v == null || !isFinite(v) ? DASH : Number(v).toFixed(d); }
+
+  BUILD.fair = function (node, ctx) {
+    var S = ctx;
+    node.querySelector('.close').onclick = function () { closeWindow('fair:' + S.key); };
     Array.prototype.forEach.call(node.querySelectorAll('.fw-cog, .open-exits'), function (b) {
-      b.onclick = function () { openWindow('settings'); };
+      b.onclick = function () { setActive(S.key); openWindow('settings'); };
     });
   };
-  REFRESH.fair = function () {
-    if (!W.fair) { return Promise.resolve(); }
-    var node = W.fair.node;
-    return getJSON('/api/desk/exit').then(function (d) {
-      function f4(v) { return v == null || !isFinite(v) ? DASH : Number(v).toFixed(4); }
-      function set(sel, txt) { var el = $(sel, node); if (el) { el.textContent = txt; } }
-      $('.fw-pair', node).textContent = pairTitle(S.ladder && S.ladder.legs);
-      set('.fair-buy', f4(d.fair)); set('.fair-sell', f4(d.fair));
-      [['gap-buy', d.gap_buy], ['gap-sell', d.gap_sell]].forEach(function (g) {
-        var el = $('.' + g[0], node);
-        el.textContent = g[1] == null ? DASH : (g[1] > 0 ? '+' : '') + f4(g[1]);
-        el.className = g[0] + (g[1] == null ? '' : g[1] > 0 ? ' down' : ' up');
+  function refreshFair(ctx) {
+    var S = ctx;
+    if (!S.fairWin) { return Promise.resolve(); }
+    var node = S.fairWin.node;
+    return getJSON(S.base + '/api/desk/exit').then(function (d) {
+      var dig = digitsFor(S.ladder && S.ladder.increment);
+      function set(sel, txt, tip) {
+        var el = $(sel, node); if (!el) { return; }
+        el.textContent = txt; if (tip != null) { el.title = tip; }
+      }
+      $('.fw-pair', node).textContent = pairName(S);
+      // Fair spread — Mirror's two cells and its gap colouring.
+      set('.fair-buy', fmtD(d.fair, dig)); set('.fair-sell', fmtD(d.fair, dig));
+      ['buy', 'sell'].forEach(function (side) {
+        var cell = $('.gap-' + side, node), gap = d['gap_' + side];
+        if (gap == null) { cell.textContent = DASH; cell.className = 'gap-' + side; cell.title = ''; return; }
+        cell.textContent = (gap > 0 ? '+' : '') + fmtD(gap, dig);
+        cell.className = 'gap-' + side + ' ' + (gap > 0 ? 'down' : 'up');
+        cell.title = gap > 0 ? 'the market is RICH to its own carry here' : 'the market is CHEAP to its own carry here';
       });
-      set('.fair-kind', d.fair_kind || '');
-      set('.fair-note', d.fair_note || '');
-      set('.x-width', f4(d.width));
-      set('.x-comm', d.cost_inr == null ? DASH : inr(d.cost_inr, 2) + ' / ' + (d.lots || 1) + ' lot');
-      set('.x-target', d.target_note || DASH);
-      var b = d.buy || {}, s = d.sell || {};
-      set('.be-buy', f4(b.break_even)); set('.be-sell', f4(s.break_even));
-      set('.tp-buy', f4(b.target)); set('.tp-sell', f4(s.target));
-      set('.sl-buy', f4(b.stop)); set('.sl-sell', f4(s.stop));
-      set('.x-overnight', d.overnight || DASH);
+      set('.fair-kind', d.fair_kind || '', d.fair_note || '');
+      set('.fair-note', d.days_to_expiry != null ? d.days_to_expiry + 'd to expiry' : '');
+      // Exit — Mirror's rows; B/E and TP for a buy at the ask and a sell at the bid.
+      set('.x-width', fmtD(d.width, dig), 'one round turn of both legs’ bid-ask, measured live');
+      set('.x-comm', d.cost_inr == null ? DASH : inr(d.cost_inr, 2),
+          'the round-trip cost of ' + (d.lots || 1) + ' lot(s): brokerage, slippage allowance, STT and charges');
+      set('.x-target', d.target_money == null ? DASH : inr(d.target_money, 2),
+          d.target_pct ? d.target_pct + '% of ' + inr(d.margin, 2) + ' margin'
+                       : 'the algo exits at the mean (z ' + (d.exit_z == null ? '0.0' : d.exit_z) + '); set a ₹ profit target in Settings for a fixed one');
+      var b = d.buy || {}, s2 = d.sell || {};
+      set('.be-buy', fmtD(b.break_even, dig), 'bid — a long leaves on the bid, so this is the bid you need back');
+      set('.be-sell', fmtD(s2.break_even, dig), 'ask — a short buys back at the offer, so this is the ask you need');
+      set('.tp-buy', fmtD(b.target, dig)); set('.tp-sell', fmtD(s2.target, dig));
+      set('.x-overnight', d.overnight || DASH, 'what happens to an OPEN POSITION at the session cutoff');
       var a = $('.auto-route-state', node);
-      a.textContent = d.auto || 'off';
-      a.classList.toggle('armed', /^on/.test(d.auto || ''));
-      set('.exit-note', d.position ? 'Open: ' + d.position.owner.toUpperCase() + ' ' +
-          d.position.direction.replace('_SPREAD', '') + ' ' + d.position.lots + ' lot(s)' : '');
+      var t = S.status && S.status.open_trade, lv = t && t.spread_levels;
+      var out = t && S.algo && S.algo.running && lv && lv.take_profit != null ? lv.take_profit : null;
+      a.textContent = out != null ? 'out ' + fmtD(out, dig) : (S.algo && S.algo.running ? 'on' : 'off');
+      a.className = 'auto-route-state' + (out != null ? ' armed' : '');
+      a.title = S.algo && S.algo.running ? 'on: the algo enters and exits this pair by itself' : 'off';
+      var short = d.target_pct && d.margin ? d.target_pct + '% of ' + inr(d.margin, 0)
+                : (b.break_even != null ? 'B/E only' : '');
+      if (t && lv && (lv.take_profit != null || lv.break_even != null)) {
+        short = t.position_type[0] + ' out ' + fmtD(lv.take_profit != null ? lv.take_profit : lv.break_even, 4);
+      }
+      set('.exit-note', short);
     }).catch(function () {});
+  }
+
+  // ALGO WINDOW --------------------------------------------------------------
+  // Mirror-MT5's Algo window, one per ladder: SIGNAL & POSITION, STATISTICS,
+  // FILTERS, the last signal blocked, the last order, and a backtest — filled
+  // from this pair's engine (/api/desk/algo). Nothing in it trades.
+  var MIRROR_ALGO =
+    '<div class="titlebar"><span class="swatch"></span><span class="title aw-pair"></span><span class="aw-mode"></span>' +
+    '<span class="winbtns"><button class="winbtn aw-cog" title="This ladder&#8217;s Algo settings">&#9881;</button>' +
+    '<button class="winbtn close" title="Close this window — the Algo itself is switched in the ladder&#8217;s title bar">&times;</button></span></div>' +
+    '<div class="aw-body"><div class="aw-section aw-signal"></div><div class="aw-section aw-stats"></div>' +
+    '<div class="aw-section aw-filters"></div>' +
+    '<div class="aw-section aw-backtest"><div class="aw-head">Backtest</div><div class="aw-bt-controls">' +
+    '<select class="aw-bt-days" title="How much history, from Arrow\'s own candles"><option value="3">last 3 days</option>' +
+    '<option value="5" selected>last 5 days</option><option value="10">last 10 days</option></select>' +
+    '<button type="button" class="aw-bt-run" title="Replay the history through this ladder\'s Algo, with its settings as they are now. Nothing is sent.">Run backtest</button></div>' +
+    '<div class="aw-bt-out hint">What these settings would have done — nothing is sent.</div></div></div>';
+
+  function setAlgo(ctx, on) {
+    var live = (ctx.algo || {}).mode === 'live';
+    var go = on && live
+      ? confirmBox('Algo LIVE — ' + pairName(ctx), 'The Algo will place REAL orders on ' + pairName(ctx) +
+                   ' by itself, and manual orders on its ladder go off.', 'Turn LIVE on', 'sell')
+      : Promise.resolve(true);
+    go.then(function (ok) {
+      if (!ok) { return; }
+      postJSON(ctx.base + (on ? '/api/algo/start' : '/api/algo/stop'), {}).then(function (r) {
+        if (r && r.success === false) { toast('Algo ' + (on ? 'not started' : 'not stopped') + ': ' + (r.error || 'refused'), 'danger'); }
+        else { toast(pairName(ctx) + ' — Algo ' + (on ? 'ON' : 'OFF'), 'info'); }
+        if (on && !ctx.algoWin) { openWindow('algo:' + ctx.key); }
+        pollAlgo(ctx); refreshAlgo(ctx);
+      });
+    });
+  }
+
+  BUILD.algo = function (node, ctx) {
+    var S = ctx;
+    node.querySelector('.close').onclick = function () { closeWindow('algo:' + S.key); };
+    $('.aw-cog', node).onclick = function () { setActive(S.key); openWindow('settings'); };
+    $('.aw-bt-run', node).onclick = function () {
+      var days = parseInt($('.aw-bt-days', node).value, 10) || 5;
+      var out = $('.aw-bt-out', node), btn = $('.aw-bt-run', node);
+      out.className = 'aw-bt-out hint'; out.textContent = 'running on the last ' + days + ' days…'; btn.disabled = true;
+      getJSON(S.base + '/api/desk/backtest?days=' + days, true).then(function (d) {
+        btn.disabled = false;
+        if (!d.ok) { out.className = 'aw-bt-out down'; out.textContent = 'could not run: ' + (d.reason || 'unknown'); return; }
+        out.className = 'aw-bt-out'; out.innerHTML = backtestHtml(d);
+      }).catch(function (e) { btn.disabled = false; out.className = 'aw-bt-out down'; out.textContent = String(e); });
+    };
   };
+
+  function refreshAlgo(ctx) {
+    var S = ctx;
+    if (!S.algoWin) { return Promise.resolve(); }
+    return getJSON(S.base + '/api/desk/algo').then(function (b) { renderAlgoWindow(S.algoWin.node, S, b); })
+      .catch(function () {});
+  }
+
+  function fmt2(v, d) { return v == null || !isFinite(v) ? DASH : Number(v).toFixed(d == null ? 4 : d); }
+  function zs(v) { return v == null || isNaN(v) ? DASH : (v > 0 ? '+' : '') + Number(v).toFixed(2); }
+  function moneyOr(v) { return v == null ? DASH : inr(v, 2); }
+  function kv(label, value, cls, title, wide) {
+    return '<div class="aw-kv' + (wide ? ' wide' : '') + '"' + (title ? ' title="' + esc(title) + '"' : '') +
+      '><span>' + label + '</span><b' + (cls ? ' class="' + cls + '"' : '') + '>' + value + '</b></div>';
+  }
+  function awBadge(text, tone, title) {
+    return '<span class="aw-badge ' + tone + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + text + '</span>';
+  }
+  function sideWords(side) { return side === 'SELL' ? 'H to L' : (side === 'BUY' ? 'L to H' : (side || '')); }
+  var ALGO_EXIT_WORDS = {target: 'back to the mean', stop: 'z-stop', profit_target: 'profit target',
+                         dollar_stop: 'stop loss', time_stop: 'time stop', hard_time_stop: 'hard time stop',
+                         trailing_stop: 'trailing stop'};
+  function levelWords(level, worth, d) {
+    return fmt2(level, d) + (worth == null ? '' : ' (' + (worth > 0 ? '+' : '') + inr(worth, 2) + ')');
+  }
+  function positionWords(p, d) { return (p.side || '?') + ' @ ' + fmt2(p.entry_spread, d); }
+
+  function algoLine(b, d) {
+    if (b.state === 'IN_POSITION') {
+      var f = (b.positions || [])[0] || {};
+      return 'in ' + positionWords(f, d) + ' — TP ' + (f.tp == null ? DASH : levelWords(f.tp, f.tp_money, d)) +
+        ' · SL ' + (f.sl == null ? ((b.params || {}).stop_loss_on ? DASH : 'off') : levelWords(f.sl, f.sl_money, d));
+    }
+    if (b.state === 'BLOCKED') { return 'held: ' + (b.blocked || b.status || ''); }
+    if (b.state === 'OFF') { return 'Algo off — switch it on in the ladder’s title bar'; }
+    return b.status && b.status !== 'stopped' ? b.status : 'watching';
+  }
+  function warmupHtml(w) {
+    if (!w || !w.need_sec) { return ''; }
+    var done = !!w.done, pct = done ? 100 : Math.floor(100 * w.sec / w.need_sec);
+    return '<div class="aw-data aw-warmup" title="No entry until the Algo has watched this long of live prices. Time with no price does not count.">' +
+      '<span>Live</span><div class="aw-bar"><div class="' + (done ? 'ok' : 'wait') + '" style="width:' + pct + '%"></div></div>' +
+      '<span>' + (done ? 'warmed up' : 'warming up ' + Math.floor(w.sec / 60) + '/' + Math.round(w.need_sec / 60) + ' min') + '</span></div>';
+  }
+  function progressHtml(f, d) {
+    var entry = f.entry_spread;
+    var toTp = f.tp == null ? null : Math.abs(f.tp - entry);
+    var toSl = f.sl == null ? null : Math.abs(entry - f.sl);
+    var split = (toTp && toSl) ? toSl / (toSl + toTp) : (toSl ? 0.5 : 0);
+    var p = f.progress;
+    var at = p == null ? null : (p >= 0 ? split + p * (1 - split) : split + p * split);
+    var fill = at === null ? '' : '<div class="ap-fill ' + (p >= 0 ? 'up' : 'down') + '" style="left:' +
+      (Math.min(at, split) * 100) + '%;width:' + (Math.abs(at - split) * 100) + '%"></div>' +
+      '<div class="ap-mark" style="left:calc(' + (at * 100) + '% - 1px)"></div>';
+    return '<div class="algo-progress" title="' + esc(positionWords(f, d) + ', closing at ' + fmt2(f.closing_spread, d)) + '">' +
+      '<div class="ap-pct">' + (p == null ? DASH : (p >= 0 ? Math.round(p * 100) + '% to TP' : Math.round(-p * 100) + '% to SL')) + '</div>' +
+      '<div class="ap-track">' + fill + '<div class="ap-entry" style="left:' + (split * 100) + '%"></div></div>' +
+      '<div class="ap-ends"><span>' + (toSl === null ? 'no SL' : 'SL ' + levelWords(f.sl, f.sl_money, d)) + '</span><span>' +
+      (toTp === null ? 'no TP' : 'TP ' + levelWords(f.tp, f.tp_money, d)) + '</span></div></div>';
+  }
+  function lastOrderHtml(b) {
+    var last = (b.recent || [])[0];
+    var html = '<div class="aw-blocked aw-last-order"><div class="aw-head2">Last order</div>';
+    if (!last) { return html + '<div class="hint">none yet</div></div>'; }
+    var what = esc(last.action || '') + ' ' + esc(sideWords(last.side)) + (last.z == null ? '' : ' z ' + zs(last.z)) +
+      ' · ' + new Date(last.at * 1000).toLocaleTimeString();
+    var outcome = last.mode !== 'LIVE' ? '<div class="hint">dry-run — nothing sent</div>'
+      : (last.done ? '<div class="up">sent — done</div>' : '<div class="down">REFUSED — ' + esc(last.result || 'no reason given') + '</div>');
+    return html + '<div><b>' + what + '</b></div>' + outcome + '</div>';
+  }
+  function backtestHtml(data) {
+    var s = data.summary || {}, plain = data.without_protections || {};
+    function line(x) {
+      return (x.trades || 0) + ' trade(s) · ' + (x.wins || 0) + ' won, ' + (x.losses || 0) + ' lost · net ' +
+        moneyOr(x.net) + ' · worst run ' + moneyOr(x.max_drawdown);
+    }
+    function when(at) {
+      return at ? new Date(at * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}) : DASH;
+    }
+    var held = Object.keys(data.held || {}).map(function (r) { return [r, data.held[r]]; })
+      .sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
+    var rows = (data.trades || []).slice(-8).reverse().map(function (t) {
+      return '<tr><td>' + when(t.opened_at) + '</td><td>' + sideWords(t.side) + '</td><td>' + zs(t.entry_z) + '</td><td>' +
+        esc(ALGO_EXIT_WORDS[t.reason] || t.reason || '') + '</td><td class="' + (t.pnl > 0 ? 'up' : (t.pnl < 0 ? 'down' : '')) + '">' +
+        moneyOr(t.pnl) + '</td></tr>';
+    }).join('');
+    return '<div><b>These settings:</b> ' + line(s) + '</div>' +
+      '<div class="hint">With every entry gate off: ' + line(plain) + '</div>' +
+      (held.length ? '<div class="hint">Held back most by: ' + held.map(function (h) { return esc(h[0]) + ' (' + h[1] + ')'; }).join('; ') + '</div>' : '') +
+      (rows ? '<table class="aw-bt-trades"><tr><th>Entered</th><th>Side</th><th>z</th><th>Exit</th><th>P&amp;L</th></tr>' + rows + '</table>' : '') +
+      '<div class="hint" title="' + esc((data.caveats || []).join('; ')) + '">' + (s.candles || 0) + ' candles of Arrow history, ' +
+      when(s.from) + ' – ' + when(s.to) + ' · hover for what a backtest cannot see</div>';
+  }
+
+  function renderAlgoWindow(node, S, b) {
+    var params = b.params || {}, filters = b.filters || {};
+    var digits = digitsFor(S.ladder && S.ladder.increment);
+    $('.aw-pair', node).textContent = pairName(S) + ' · Algo';
+    var mode = $('.aw-mode', node);
+    mode.textContent = b.mode === 'OFF' ? 'OFF' : (b.mode === 'LIVE' ? 'LIVE' : 'DRY-RUN');
+    mode.className = 'aw-mode ' + (b.mode === 'LIVE' ? 'live' : 'dry');
+    mode.style.display = b.mode === 'OFF' ? 'none' : '';
+    mode.title = b.mode === 'LIVE' ? 'the Algo TRADES this ladder — manual orders on it are off'
+      : 'dry-run: the Algo runs, its orders are simulated — nothing is sent';
+    var entryZ = params.entry_z, direction = params.direction || 'BOTH';
+    function tile(side) {
+      var sell = side === 'SELL';
+      var z = sell ? b.z_sell : b.z_buy;
+      var hit = z != null && entryZ && (sell ? z >= entryZ : z <= -entryZ);
+      var off = (sell && direction === 'L_TO_H') || (!sell && direction === 'H_TO_L');
+      return '<div class="aw-tile ' + (sell ? 'sell' : 'buy') + (hit ? ' hit' : '') + (off ? ' off' : '') + '" title="' +
+        (sell ? 'What SELLING the spread gets now (the bid side). The Algo sells when this z reaches +' + entryZ + ', and closes a long here.'
+              : 'What BUYING the spread costs now (the offer side). The Algo buys when this z reaches −' + entryZ + ', and closes a short here.') +
+        '"><div class="aw-tile-head">' + (sell ? 'H to L' : 'L to H') + (off ? ' <small>(entries off)</small>' : '') +
+        '</div><div class="aw-tile-price">' + fmt2(sell ? b.sell_spread : b.buy_spread, digits) +
+        '</div><div class="aw-tile-z" title="How stretched the spread is: entry at ±' + (entryZ || '?') + '">' + zs(z) + '</div>' +
+        entryLine(sell) + '</div>';
+    }
+    function entryLine(sell) {
+      if (!params.reentry_on) {
+        return '<div class="aw-tile-entry">' + (sell ? 'short' : 'long') + ' at ' + (sell ? '≥ +' : '≤ −') +
+          (entryZ || '?') + ' (' + fmt2(sell ? b.upper : b.lower, digits) + ')</div>';
+      }
+      var inZ = Math.max(0, (entryZ || 0) - (params.reentry_back || 0));
+      var wp = params.reentry_window_pct == null ? 50 : params.reentry_window_pct;
+      var outZ = inZ * (1 - wp / 100);
+      var priced = !(b.mean == null || !b.sigma);
+      var level = priced ? b.mean + (sell ? 1 : -1) * inZ * b.sigma : null;
+      var outLevel = priced ? b.mean + (sell ? 1 : -1) * outZ * b.sigma : null;
+      var armed = (b.armed || {})[sell ? 'SELL' : 'BUY'];
+      return '<div class="aw-tile-entry" title="Armed when the stretch reaches ' + (sell ? '+' : '−') + entryZ +
+        '; entered on the way back in, between ' + (sell ? '+' : '−') + inZ.toFixed(2) + ' and ' + (sell ? '+' : '−') +
+        outZ.toFixed(2) + '. Past ' + outZ.toFixed(2) + ' it disarms - too close to the mean to trade.">' +
+        (armed ? '<b class="aw-armed">ARMED</b> ' : 'arm ' + (sell ? '≥ +' : '≤ −') + entryZ + ' · ') +
+        (sell ? 'short' : 'long') + ' back at ' + (sell ? '+' : '−') + inZ.toFixed(2) + ' (' + fmt2(level, digits) + ') to ' +
+        (sell ? '+' : '−') + outZ.toFixed(2) + ' (' + fmt2(outLevel, digits) + ')</div>';
+    }
+    var held = b.positions || [], first = held[0] || null;
+    var position = first ? (first.source && first.source !== 'ALGO' ? 'YOUR ' : '') + (first.side === 'BUY' ? 'LONG' : 'SHORT') +
+      ' ' + fmt2(first.quantity, 2) : 'FLAT';
+    var html = '<div class="aw-head">Signal &amp; Position</div><div class="aw-tiles">' + tile('SELL') + tile('BUY') +
+      '<div class="aw-pos ' + (first ? (first.side === 'BUY' ? 'long' : 'short') : 'flat') + '">' + position + '</div></div>' +
+      '<div class="aw-line" title="' + esc(b.blocked || b.status || '') + '">' + esc(algoLine(b, digits)) + '</div>';
+    if (first) {
+      var delta = (first.closing_spread == null || first.entry_spread == null) ? null : first.closing_spread - first.entry_spread;
+      var good = delta === null ? '' : ((first.side === 'BUY' ? delta >= 0 : delta <= 0) ? 'up' : 'down');
+      function legRow(leg) {
+        var en = first['leg_' + leg + '_entry'], now = first['leg_' + leg + '_now'];
+        var ch = (en == null || now == null) ? null : now - en;
+        return kv('Leg ' + leg.toUpperCase() + ' (' + (first['leg_' + leg + '_side'] || '?') + ')',
+                  fmt2(en, 2) + ' → ' + fmt2(now, 2) + (ch === null ? '' : ' <small>(' + (ch > 0 ? '+' : '') + fmt2(ch, 2) + ')</small>'),
+                  '', 'the leg’s fill → the price it would close at now', true);
+      }
+      html += '<div class="aw-grid">' + kv('Entry spread', fmt2(first.entry_spread, digits)) +
+        kv('Δ spread', delta === null ? DASH : (delta > 0 ? '+' : '') + fmt2(delta, digits), good,
+           'closing price now − entry: a LONG makes money when this is positive, a SHORT when it is negative') +
+        kv('Entry z', zs(first.entry_z)) +
+        kv('Net P&amp;L', moneyOr(first.net_pnl), first.net_pnl == null ? '' : (first.net_pnl >= 0 ? 'up' : 'down')) +
+        legRow('a') + legRow('b') +
+        kv('Age', first.age_sec == null ? DASH : Math.floor(first.age_sec / 60) + 'm ' + Math.floor(first.age_sec % 60) + 's') +
+        kv('Size', fmt2(first.quantity, 2) + ' lot(s)') + '</div>' +
+        kv('Levels', 'BE ' + fmt2(first.break_even, digits) + ' · TP ' + (first.tp == null ? DASH : levelWords(first.tp, first.tp_money, digits)) +
+           ' · SL ' + (first.sl == null ? (params.stop_loss_on ? DASH : 'off') : levelWords(first.sl, first.sl_money, digits)), '',
+           'compare with the CLOSING price: the Sell spread for a LONG, the Buy spread for a SHORT') + progressHtml(first, digits);
+    }
+    $('.aw-signal', node).innerHTML = html;
+
+    var regime = filters.regime || {};
+    var count = b.count || 0, needed = b.needed || 0;
+    var pct = needed ? Math.min(100, Math.round(count * 100 / needed)) : 0;
+    var regimeText = regime.state === 'TRENDING' ? 'Trend ' + ((regime.slope || 0) > 0 ? '↑' : '↓')
+      : regime.state === 'RANGE' ? 'Mean-rev' : regime.state === 'COLLECTING' ? 'Collect' : DASH;
+    var candles = b.timeframe && b.timeframe !== 'ticks';
+    $('.aw-stats', node).innerHTML = '<div class="aw-head">Statistics</div><div class="aw-grid">' +
+      kv('Mean (EMA)', fmt2(b.mean, digits)) + kv('Std dev', fmt2(b.sigma, digits)) +
+      kv('ATR(' + (b.atr_period || 14) + ')', fmt2(b.atr, digits), '', 'the average size of one candle’s move in the spread (Wilder)') +
+      kv('Half-life', filters.half_life_minutes == null ? DASH : Math.round(filters.half_life_minutes) + ' min', '',
+         'how long a stretch takes to halve') +
+      kv('Regime', regimeText, regime.state === 'TRENDING' ? 'down' : (regime.state === 'RANGE' ? 'up' : ''),
+         regime.efficiency_ratio == null ? '' : 'efficiency ' + Number(regime.efficiency_ratio).toFixed(2) + ', ' + regime.crossings + ' mean crossings') +
+      kv('Candles', candles ? b.timeframe + ' × ' + needed : 'ticks') +
+      kv('Band', fmt2(b.lower, digits) + ' … ' + fmt2(b.upper, digits)) +
+      '</div><div class="aw-data"><span>Data</span><div class="aw-bar"><div class="' + (b.ready ? 'ok' : 'wait') +
+      '" style="width:' + (b.ready ? 100 : pct) + '%"></div></div><span>' +
+      (b.ready ? (candles ? 'candles ready' : 'ready') : count + '/' + needed + (candles ? ' candles' : ' samples')) +
+      '</span></div>' + warmupHtml(b.warmup);
+
+    var edge = filters.edge || {}, cost = filters.cost || {}, band = filters.half_life_band || [0, 0];
+    function onOff(on, ok, yes, no, why) {
+      if (!on) { return awBadge('OFF', 'off', why); }
+      if (ok == null) { return awBadge('—', 'wait', why); }
+      return awBadge(ok ? yes : no, ok ? 'ok' : 'bad', why);
+    }
+    var trending = regime.state === 'TRENDING';
+    var day = b.day || {}, last = b.last_blocked;
+    $('.aw-filters', node).innerHTML = '<div class="aw-head">Filters</div><div class="aw-badges">' +
+      '<div>' + onOff(edge.on, edge.ok, '✓', '✗', 'expected capture against the round-trip cost, at the entry z') + '<small>Edge</small></div>' +
+      '<div>' + (regime.on ? awBadge(trending ? 'TR' : (regime.state === 'RANGE' ? 'MR' : 'WAIT'),
+                                     trending ? 'bad' : (regime.state === 'RANGE' ? 'ok' : 'wait')) : awBadge('OFF', 'off')) + '<small>Regime</small></div>' +
+      '<div>' + awBadge('OFF', 'off', 'Arrow-StatArb has no trend filter') + '<small>Trend</small></div>' +
+      '<div>' + awBadge(filters.ready ? 'YES' : 'NO', filters.ready ? 'ok' : 'wait') + '<small>Ready</small></div>' +
+      ((band[0] || band[1]) ? '<div>' + awBadge(Math.round(band[0] || 0) + '–' + (band[1] ? Math.round(band[1]) : '∞'), 'off') +
+        '<small>HL min</small></div>' : '') +
+      '</div><div class="aw-grid">' +
+      kv('Capture / cost', (edge.ratio == null ? DASH : Number(edge.ratio).toFixed(2) + '×') + ' / req ' +
+         (edge.required == null ? DASH : edge.required + '×'), edge.ok === true ? 'up' : (edge.ok === false ? 'down' : ''),
+         'expected capture ' + moneyOr(edge.capture) + ' (' + (params.edge_capture_frac || 0.5) + ' × entry z × σ) against the round trip, at the entry z', true) +
+      kv('Round trip', moneyOr(cost.total), '', 'brokerage, STT and charges ' + moneyOr(cost.commission) + ' + slippage allowance ' + moneyOr(cost.slippage)) +
+      kv('Today', (day.trades || 0) + (params.max_trades_day ? '/' + params.max_trades_day : '') + ' trades · ' +
+         (day.losses_row || 0) + ' in a row · ' + moneyOr(day.pnl), '', 'the day’s limits stop entries, never exits', true) +
+      kv('Size', fmt2(filters.qty || params.algo_qty || 1, 2) + ' lot(s)') +
+      '</div><div class="aw-blocked"><div class="aw-head2">Last signal blocked</div>' + (last
+        ? '<div><b>' + esc(sideWords(last.side)) + '</b> z ' + zs(last.z) + ' · ' + new Date(last.at * 1000).toLocaleTimeString() +
+          '</div><div>' + esc(last.reason || '') + '</div>'
+        : '<div class="hint">none yet</div>') + '</div>' + lastOrderHtml(b);
+  }
 
   // WORKING ORDERS ---------------------------------------------------------------
   BUILD.workorders = function (body) {
@@ -1024,7 +1445,7 @@
       '<div class="sec">Position</div><div class="pos-box muted">flat</div>' +
       '<div style="margin-top:6px"><button class="btn pos-close" data-manual data-tip="Close the open position at market">Close position</button>' +
       ' <span class="muted algo-status"></span></div>';
-    $('.pos-close', body).onclick = closePosition;
+    $('.pos-close', body).onclick = function () { closePosition(S); };
     applyLock();
   };
 
@@ -1354,34 +1775,62 @@
   };
 
   // ── polling ────────────────────────────────────────────────────────────
-  function refreshAll() {
-    pollAlgo();
-    pollStatus();
-    REFRESH.ladder();
+  // Every pair's ladder, working orders and algo state; the ACTIVE pair's
+  // status every second and the others' every three.
+  // Staggered, a pair at a time: with a cap on requests in flight, the
+  // same pair must not always come last and lose its turn.
+  function each(fn) {
+    ORDER.forEach(function (k, i) { if (P[k]) { setTimeout(function () { fn(P[k]); }, i * 110); } });
+  }
+  function refreshAll(ctx) {
+    var c = ctx || S;
+    pollAlgo(c); pollStatus(c); refreshLadder(c); refreshWorking(c);
+    if (c !== S) { return; }
     // the slower windows a moment later, so start-up never queues behind them
     setTimeout(function () { REFRESH.margin(); REFRESH.fills(); REFRESH.trades(); }, 1200);
   }
-  setInterval(pollStatus, 1000);
-  setInterval(pollAlgo, 2000);
-  setInterval(function () { REFRESH.ladder(); }, 700);
-  setInterval(function () { REFRESH.fair(); }, 2000);
+  setInterval(function () { pollStatus(S); }, 1000);
+  setInterval(function () { each(function (c) { if (c !== S) { pollStatus(c); } }); }, 3000);
+  setInterval(function () { each(pollAlgo); }, 2000);
+  setInterval(function () { each(refreshLadder); }, 700);
+  setInterval(function () { each(refreshFair); }, 2000);
+  setInterval(function () { each(refreshAlgo); }, 1500);
   setInterval(function () { REFRESH.charts(); }, 2000);
   setInterval(function () { REFRESH.bands(); }, 3000);
-  setInterval(refreshWorking, 1000);
+  setInterval(function () { each(refreshWorking); }, 1000);
   setInterval(function () { REFRESH.margin(); }, 15000);
   setInterval(function () { REFRESH.fills(); REFRESH.trades(); }, 10000);
   setInterval(renderBanners, 1000);
 
-  // ── start: reopen what was open last time, else the default set ────────
-  DEFS.forEach(function (d) {
-    var L = layout[d.id];
-    var open = L && L.open != null ? L.open : !d.closed;
-    if (open) { openWindow(d.id); }
-  });
-  renderTabs();
-  refreshAll();
-  REFRESH.charts();
-  REFRESH.bands();
-  refreshWorking();
-  REFRESH.orders(true);
+  // ── start: the pairs, then what was open last time, else the default set ─
+  function start(list) {
+    (list || []).forEach(function (p) {
+      if (!p.enabled) { return; }
+      if (!P[p.key]) { P[p.key] = newCtx(p.key, p.base); ORDER.push(p.key); }
+      P[p.key].base = p.base;
+      P[p.key].name = p.name || '';
+      var L = p.legs || {};
+      if (L.leg_a && L.leg_b) { P[p.key].legs = [L.leg_a, L.leg_b]; }
+    });
+    var many = ORDER.length > 1;
+    pairDefs().forEach(function (d) {
+      var L = layout[d.id];
+      if (L && L.open != null ? L.open : !d.closed) { openWindow(d.id); }
+    });
+    DEFS.forEach(function (d) {
+      var L = layout[d.id];
+      // With several pairs the ladders fill the screen: the Arrow windows
+      // start closed (tick them open from +) unless they were open before.
+      var open = L && L.open != null ? L.open : (!d.closed && !many);
+      if (open) { openWindow(d.id); }
+    });
+    renderTabs();
+    each(function (c) { refreshAll(c); });
+    REFRESH.charts();
+    REFRESH.bands();
+    REFRESH.orders(true);
+  }
+  fetch('/p/main/api/pairs', {cache: 'no-store'}).then(function (r) { return r.json(); })
+    .then(function (d) { start(d.pairs); })
+    .catch(function () { start([]); });
 })();

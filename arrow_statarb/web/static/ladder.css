@@ -12,6 +12,9 @@
 
 :root {
   --chrome: #d4d0c8;          /* the button/input furniture grey */
+  --analysis-bg: #eef2f7;     /* the Analysis page's own ground */
+  --analysis-tile: #ffffff;
+  --analysis-line: #c8d2de;
   --chrome-dark: #a9a9a9;
   --panel: #f0f0f0;
   --grid-line: #808080;
@@ -339,7 +342,7 @@ body {
    window is narrow enough for the title to fill the bar — the ladders.
    The wide Exchanges window put its close button against the title, on
    the left, where every other window on the screen has none. */
-.titlebar .winbtns { margin-left: auto; }
+.titlebar .winbtns { margin-left: auto; white-space: nowrap; flex-shrink: 0; }
 .winbtn {
   background: var(--chrome);
   border: 1px solid #666;
@@ -459,12 +462,6 @@ body {
   box-shadow: inset 1px 1px 2px rgba(0, 0, 0, .12);
 }
 .rail .check { font-size: 10px; color: var(--frame-text); }
-.rail .auto-route-box { display: block; margin-top: 3px; }
-.rail .auto-route-state {
-  display: block;
-  font: 700 9px var(--mono);
-  color: var(--frame-muted);
-}
 .rail .fair {
   margin-top: 4px;
   padding: 3px;
@@ -1103,6 +1100,14 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   text-align: right;
 }
 .monitor tr.detail td { background: #fafafa; font-size: 10px; }
+/* The level an exit was actually measured against. One cell of three
+ * is marked, so the eye finds the stop that fired without reading the
+ * Exit column first — and a target that was never reached stays a
+ * plain number beside it. */
+.monitor td.on-level {
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--chrome-dark);
+}
 /* An order that stopped working, kept on screen with its reason. */
 .monitor tr.dead td { background: #f6eeee; color: var(--muted); }
 .monitor .up { color: var(--traded); font-weight: 600; }
@@ -1114,6 +1119,61 @@ table.legbook tr.spread .c-width { color: #7a4b00; }
   font: 10px var(--font);
 }
 .monitor .mismatch { background: var(--ask); color: #fff; font-weight: 700; }
+
+/* -- the Analysis tab ------------------------------------------------- */
+
+.monitor .analysis {
+  padding: 4px 8px 8px;
+  font: 11px var(--font);
+  /* ITS OWN GROUND. With no background of its own the pane showed
+   * whatever was behind it, which on a desktop of stacked windows is
+   * a flat mid-grey the tables disappear into. A reading page is read
+   * for minutes at a time; it gets a light, slightly cool ground of
+   * its own and white tiles on it. */
+  background: var(--analysis-bg);
+  color: var(--text);
+}
+.monitor .analysis h4 {
+  margin: 12px 0 4px;
+  font: 600 12px var(--font);
+  border-bottom: 1px solid var(--chrome-dark);
+  padding-bottom: 2px;
+}
+.monitor .analysis h4 small { font-weight: 400; color: var(--muted); }
+/* The two halves of the page: what the desk did, and what the Algo
+ * would have done. Heavier than an h4 on purpose - they are the only
+ * thing telling a reader which of the two they are looking at. */
+.monitor .analysis .an-half {
+  margin: 16px 0 6px;
+  font: 700 13px var(--font);
+  border-bottom: 2px solid var(--chrome-dark);
+  padding-bottom: 3px;
+}
+.monitor .analysis .an-half:first-of-type { margin-top: 4px; }
+.monitor .analysis .an-half small {
+  font: 400 11px var(--font);
+  color: var(--muted);
+}
+.monitor .analysis h4 .btn { float: right; font-size: 10px; padding: 0 6px; }
+.monitor .an-bar { display: flex; gap: 6px; align-items: center; margin: 2px 0 4px; }
+.monitor .an-bar select { font: 11px var(--font); }
+.monitor .an-tiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.monitor .an-tile {
+  flex: 1 1 110px;
+  background: var(--analysis-tile);
+  border: 1px solid var(--analysis-line);
+  padding: 4px 6px;
+  text-align: center;
+}
+.monitor .an-val { font: 600 16px var(--mono); }
+.monitor .an-lbl { font: 10px var(--font); color: var(--muted); }
+.monitor .an-table { width: 100%; min-width: 0; margin: 4px 0; }
+.monitor .an-table td.l, .monitor .an-table th.l { text-align: left; }
+.monitor .an-table .an-legs { font-size: 0.85em; line-height: 1.2; white-space: nowrap; }
+.monitor .an-sub { margin: 8px 0 0; font-weight: 600; }
+.monitor .an-bt-out { margin: 4px 0; }
+.monitor .analysis .hint { color: var(--muted); }
+
 /* A fill that is not ours: the trader's own terminal click. Kept in the
  * journal, and never mistaken for ours. */
 .monitor tr.theirs td { background: #f4f4f4; font-style: italic; }
@@ -1460,6 +1520,9 @@ table.grid-form input,
 table.grid-form select { font: 11px var(--font); width: 100%; padding: 1px 2px; }
 table.grid-form tr.new td { background: #f4f9ff; }
 table.grid-form td.actions { white-space: nowrap; width: 1%; }
+/* The installed MetaTrader 5s, under the path they fill: pick, then
+ * Save. Under it rather than beside it, so the path stays readable. */
+table.grid-form .f-terminal-pick { display: block; margin-top: 2px; }
 table.grid-form td.actions .btn { margin-right: 3px; }
 
 /* Is the system connected — the first thing on the page, and the one
@@ -1734,8 +1797,15 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
  * while the market moves, and a form in it is a form between the
  * trader and the price. Three groups side by side so the whole thing
  * fits without scrolling — which is the point of moving it here.
+ *
+ * The pane is placed against the ladder window, which `.window` already
+ * makes relative — and a FLOATING window, being absolute, places it just
+ * as well. A `.window.ladder { position: relative }` here used to win
+ * over `.window.floating` on source order, so a dragged ladder was never
+ * really lifted out of the row: its `left` was measured from wherever
+ * the row would have put it, and it jumped by the width of any window
+ * in front of it the moment it was grabbed.
  */
-.window.ladder { position: relative; }
 /* `display: flex` below beats the `hidden` attribute, and a pane that
  * is invisible but still laid over the ladder swallows every click on
  * it — on the panel where a click IS an order. The browser test for a
@@ -1871,7 +1941,6 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
 .rail .cxl-row { display: flex; gap: 2px; }
 .rail .cxl-row .cxl { flex: 1 1 auto; min-width: 0; padding: 1px 2px; }
 .rail .cxl-row .cxl-all { flex: 1.6 1 auto; }
-.rail .auto-route-state.armed { color: var(--traded); font-weight: 700; }
 
 
 /* The rail, in as few ROWS as it can honestly manage. Every row is one
@@ -1896,21 +1965,12 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
  * other. `fitLadderFloor` writes the measured number over this. */
 .window.ladder { min-height: 420px; }
 
-/* AutoRouting, said in the title bar. It changes what a FILL does, so
- * it is not something to discover by opening a panel. */
+/* The Algo LIVE, said in the title bar. It changes who may trade this
+ * ladder, so it is not something to discover by opening a panel. */
 .titlebar .mode-badge.auto {
   background: var(--traded);
   color: #fff;
   font-weight: 700;
-}
-
-/* Ticked on the ladder, switched off for the system: stated flatly
- * rather than dressed as live. */
-.titlebar .mode-badge.auto-held {
-  background: transparent;
-  color: var(--muted, #777);
-  font-weight: 400;
-  text-decoration: line-through;
 }
 
 /* A field for something this pair does not have: still visible, so the
@@ -1932,7 +1992,8 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   line-height: 1.3;
   white-space: normal;
 }
-.ladder-settings .lsf-note {
+.ladder-settings .lsf-note,
+.ladder-settings .lsf-side-note {
   grid-column: 1 / -1;
   margin-top: 2px;
   font-size: 9px;
@@ -1964,3 +2025,271 @@ td.bid.ticked, td.ask.ticked { animation: size-tick 320ms ease-out; }
   opacity: .38;
   cursor: not-allowed;
 }
+
+/* ---- The Algo window: Signal & Position, Statistics, Filters ---------- */
+.window.algowin {
+  width: 340px;
+  min-width: 300px;
+  max-width: 420px;
+}
+.window.algowin .aw-body { padding: 0; background: #fff; }
+.window.algowin .aw-mode {
+  font: 700 10px var(--font);
+  padding: 0 5px;
+  border-radius: 2px;
+  margin-left: 6px;
+}
+.window.algowin .aw-mode.live { background: #c0392b; color: #fff; }
+.window.algowin .aw-mode.dry { background: #e8a33d; color: #fff; }
+.window.algowin .aw-section {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--frame-line);
+  font-size: 11px;
+}
+.window.algowin .aw-head {
+  font: 700 10px var(--font);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--frame-muted);
+  margin-bottom: 3px;
+}
+.window.algowin .aw-head2 { font-weight: 700; margin-bottom: 1px; }
+.window.algowin .aw-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 4px;
+  align-items: stretch;
+}
+.window.algowin .aw-tile {
+  border: 2px solid transparent;
+  border-radius: 3px;
+  padding: 2px 4px;
+  text-align: center;
+  background: #f6f6f6;
+}
+.window.algowin .aw-tile.hit { border-color: currentColor; background: #fff; }
+.window.algowin .aw-tile.off { opacity: .45; }
+.window.algowin .aw-tile-head small { font-weight: 400; }
+.window.algowin .aw-tile.sell { color: var(--bid, #1f6fd1); }
+.window.algowin .aw-tile.buy { color: var(--ask, #c0392b); }
+.window.algowin .aw-tile-head { font: 700 9px var(--font); color: var(--frame-text); }
+.window.algowin .aw-tile-price { font: 700 16px var(--mono); }
+.window.algowin .aw-tile-z { font: 700 20px var(--mono); line-height: 1.15; }
+.window.algowin .aw-tile-entry { font-size: 9px; color: var(--frame-muted); }
+.window.algowin .aw-pos {
+  align-self: center;
+  font: 700 12px var(--font);
+  padding: 4px 6px;
+  border-radius: 3px;
+  color: #fff;
+  background: #888;
+  white-space: nowrap;
+}
+.window.algowin .aw-pos.long { background: #2e9e4f; }
+.window.algowin .aw-pos.short { background: #c0392b; }
+.window.algowin .aw-line { margin: 3px 0; font-weight: 700; }
+.window.algowin .aw-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 10px;
+}
+.window.algowin .aw-kv { display: flex; justify-content: space-between; gap: 6px; }
+.window.algowin .aw-kv.wide { grid-column: 1 / -1; }
+.window.algowin .aw-kv > span { color: var(--frame-muted); white-space: nowrap; }
+.window.algowin .aw-kv > b { font: 700 11px var(--mono); text-align: right; }
+.window.algowin .aw-kv > b.up { color: #2e9e4f; }
+.window.algowin .aw-kv > b.down { color: #c0392b; }
+.window.algowin .aw-data {
+  display: flex; align-items: center; gap: 6px; margin-top: 3px;
+  color: var(--frame-muted);
+}
+.window.algowin .aw-bar {
+  flex: 1; height: 6px; background: #e3e3e3; border-radius: 3px; overflow: hidden;
+}
+.window.algowin .aw-bar > div { height: 100%; }
+.window.algowin .aw-bar > .ok { background: #2e9e4f; }
+.window.algowin .aw-bar > .wait { background: #e8a33d; }
+.window.algowin .aw-badges {
+  display: flex; gap: 8px; margin-bottom: 4px; text-align: center;
+}
+.window.algowin .aw-badges small { display: block; font-size: 9px; color: var(--frame-muted); }
+.window.algowin .aw-badge {
+  display: inline-block; min-width: 26px; padding: 0 4px;
+  border-radius: 2px; font: 700 10px var(--font); color: #fff;
+}
+.window.algowin .aw-badge.ok { background: #2e9e4f; }
+.window.algowin .aw-badge.bad { background: #c0392b; }
+.window.algowin .aw-badge.wait { background: #e8a33d; }
+.window.algowin .aw-badge.off { background: #999; }
+.window.algowin .aw-blocked {
+  margin-top: 4px; padding: 3px 4px; background: #f3f3f3; border-radius: 3px;
+}
+.window.algowin .aw-armed { color: #c0392b; }
+.window.algowin .aw-bt-controls { display: flex; gap: 4px; margin: 2px 0; }
+.window.algowin .aw-bt-out { font-size: 11px; }
+.window.algowin .aw-bt-out .up { color: #2e9e4f; }
+.window.algowin .aw-bt-out .down, .window.algowin .aw-bt-out.down { color: #c0392b; }
+.window.algowin .aw-bt-trades { width: 100%; border-collapse: collapse; margin: 3px 0; }
+.window.algowin .aw-bt-trades th, .window.algowin .aw-bt-trades td {
+  text-align: left; padding: 1px 3px; border-bottom: 1px solid #eee;
+}
+.window.algowin .aw-last-order .up { color: #2e9e4f; font-weight: 600; }
+.window.algowin .aw-last-order .down { color: #c0392b; font-weight: 600; }
+
+/* SL <- entry -> TP: the stop on the left, the target on the right, the
+ * entry marked and the closing price a tick on it. */
+.window.algowin .algo-progress { margin: 3px 0 1px; }
+.window.algowin .ap-pct { font-size: 9px; text-align: center; }
+.window.algowin .ap-track {
+  position: relative; height: 8px; background: #e3e3e3;
+  border-radius: 2px; overflow: hidden;
+}
+.window.algowin .ap-fill { position: absolute; top: 0; bottom: 0; }
+.window.algowin .ap-fill.up { background: #2e9e4f; }
+.window.algowin .ap-fill.down { background: #c0392b; }
+.window.algowin .ap-entry, .window.algowin .ap-mark {
+  position: absolute; top: -1px; bottom: -1px; width: 2px;
+}
+.window.algowin .ap-entry { background: #555; }
+.window.algowin .ap-mark { background: #000; }
+.window.algowin .ap-ends {
+  display: flex; justify-content: space-between; font-size: 9px;
+  color: var(--frame-muted);
+}
+
+/* ---- The Algo switch in a ladder's title bar ------------------------- */
+.titlebar .algo-switch { position: relative; margin-left: 4px; }
+.titlebar .algo-btn {
+  font: 700 10px var(--font);
+  padding: 0 6px;
+  border: 1px solid rgba(0, 0, 0, .25);
+  border-radius: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.titlebar .algo-btn.off { background: #e9e9e9; color: #444; }
+.titlebar .algo-btn.dry { background: #e8a33d; color: #fff; }
+.titlebar .algo-btn.live { background: #c0392b; color: #fff; }
+.titlebar .algo-menu {
+  position: absolute; right: 0; top: 100%; z-index: 50;
+  display: flex; flex-direction: column; min-width: 170px;
+  background: #fff; border: 1px solid var(--frame-line);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .2);
+}
+.titlebar .algo-menu[hidden] { display: none; }
+.titlebar .algo-menu button {
+  text-align: left; padding: 4px 8px; border: 0; background: #fff;
+  font: 11px var(--font); cursor: pointer; color: #222;
+}
+.titlebar .algo-menu button:hover { background: #eef3fb; }
+.titlebar .algo-menu button.live { color: #c0392b; font-weight: 700; }
+
+/* Algo LIVE on this ladder: no manual way in. The order controls are
+   off and dimmed, the bid/ask columns say so on hover, and a banner
+   says why. CLOSE ALL and Close @ LMT are untouched — a close is never
+   withheld. */
+.algo-lock {
+  background: #c0392b; color: #fff;
+  font: 700 11px var(--font);
+  padding: 4px 8px; text-align: center;
+}
+.algo-lock[hidden] { display: none; }
+.window.ladder.algo-live .buy-touch,
+.window.ladder.algo-live .sell-touch,
+.window.ladder.algo-live .keypad,
+.window.ladder.algo-live .qty-row { opacity: .35; cursor: not-allowed; }
+.window.ladder.algo-live .grid td.bid,
+.window.ladder.algo-live .grid td.ask,
+.window.ladder.algo-live .grid td.work {
+  cursor: not-allowed; filter: grayscale(.8); opacity: .55;
+}
+
+/* A side's own exit value: H to L and L to H side by side. */
+.ladder-settings .lsf.side-pair input[type="number"],
+.ladder-settings .lsf.side-pair select {
+  flex: 0 0 64px;
+  width: 64px;
+  margin-left: 2px;
+}
+
+/* SIGNALS mode. An alert stays until dismissed, in its own colour; the
+   ladder it is about flashes its frame for a moment. */
+.toast.signal {
+  background: #1d3b6b;
+  color: #fff;
+  border-left: 4px solid #ffcc33;
+  font-weight: bold;
+}
+@keyframes signal-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 204, 51, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(255, 204, 51, 0.95); }
+}
+.ladder.signal-flash { animation: signal-flash 0.6s ease-in-out 5; }
+
+/* The Algo's levels on the ladder: ENTRY, BE, TP, SL. */
+.ladder .price .lvl-tag {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 2px;
+  font-size: 8px;
+  line-height: 10px;
+  border-radius: 2px;
+  color: #fff;
+  vertical-align: middle;
+}
+.ladder .price .lvl-tag.entry { background: #555; }
+.ladder .price .lvl-tag.be { background: #8a6d00; }
+.ladder .price .lvl-tag.tp { background: #1a7f37; }
+.ladder .price .lvl-tag.sl { background: #b42318; }
+
+/* -- the pair chart ------------------------------------------------------
+ * Arrow-statarb's two charts for one ladder: the Algo's z between its
+ * entry and stop lines, and the spread. A window like any other -
+ * dragged, resized, closed - opened from the ladder's Chart button. */
+.window.chartwin { display: flex; flex-direction: column; }
+.window.chartwin .cw-body {
+  flex: 1; display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 8px; overflow: auto; min-height: 0;
+}
+.window.chartwin .cw-bar { font-size: 12px; display: flex; gap: 6px;
+  align-items: center; }
+.window.chartwin .cw-now { margin-left: auto; font-weight: 600; }
+.window.chartwin .cw-card { flex: 1; display: flex; flex-direction: column;
+  min-height: 140px; border: 1px solid rgba(128,128,128,.35);
+  border-radius: 3px; background: var(--panel-bg, #fff); }
+.window.chartwin .cw-head { font-size: 12px; font-weight: 600;
+  padding: 3px 6px; border-bottom: 1px solid rgba(128,128,128,.25);
+  display: flex; align-items: center; gap: 8px; }
+.window.chartwin .cw-key { font-weight: 400; color: #6c757d;
+  margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.window.chartwin .cw-key i { display: inline-block; width: 14px; height: 0;
+  border-top: 2px solid; vertical-align: middle; margin-right: 2px; }
+.window.chartwin .cw-key .k-candle { display: inline-block; width: 5px;
+  height: 10px; vertical-align: middle; margin-right: 1px; }
+.window.chartwin .cw-key .k-candle.up { background: #198754; }
+.window.chartwin .cw-key .k-candle.down { background: #dc3545;
+  margin-right: 3px; }
+.window.chartwin .cw-key .k-up { border-top: 1px dashed #dc3545; }
+.window.chartwin .cw-key .k-down { border-top: 1px dashed #198754; }
+.window.chartwin .cw-key .k-stop { border-top: 1px dotted #6c757d; }
+.window.chartwin .cw-badges { margin-left: auto; display: flex; gap: 4px; }
+.window.chartwin .cw-badge { font-weight: 600; font-size: 11px;
+  padding: 1px 6px; border-radius: 3px; color: #212529; }
+.window.chartwin .cw-min { background: #6edff6; }
+.window.chartwin .cw-max { background: #ffda6a; }
+.window.chartwin .cw-plot { flex: 1; position: relative; min-height: 110px;
+  overflow: hidden; }
+.window.chartwin .cw-plot svg { position: absolute; inset: 0; }
+.window.chartwin .cw-empty { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; color: #6c757d;
+  font-size: 12px; }
+.window.chartwin .cw-note { font-size: 11px; }
+/* The ladder's Chart button: lit while its chart is open. Styled like
+ * the Algo switch beside it, and never allowed to push the window's own
+ * buttons onto a second line. */
+.window.ladder .chart-btn { font: 700 10px var(--font); padding: 0 6px;
+  margin-left: 4px; border: 1px solid rgba(0, 0, 0, .25); border-radius: 2px;
+  background: var(--chrome); cursor: pointer; white-space: nowrap;
+  flex-shrink: 0; }
+.window.ladder .chart-btn.on { background: #0d6efd; color: #fff;
+  border-color: #0d6efd; }

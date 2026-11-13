@@ -87,6 +87,9 @@ EXCURSIONS_FILE = PROJECT_ROOT / "data" / "excursions.json"
 SIGNAL_STUDY_FILE = PROJECT_ROOT / "data" / "signal_study.json"
 # The outcome study: every stretch to the entry z, gates off, settled in money.
 SIGNAL_OUTCOMES_FILE = PROJECT_ROOT / "data" / "signal_outcomes.json"
+# Extra pairs: each one's settings and data in a folder of its own.
+PAIR_CONFIG_ROOT = CONFIG_DIR / "pairs"
+PAIR_DATA_ROOT = PROJECT_ROOT / "data" / "pairs"
 
 
 def _save_session_token(app_id: str, token: str) -> None:
@@ -127,13 +130,73 @@ def _clear_session_token() -> None:
         logger.debug("session token clear failed — {}", exc)
 
 
-def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
+def pair_paths(key: str) -> Dict[str, Path]:
+    """Where one EXTRA pair keeps its settings, legs and data — a folder of its
+    own, so no file is ever shared between two pairs. The main pair keeps the
+    original locations (config/settings.yaml, data/…) untouched."""
+    d = PAIR_DATA_ROOT / key
+    c = PAIR_CONFIG_ROOT / key
+    return {"settings": c / "settings.yaml", "legs": c / "leg_assignments.yaml",
+            "trades": d / "trades.json", "signal_window": d / "signal_window.json",
+            "execution_log": d / "execution_log.jsonl", "untracked": d / "untracked_closes.json",
+            "shadow": d / "whatif_shadow.json", "heartbeat": d / "heartbeat.txt",
+            "excursions": d / "excursions.json", "signal_study": d / "signal_study.json",
+            "signal_outcomes": d / "signal_outcomes.json"}
+
+
+def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = None,
+               shared_active: Optional["ActiveBroker"] = None) -> Tuple[Flask, SocketIO]:
+    """One engine for ONE pair. ``pair_key`` None is the main pair (the
+    original files); a key makes an extra pair with its own folder of
+    settings, legs and data. ``shared_active`` shares one Arrow session
+    between pairs — the broker is the account, and there is one account."""
+    # Every path this engine touches is bound HERE, once: the closures below
+    # read these locals, so two engines in one process never share a file.
+    if pair_key:
+        _pp = pair_paths(pair_key)
+        TRADES_FILE, SIGNAL_WINDOW_FILE = _pp["trades"], _pp["signal_window"]
+        EXECUTION_LOG_FILE, UNTRACKED_FILE = _pp["execution_log"], _pp["untracked"]
+        SHADOW_FILE, HEARTBEAT_FILE = _pp["shadow"], _pp["heartbeat"]
+        EXCURSIONS_FILE, SIGNAL_STUDY_FILE = _pp["excursions"], _pp["signal_study"]
+        SIGNAL_OUTCOMES_FILE, LEG_ASSIGNMENTS_FILE = _pp["signal_outcomes"], _pp["legs"]
+        SIGNAL_WINDOW_FILE.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        g = globals()
+        TRADES_FILE, SIGNAL_WINDOW_FILE = g["TRADES_FILE"], g["SIGNAL_WINDOW_FILE"]
+        EXECUTION_LOG_FILE, UNTRACKED_FILE = g["EXECUTION_LOG_FILE"], g["UNTRACKED_FILE"]
+        SHADOW_FILE, HEARTBEAT_FILE = g["SHADOW_FILE"], g["HEARTBEAT_FILE"]
+        EXCURSIONS_FILE, SIGNAL_STUDY_FILE = g["EXCURSIONS_FILE"], g["SIGNAL_STUDY_FILE"]
+        SIGNAL_OUTCOMES_FILE, LEG_ASSIGNMENTS_FILE = g["SIGNAL_OUTCOMES_FILE"], g["LEG_ASSIGNMENTS_FILE"]
     cfg = config or Config()
     templates_dir = Path(__file__).resolve().parent / "templates"
     app = Flask(__name__, template_folder=str(templates_dir))
     socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-    active = ActiveBroker()
+    active = shared_active or ActiveBroker()
+
+    # Served under /p/<pair>/, a page's own fetch('/api/…') must reach THIS
+    # pair, not the main one: one line at the top of every HTML page routes
+    # them (the templates keep their plain /api/ paths).
+    _PAIR_SHIM = ('<script>(function(){var B=%s;window.PAIR_BASE=B;var f=window.fetch;'
+                  'window.fetch=function(u,o){if(typeof u==="string"&&u.indexOf("/api/")===0){u=B+u;}'
+                  'return f.call(this,u,o);};var X=XMLHttpRequest.prototype.open;'
+                  'XMLHttpRequest.prototype.open=function(m,u){if(typeof u==="string"&&u.indexOf("/api/")===0)'
+                  '{arguments[1]=B+u;}return X.apply(this,arguments);};})();</script>')
+
+    @app.after_request
+    def _route_page_to_its_pair(resp):
+        root = request.script_root or ""
+        if (root.startswith("/p/") and resp.mimetype == "text/html"
+                and not resp.direct_passthrough):
+            try:
+                html = resp.get_data(as_text=True)
+                i = html.find("<head>")
+                if i >= 0:
+                    shim = _PAIR_SHIM % json.dumps(root)
+                    resp.set_data(html[:i + 6] + shim + html[i + 6:])
+            except Exception:                      # noqa: BLE001
+                pass
+        return resp
     _ltp_cache: Dict[str, Any] = {}
     trade_log = TradeLog(TRADES_FILE,
                          brokerage_per_lot=float(cfg.get("filters.brokerage_per_lot", 20)))
@@ -172,11 +235,16 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
     # values; every endpoint (and the pre-entry flat check) reads the cache
     # instead of calling Arrow directly — so a slow API never piles up request
     # threads or blanks the dashboard, and the last good funds value sticks.
-    _broker_cache: Dict[str, Dict] = {
-        "positions": {"ts": 0.0, "val": [], "ok": False},
-        "funds": {"ts": 0.0, "val": {}, "ok": False},
-    }
-    _broker_cache_lock = threading.Lock()
+    # ONE cache per Arrow session: pairs that share the session share it, so
+    # four pairs are one positions poll, not four.
+    _shared = getattr(active, "_desk_cache", None)
+    if _shared is None:
+        _shared = {"cache": {"positions": {"ts": 0.0, "val": [], "ok": False},
+                             "funds": {"ts": 0.0, "val": {}, "ok": False}},
+                   "lock": threading.Lock(), "refresher": False}
+        active._desk_cache = _shared
+    _broker_cache: Dict[str, Dict] = _shared["cache"]
+    _broker_cache_lock = _shared["lock"]
 
     def _cache_get(key: str, max_age: float):
         with _broker_cache_lock:
@@ -231,7 +299,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                 time.sleep(ttl)
         threading.Thread(target=_loop, daemon=True, name="BrokerCache").start()
 
-    _start_cache_refresher()
+    if not _shared["refresher"]:
+        _shared["refresher"] = True
+        _start_cache_refresher()
 
     # ── config helpers ───────────────────────────────────────────────────────
     def _is_dry_run() -> bool:
@@ -1470,7 +1540,9 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         except Exception as exc:                  # never block startup
             logger.warning("Auto-connect error — {}", exc)
 
-    threading.Thread(target=_auto_connect, daemon=True, name="ArrowAutoConnect").start()
+    # ONE login per process: an extra pair rides the main pair's session.
+    if not pair_key:
+        threading.Thread(target=_auto_connect, daemon=True, name="ArrowAutoConnect").start()
 
     @app.route("/api/health", methods=["GET"])
     def api_health():
@@ -2163,7 +2235,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                                "fair_kind": None, "fair_note": None,
                                "width": None, "cost_inr": None, "lots": None,
                                "target_note": None, "buy": None, "sell": None,
-                               "overnight": "Hold overnight", "auto": None,
+                               "overnight": "hold", "auto": None,
                                "position": None}
         if not _have_both_legs(legs):
             out["fair_note"] = "Assign both legs in Setup first."
@@ -2186,7 +2258,7 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         pairs = cfg.section("pairs")
         ptype = str(pairs.get("pair_type", "SPOT_FUTURE"))
         if any(sessions.is_mcx(sg) for sg in _leg_segments()):
-            out["fair_kind"] = "MCX commodity spread: no fair spread"
+            out["fair_kind"] = "MCX commodity: no fair spread"
             out["fair_note"] = ("Carry does not price a commodity calendar — storage, convenience "
                                 "yield and season do. The rolling mean is the anchor.")
         elif ptype == "RELATED":
@@ -2223,12 +2295,272 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         tgt = float(p.get("profit_target_inr", 0) or 0)
         out["target_note"] = (f"₹{tgt:,.0f} net" if tgt > 0
                               else f"z {float(p.get('exit_zscore', 0) or 0):+.1f} (the mean)")
+        # Mirror's "P% on M": the target in money, and what share of the
+        # margin it is — None (an em dash) when no ₹ target is set.
+        out["exit_z"] = float(p.get("exit_zscore", 0) or 0)
+        out["target_money"] = tgt if tgt > 0 else None
+        try:
+            margin = float(p.get("capital_at_risk_inr", 0) or 0)
+        except (TypeError, ValueError):
+            margin = 0.0
+        out["margin"] = margin or None
+        out["target_pct"] = round(tgt / margin * 100.0, 2) if tgt > 0 and margin > 0 else None
         st = arrow_algo.get_state() or {}
         out["auto"] = ("on · " + str(st.get("status") or "watching")) if arrow_algo.running else "off"
         op = _open_position_view()
         if op:
             out["position"] = {"owner": op["owner"], "direction": op["direction"], "lots": op["lots"]}
         return jsonify(out)
+
+    def _wilder_atr(ohlc: List, period: int = 14) -> Optional[float]:
+        """Average true range of the SPREAD's candles (Wilder), or None until
+        there are period + 1 of them."""
+        if len(ohlc) < period + 1:
+            return None
+        trs = []
+        for i in range(1, len(ohlc)):
+            _, _o, h, l, _c = ohlc[i]
+            pc = ohlc[i - 1][4]
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        atr = sum(trs[:period]) / period
+        for tr in trs[period:]:
+            atr = (atr * (period - 1) + tr) / period
+        return atr
+
+    @app.route("/api/desk/algo", methods=["GET"])
+    def api_desk_algo():
+        """Mirror-MT5's Algo window for this pair — SIGNAL & POSITION,
+        STATISTICS, FILTERS, the last signal blocked and the last order — in
+        Mirror's own block shape, filled from THIS engine: its signal, its
+        bands, its edge filter, its arming and its position. Reads only."""
+        sig = signal_engine.get_signal() or {}
+        p = _algo_params() or {}
+        st = arrow_algo.get_state() or {}
+        live = _mode() == "live"
+        entry_z = float(p.get("entry_zscore", 2.0) or 2.0)
+        td = _trade_direction()
+        mean, sd = sig.get("mean"), sig.get("std")
+        tf = str(sig.get("band_timeframe") or "15m")
+        n_len = int(sig.get("band_length") or 20)
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        candles = sig.get("band_source") == "candles"
+        try:
+            bands = (sig.get("bands") or {}).get(tf) or {}
+        except AttributeError:
+            bands = {}
+        count = int(bands.get("count") or 0) if candles else int(sig.get("samples") or 0)
+        needed = n_len if candles else int(round(float(sig.get("min_history_sec") or 0)
+                                                 / max(0.1, float(sig.get("sample_interval_sec") or 0.5))))
+        atr = None
+        if candles:
+            try:
+                atr = _wilder_atr(spread_candles.ohlc(tf, k)[-200:], 14)
+            except Exception:                         # noqa: BLE001
+                atr = None
+        # live warm-up: a new pair's live minutes (candle mode), or the tick
+        # window's own (tick mode)
+        pw = sig.get("pair_warmup")
+        if pw:
+            warmup = {"sec": float(pw.get("have_sec") or 0), "need_sec": float(pw.get("need_sec") or 0),
+                      "done": False}
+        else:
+            need = float(sig.get("min_history_sec") or 0)
+            have = float(sig.get("history_sec") or 0)
+            warmup = {"sec": min(have, need), "need_sec": need, "done": bool(sig.get("ready"))} if need else None
+        # the edge filter, at the entry z — the algo's own arithmetic
+        try:
+            edge = arrow_algo.edge_preview(sig) or {}
+        except Exception:                             # noqa: BLE001
+            edge = {}
+        min_mult = float(p.get("min_edge_multiple", 0) or 0)
+        rd = sig.get("regime_detail") or {}
+        regime_on = bool(p.get("regime_enabled", False))
+        hl = sig.get("half_life_sec")
+        # positions: the one open position, valued as the Signal window values it
+        op = _open_position_view()
+        positions = []
+        if op:
+            j = op.get("journal") or {}
+            ap = op.get("algo_pos") or {}
+            entry = ap.get("entry_fill_spread", ap.get("entry_spread")) if ap else j.get("entry_spread")
+            side = "BUY" if op["direction"] == "LONG_SPREAD" else "SELL"
+            closing = sig.get("sell_spread") if side == "BUY" else sig.get("buy_spread")
+            pos = {"direction": op["direction"], "lots": op["lots"], "entry_spread": entry,
+                   "entry_fill_spread": entry,
+                   "entry_leg_a": ap.get("entry_leg_a") if ap else j.get("leg_a_price"),
+                   "entry_leg_b": ap.get("entry_leg_b") if ap else j.get("leg_b_price")}
+            lv = (st.get("spread_levels") if op["owner"] == "algo" else None) or \
+                arrow_algo._spread_levels(p, float(p.get("profit_target_inr", 0) or 0),
+                                          float(p.get("dollar_stop_inr", 0) or 0), pos=pos) or {}
+            el = arrow_algo.entry_levels(p, pos, sig, auto_exits=op["owner"] == "algo") if entry is not None else {}
+            tp = lv.get("take_profit") if lv.get("take_profit") is not None else el.get("target_spread")
+            sl = lv.get("stop") if lv.get("stop") is not None else el.get("stop_spread")
+            net = arrow_algo._live_net_pnl(closing, p, pos=pos)
+            t0 = (ap.get("entry_time") if ap else j.get("ts"))
+            prog = None
+            if closing is not None and entry is not None:
+                gain = (closing - entry) * (1 if side == "BUY" else -1)
+                if gain >= 0 and tp is not None and abs(tp - entry) > 0:
+                    prog = min(1.0, gain / abs(tp - entry))
+                elif gain < 0 and sl is not None and abs(entry - sl) > 0:
+                    prog = -min(1.0, -gain / abs(entry - sl))
+            book = _leg_book() or {}
+            la, lb_ = book.get("leg_a") or {}, book.get("leg_b") or {}
+            positions.append({
+                "side": side, "quantity": op["lots"], "source": "ALGO" if op["owner"] == "algo" else "MANUAL",
+                "entry_spread": entry, "closing_spread": closing,
+                "entry_z": ap.get("entry_z") if ap else j.get("zscore"),
+                "net_pnl": round(net, 2) if net is not None else None,
+                "leg_a_side": "BUY" if side == "BUY" else "SELL", "leg_b_side": "SELL" if side == "BUY" else "BUY",
+                "leg_a_entry": pos["entry_leg_a"], "leg_b_entry": pos["entry_leg_b"],
+                "leg_a_now": la.get("bid") if side == "BUY" else la.get("ask"),
+                "leg_b_now": lb_.get("ask") if side == "BUY" else lb_.get("bid"),
+                "age_sec": (time.time() - float(t0)) if t0 else None,
+                "break_even": lv.get("break_even", el.get("break_even")),
+                "tp": tp, "sl": sl, "tp_money": float(p.get("profit_target_inr", 0) or 0) or None,
+                "sl_money": -float(p.get("dollar_stop_inr", 0) or 0) or None,
+                "progress": prog})
+        # the state line, in the algo's own words
+        blocked_now = None if st.get("running") else _algo_blocked()
+        status = str(st.get("status") or "")
+        armed = st.get("armed")
+        if positions:
+            state = "IN_POSITION"
+        elif not st.get("running"):
+            state = "OFF"
+        elif blocked_now or status.startswith("BLOCKED") or "blocked" in status.lower():
+            state = "BLOCKED"
+        else:
+            state = "WATCHING"
+        if pw and not positions:
+            state, blocked_now = "BLOCKED", (f"warming up: {int((pw.get('have_sec') or 0) // 60)} of "
+                                             f"{int((pw.get('need_sec') or 0) // 60)} min of live prices watched")
+        # today: trades, losses in a row, P&L — the day's limits stop entries
+        today = datetime.now(_IST).strftime("%Y-%m-%d")
+        closes = [t for t in trade_log.all() if t.get("action") == "CLOSE"
+                  and datetime.fromtimestamp(float(t.get("ts") or 0), _IST).strftime("%Y-%m-%d") == today]
+        streak = 0
+        for t in closes:                              # newest first
+            if float(t.get("net_pnl") or 0) < 0:
+                streak += 1
+            else:
+                break
+        lbs = st.get("last_blocked_signal") or None
+        last_blocked = None
+        if lbs:
+            last_blocked = {"side": "SELL" if lbs.get("would_be_signal") == "SHORT" else "BUY",
+                            "z": lbs.get("zscore"), "at": (lbs.get("timestamp") or 0) / 1000.0,
+                            "reason": lbs.get("reason")}
+        recent = []
+        for t in trade_log.all():
+            if (t.get("source") or "") == "algo":
+                recent.append({"action": "OPEN" if t.get("action") == "OPEN" else "CLOSE",
+                               "side": "BUY" if t.get("direction") == "LONG_SPREAD" else "SELL",
+                               "z": t.get("zscore"), "at": t.get("ts"),
+                               "mode": "LIVE" if not t.get("dry_run") else "DRY",
+                               "done": str(t.get("status", "")).upper() not in ("FAILED", "REJECTED"),
+                               "result": t.get("status")})
+                break
+        if st.get("last_error") and not recent:
+            recent = [{"action": "ORDER", "side": None, "z": None, "at": time.time(),
+                       "mode": "LIVE" if live else "DRY", "done": False, "result": st.get("last_error")}]
+        cost = edge.get("round_trip_cost_inr")
+        _slip = float(p.get("slippage_per_lot", 5.0) or 0) * int(p.get("lots", 1) or 1) * 4.0
+        return jsonify({
+            "mode": ("LIVE" if live else "DRY-RUN") if st.get("running") else "OFF",
+            "state": state, "status": status, "blocked": blocked_now,
+            "health": None,
+            "z_sell": sig.get("z_sell"), "z_buy": sig.get("z_buy"),
+            "sell_spread": sig.get("sell_spread"), "buy_spread": sig.get("buy_spread"),
+            "mean": mean, "sigma": sd,
+            "upper": (mean + entry_z * sd) if (mean is not None and sd) else None,
+            "lower": (mean - entry_z * sd) if (mean is not None and sd) else None,
+            "atr": atr, "atr_period": 14, "timeframe": tf if candles else "ticks",
+            "count": count, "needed": needed, "ready": bool(sig.get("ready")),
+            "warmup": warmup,
+            "armed": {"SELL": armed == "SHORT", "BUY": armed == "LONG"},
+            "positions": positions,
+            "params": {"entry_z": entry_z, "exit_z": float(p.get("exit_zscore", 0) or 0),
+                       "stop_z": float(p.get("stop_zscore", 0) or 0),
+                       "direction": {"sell_only": "H_TO_L", "buy_only": "L_TO_H"}.get(td, "BOTH"),
+                       "reentry_on": str(p.get("entry_mode", "reentry")) == "reentry",
+                       "reentry_back": float(p.get("reentry_back", 0.5) or 0),
+                       "reentry_window_pct": float(p.get("reentry_window_pct", 50) or 0),
+                       "confirm_ticks": int(p.get("confirmation_ticks", 1) or 1),
+                       "stop_loss_on": bool(float(p.get("dollar_stop_inr", 0) or 0) or float(p.get("stop_zscore", 0) or 0)),
+                       "max_trades_day": None,
+                       "edge_capture_frac": float(p.get("profit_target_sigma_frac", 0) or 0) or 0.5,
+                       "algo_qty": int(p.get("lots", 1) or 1)},
+            "filters": {
+                "edge": {"on": min_mult > 0, "ok": edge.get("edge_ok") if min_mult > 0 else None,
+                         "ratio": edge.get("edge_multiple"), "required": min_mult if min_mult > 0 else None,
+                         "capture": edge.get("expected_capture_inr")},
+                "cost": {"total": cost, "slippage": _slip,
+                         "commission": round(cost - _slip, 2) if cost is not None else None},
+                "regime": {"on": regime_on, "state": {"TRENDING": "TRENDING", "RANGE": "RANGE",
+                                                      "MEAN_REVERTING": "RANGE"}.get(str(rd.get("state") or sig.get("regime") or ""), "COLLECTING"),
+                           "slope": rd.get("slope"), "efficiency_ratio": rd.get("efficiency_ratio"),
+                           "crossings": rd.get("zero_crossings")},
+                "trend": {"on": False},
+                "half_life_minutes": (float(hl) / 60.0) if hl else None,
+                "half_life_band": [float(p.get("half_life_min_sec", 0) or 0) / 60.0,
+                                   float(p.get("half_life_max_sec", 0) or 0) / 60.0],
+                "ready": bool(sig.get("ready")) and state != "BLOCKED",
+                "qty": int(p.get("lots", 1) or 1)},
+            "day": {"trades": len(closes), "losses_row": streak,
+                    "pnl": round(sum(float(t.get("net_pnl") or 0) for t in closes), 2)},
+            "last_blocked": last_blocked, "recent": recent})
+
+    @app.route("/api/desk/backtest", methods=["GET"])
+    def api_desk_backtest():
+        """The Algo window's Backtest: Arrow's candles for the last N days
+        replayed through THIS pair's algo, with its settings as they are now
+        — and again with entry gates off, beside it. Sends nothing."""
+        from arrow_statarb.core.candles import align_legs, normalise_tf, tf_seconds
+        days = max(1, min(30, int(request.args.get("days", 5) or 5)))
+        sp = cfg.section("signal")
+        if str(sp.get("band_source", "ticks")) != "candles":
+            return jsonify({"ok": False, "reason": "a backtest needs candle bands (Settings → Band source: Candles)"})
+        tf = normalise_tf(sp.get("band_timeframe", "15m"))
+        n = int(sp.get("band_length", 20) or 20)
+        k = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        now = time.time()
+        try:
+            hist = _candle_history("5m" if tf == "5m" else "15m", now - days * 86400.0, now)
+        except Exception as exc:                      # noqa: BLE001
+            return jsonify({"ok": False, "reason": f"Arrow's candle history: {exc}"})
+        if not hist or not hist.get("a") or not hist.get("b"):
+            return jsonify({"ok": False, "reason": "Arrow returned no candle history — connect, then try again"})
+        bars = align_legs(hist["a"], hist["b"], tf_seconds(tf), _session_open_min(), k)
+        p = _algo_params()
+
+        def run(params):
+            rows = replay_candles(bars, params, tf, tf_seconds(tf), n, k, _pair_name())
+            taken = [r for r in rows if r.get("status") == "closed"]
+            nets = [float(r["net"]) for r in taken if r.get("net") is not None]
+            eq, peak, dd = 0.0, 0.0, 0.0
+            for x in nets:
+                eq += x; peak = max(peak, eq); dd = min(dd, eq - peak)
+            held: Dict[str, int] = {}
+            for r in rows:
+                if r.get("status") == "filtered":
+                    key = str(r.get("filter_reason") or "blocked").split(" (")[0][:50]
+                    held[key] = held.get(key, 0) + 1
+            return rows, {"trades": len(taken), "wins": sum(1 for x in nets if x > 0),
+                          "losses": sum(1 for x in nets if x <= 0),
+                          "net": round(sum(nets), 2) if nets else None,
+                          "max_drawdown": round(dd, 2) if nets else None}, held
+        rows, summary, held = run(p)
+        _, plain, _ = run(outcome_params(dict(p, entry_mode="touch")))
+        trades = [{"opened_at": r.get("entry_ts"), "side": "SELL" if r.get("side") == "SHORT" else "BUY",
+                   "entry_z": r.get("entry_z"), "reason": r.get("exit_reason"), "pnl": r.get("net")}
+                  for r in rows if r.get("status") == "closed"]
+        summary.update(candles=len(bars), **{"from": bars[0][0] if bars else None,
+                                             "to": bars[-1][0] if bars else None})
+        return jsonify({"ok": True, "summary": summary, "without_protections": plain, "held": held,
+                        "trades": trades,
+                        "caveats": ["one look per candle, at its close", "no bid/ask: the candle's close",
+                                    "costs are the algo's own estimate"]})
 
     def engine_status_fair() -> Optional[Dict]:
         """The fair value block for a NON-MCX pair, the dashboard's arithmetic."""
@@ -2267,9 +2599,12 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if not b or not _have_both_legs(legs):
             return jsonify({"success": False, "error": "No broker session, or the legs are not set."})
         try:
+            # The stream is the account's, shared by every pair: re-open it
+            # for ALL of them, or one pair's ↻ would blank the others.
+            others = sorted((app.config.get("OTHER_PAIR_SYMBOLS") or (lambda: set()))())
             if hasattr(b, "stop_price_stream"):
                 b.stop_price_stream()
-            ok = b.start_price_stream([legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]])
+            ok = b.start_price_stream([legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]] + others)
         except Exception as exc:
             return jsonify({"success": False, "error": f"Feed not restarted: {exc}"})
         return jsonify({"success": bool(ok)})
@@ -2674,6 +3009,13 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
                     return jsonify(yaml.safe_load(f) or {})
             return jsonify({})
         data = request.get_json(force=True) or {}
+        clash = app.config.get("LEG_CLASH")
+        if clash:
+            syms = [str((data.get(lk) or {}).get("mapping_id") or "").split("|", 1)[-1]
+                    for lk in ("leg_a", "leg_b")]
+            why = clash([s for s in syms if s])
+            if why:
+                return jsonify({"success": False, "error": why})
         try:
             assigns = {}
             if LEG_ASSIGNMENTS_FILE.exists():
@@ -4132,6 +4474,11 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
             return jsonify({"ok": False, "error": "could not read Arrow's order book"})
         day = _today_ist()
         arrow = fill_check.broker_fills_from_orders(orders, _fill_units_per_qty)
+        # Another pair's fills are THAT pair's journal's business, not a
+        # residual this one never journaled.
+        others = (app.config.get("OTHER_PAIR_SYMBOLS") or (lambda: set()))()
+        if others:
+            arrow = [f for f in arrow if str(f.get("symbol", "")).upper() not in others]
         journal = fill_check.journal_fills(trade_log.all(), day, day,
                                            units_per_lot=_fill_units_per_lot)
         out = fill_check.reconcile(arrow, journal)

@@ -116,3 +116,6 @@ th .hdr-sell { color: #fff; background: var(--ask-strong, #b83232); padding: 0 3
 /* Mirror's + menu, kept narrow: the notes wrap rather than widen it. */
 #add-menu { width: 320px; }
 #add-menu .menu-note { white-space: normal; }
+
+/* Mirror's Algo window: its body scrolls inside the window it is given. */
+body.desk .window.algowin > .aw-body { flex: 1 1 auto; min-height: 0; overflow: auto; }

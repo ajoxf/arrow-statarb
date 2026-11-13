@@ -66,3 +66,8 @@ data/signal_study.json
 data/signal_study.json.tmp
 data/signal_outcomes.json
 data/signal_outcomes.json.tmp
+
+# More than one pair: the registry, and each extra pair's own settings/legs and data
+config/pairs.yaml
+config/pairs/
+data/pairs/

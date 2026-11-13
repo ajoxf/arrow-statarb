@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from arrow_statarb.logger import setup_logging
 from arrow_statarb.config.config import Config
-from arrow_statarb.web.app import create_app
+from arrow_statarb.web.pairs import create_desk_app
 
 
 def main() -> int:
@@ -47,7 +47,8 @@ def main() -> int:
     if not cfg.is_dry_run:
         logger.warning("⚠ LIVE MODE — real orders will be transmitted to Arrow.")
 
-    app, socketio = create_app(cfg)
+    # The main pair, and every pair added on Setup → Pairs at /p/<key>/.
+    app, socketio = create_desk_app(cfg)
 
     # Resolve which server to use. Default 'auto' prefers waitress (robust under
     # the dashboard's polling) but falls back to the dev server if it's missing.

@@ -3,6 +3,23 @@
 {% block nav_setup %}active{% endblock %}
 
 {% block content %}
+<!-- ── Pairs: every pair is its own ladder, side by side on the desk ────── -->
+<div class="card mb-3" id="pairs-card">
+    <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+        <span><i class="bi bi-collection me-2"></i><strong>Pairs</strong></span>
+        <span class="text-secondary small">Every pair is its own ladder and algo, side by side on the Desk. Pick a pair, then assign its two legs below.</span>
+        <div class="ms-auto d-flex gap-2">
+            <input class="form-control form-control-sm" id="new-pair-name" placeholder="New pair name (e.g. Gold Dec−Feb)" style="width:240px">
+            <button class="btn btn-sm btn-success" onclick="addPair()"><i class="bi bi-plus-lg me-1"></i>New pair</button>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0 align-middle">
+            <thead><tr><th class="ps-3">Pair</th><th>Leg A</th><th>Leg B</th><th>Status</th><th class="text-end pe-3"></th></tr></thead>
+            <tbody id="pairs-body"><tr><td colspan="5" class="ps-3 text-secondary">—</td></tr></tbody>
+        </table>
+    </div>
+</div>
 <div class="row g-3">
     <!-- ── Arrow connection ─────────────────────────────────────────────── -->
     <div class="col-lg-5">
@@ -82,7 +99,7 @@
     <!-- ── Leg assignment ──────────────────────────────────────────────── -->
     <div class="col-12">
         <div class="card">
-            <div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Spread Legs</div>
+            <div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Spread Legs <span class="badge bg-primary ms-2" id="legs-pair-name"></span></div>
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-5">
@@ -346,5 +363,53 @@
     }
     ['leg_a-ratio','leg_b-ratio'].forEach(id => document.getElementById(id).addEventListener('input', updateSummary));
     loadExisting();
+
+    // ── Pairs ────────────────────────────────────────────────────────────
+    // '/api/pairs' is the desk's registry (the MAIN app); this page may be a
+    // pair's own (/p/<key>/), whose plain /api/ calls go to that pair — so the
+    // registry is addressed by a path the page-router leaves alone.
+    const HERE = window.PAIR_BASE || '/p/main';
+    const REG = '/p/main/api/pairs';
+    function pairLabel(p) {
+        if (p.name) return p.name;
+        const a = (p.legs || {}).leg_a, b = (p.legs || {}).leg_b;
+        return a && b ? a + ' − ' + b : (p.main ? 'Main pair' : p.key);
+    }
+    async function loadPairs() {
+        let d;
+        try { d = await fetch(REG).then(r => r.json()); } catch (e) { return; }
+        const rows = (d.pairs || []).map(p => {
+            const here = p.base === HERE;
+            const legs = p.legs || {};
+            if (here) document.getElementById('legs-pair-name').textContent = pairLabel(p);
+            const status = !p.enabled ? '<span class="badge bg-secondary">off</span>'
+                : (legs.leg_a && legs.leg_b ? '<span class="badge bg-success">on the desk</span>'
+                                            : '<span class="badge bg-warning text-dark">legs not set</span>');
+            const toggle = p.main ? '' : `<button class="btn btn-sm btn-outline-secondary ms-1" onclick="togglePair('${p.key}', ${!p.enabled})">${p.enabled ? 'Switch off' : 'Switch on'}</button>`;
+            return `<tr class="${here ? 'table-primary' : ''}"><td class="ps-3"><strong>${pairLabel(p)}</strong>${p.main ? ' <span class="text-secondary small">(main)</span>' : ''}</td>
+                <td class="font-monospace small">${legs.leg_a || '—'}</td><td class="font-monospace small">${legs.leg_b || '—'}</td>
+                <td>${status}</td><td class="text-end pe-3">${here ? '<span class="text-primary small me-1">editing below</span>'
+                    : (p.enabled ? `<a class="btn btn-sm btn-primary" href="${p.base}/">Edit legs</a>` : '')}${toggle}</td></tr>`;
+        });
+        document.getElementById('pairs-body').innerHTML = rows.join('') || '<tr><td colspan="5" class="ps-3">—</td></tr>';
+    }
+    async function addPair() {
+        const name = document.getElementById('new-pair-name').value.trim();
+        if (!name) { uiToast('Give the pair a name first (e.g. Gold Dec−Feb).', 'warning'); return; }
+        const r = await fetch(REG, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({name})}).then(r => r.json());
+        if (!r.success) { uiToast(r.error || 'Not added', 'danger'); return; }
+        uiToast('Pair added — now assign its two legs.', 'success');
+        location.href = r.pair.base + '/';
+    }
+    async function togglePair(key, on) {
+        const r = await fetch(REG.replace('/api/pairs', '/api/pairs/' + encodeURIComponent(key)), {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: on})}).then(r => r.json());
+        if (!r.success) { uiToast(r.error || 'Not changed', 'danger'); return; }
+        loadPairs();
+    }
+    loadPairs();
+    const _save = saveLegAssignments;
+    saveLegAssignments = async function () { await _save(); loadPairs(); };
 </script>
 {% endblock %}

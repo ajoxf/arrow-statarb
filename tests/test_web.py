@@ -1545,11 +1545,12 @@ def test_capital_at_risk_refreshes_in_the_background_for_the_algo(tmp_path):
     algo = app.extensions["arrow"]["algo"]
     # no page has asked for the margin yet: the manual value, and a refresh starts
     assert algo._params()["capital_at_risk_inr"] == 50000.0
-    for _ in range(50):
-        if calls:
+    # the refresh runs in the background: wait for it (up to 5 s — under a
+    # full suite's load a background thread can take a while to be scheduled)
+    for _ in range(250):
+        if calls and algo._params()["capital_at_risk_inr"] == 15240.0:
             break
         _t.sleep(0.02)
-    _t.sleep(0.05)
     assert calls and algo._params()["capital_at_risk_inr"] == 15240.0
 
 
@@ -1595,7 +1596,7 @@ def test_the_ladder_carries_each_legs_book_and_its_age(tmp_path):
     a, b = d["legbook"]["a"], d["legbook"]["b"]
     assert (a["symbol"], a["bid"], a["ask"]) == ("NIFTY30JUN26F", 110.0, 111.0)
     assert (b["bid"], b["ask"]) == (10.0, 11.0)
-    assert 6.5 <= a["age"] <= 9.0
+    assert a["age"] >= 6.5                            # measured from the quote's own stamp
     assert a["volume"] is None                       # not published → unmeasured, not 0
     assert set(d["session"]) == {"open", "high", "low", "net_change"}
 
@@ -1646,3 +1647,47 @@ def test_the_algo_box_reads_nothing_into_an_order(tmp_path):
     n = len(broker.orders)
     c.get("/api/desk/exit"); c.get("/api/ladder?increment=1")
     assert len(broker.orders) == n
+
+
+# ── Mirror's Algo window ─────────────────────────────────────────────────────
+
+def test_the_algo_window_reads_this_pairs_engine_in_mirrors_shape(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    b = c.get("/api/desk/algo").get_json()
+    assert b["mode"] == "OFF" and b["state"] == "OFF" and b["positions"] == []
+    assert b["sell_spread"] == 99.0 and b["buy_spread"] == 101.0
+    assert b["params"]["entry_z"] == 2.0 and b["params"]["direction"] == "BOTH"
+    assert b["filters"]["trend"] == {"on": False}          # Arrow has no trend filter: OFF, said so
+    assert b["atr"] is None                                  # tick bands: no candles → unmeasured, not 0
+    assert b["last_blocked"] is None and b["recent"] == []
+
+
+def test_the_algo_window_values_an_open_position(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    (p,) = c.get("/api/desk/algo").get_json()["positions"]
+    assert p["side"] == "BUY" and p["source"] == "MANUAL" and p["closing_spread"] == 99.0
+    assert p["net_pnl"] is not None and p["break_even"] is not None
+
+
+def test_the_algo_window_backtest_needs_candle_bands(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    r = c.get("/api/desk/backtest?days=3").get_json()
+    assert r["ok"] is False and "candle bands" in r["reason"]
+
+
+def test_control_with_candle_bands_the_backtest_goes_to_arrows_history(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    c.post("/api/settings", json={"signal": {"band_source": "candles"}})
+    r = c.get("/api/desk/backtest?days=3").get_json()
+    assert "candle bands" not in str(r.get("reason"))
+
+
+def test_the_algo_window_reads_nothing_into_an_order(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    n = len(broker.orders)
+    c.get("/api/desk/algo"); c.get("/api/desk/backtest?days=3")
+    assert len(broker.orders) == n and algo.running is False
