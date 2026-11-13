@@ -92,9 +92,16 @@
     <label class="muted"><input type="checkbox" id="tl-tch" checked> touches</label></div>
 <div class="tw" style="max-height: 48vh">
 <table><thead><tr>
-    <th>Time</th><th>Event</th><th>Side</th><th>From</th><th class="n">z</th><th class="n">z in → out</th>
-    <th class="n">Spread in → out</th><th>Exit</th><th class="n">Held</th><th class="n">Net ₹</th><th>Result</th><th>Algo</th>
-</tr></thead><tbody id="sg-body"><tr><td colspan="12" class="empty">—</td></tr></tbody></table>
+    <th>Time</th><th>Event</th><th>Instrument</th><th>Side</th><th>From</th><th class="n">z</th>
+    <th class="n" title="The entry gate's numbers at that moment: after-tax expected capture / what it needs (min edge multiple × round-trip cost)">Edge filter</th>
+    <th class="n">z in → out</th><th class="n" title="σ of the bands at entry → at exit (change)">σ in → out (Δσ)</th>
+    <th class="n">Spread in → out</th><th class="n">Entry</th>
+    <th class="n" title="Spread at which net P&amp;L is 0 after every cost">Break-even</th>
+    <th class="n" title="Spread at which the take-profit fires (₹ level, or the z exit when no ₹ target)">Take profit</th>
+    <th class="n" title="Spread at which the stop fires (₹ stop, or the z-stop)">Stop loss</th>
+    <th class="n">Leg A in → out</th><th class="n">Leg B in → out</th>
+    <th class="n">Held</th><th>Status</th><th>Why</th><th class="n">Net ₹</th><th>Algo</th>
+</tr></thead><tbody id="sg-body"><tr><td colspan="21" class="empty">—</td></tr></tbody></table>
 </div>
 <div class="foot" id="sg-foot"></div>
 
@@ -223,7 +230,8 @@
         set('sg-foot', `${live} recorded live, ${reached - live} replayed from Arrow's candles (one look per candle at its close — a close beyond the level counts as confirmed; no bid/ask). ` +
             `Every entry gate is off here — the probability and edge filters, cooldowns, loss limits — so each stretch shows what it would have made; ` +
             `"Algo" says what your real settings did with it. Net is after the algo's own cost estimate. ` +
-            `Touch rows (live only) count every ±2σ / ±entry / ±3σ crossing on the Desk's own z — the sell spread's z on the upper side, the buy spread's on the lower — whatever sides you trade; a Signal row needs your entry z on a side you trade.`);
+            `Touch rows (live only) count every ±2σ / ±entry / ±3σ crossing on the Desk's own z — the sell spread's z on the upper side, the buy spread's on the lower — whatever sides you trade; a Signal row needs your entry z on a side you trade. ` +
+            `Each touch is also played out as the trade it could have been: entered at that touch's executable spread (upper → H→L on the sell spread, lower → L→H on the buy spread) and managed by the algo's own exits with your settings — Edge filter = the entry gate's capture / need at that moment; Break-even / Take profit / Stop loss = the algo's levels as spreads (ᶻ = a z level, no ₹ level set); Leg A/B = S(ell)/B(uy) price in → out; σ in → out = the bands' σ at entry and exit; Why = the algo's own exit line. Entry gates are reported, not applied.`);
         if (!autoDerived && !reached && (d.derived || {}).count === 0 && r0.band_source === 'candles' && job.state === 'idle') {
             autoDerived = true; derive(true);
         }
@@ -231,34 +239,107 @@
         render();
     }
 
+    // ── Timeline cells shared by Signal and touch rows ───────────────────────
+    const tesc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+    function instr(name) {          // CRUDEOILM19NOV26F − CRUDEOILM19JAN27F → CRUDEOILM NOV26/JAN27
+        const parts = String(name || '').split(/\s+[−-]\s+|\|/).map(x => x.trim()).filter(Boolean);
+        const m = parts.map(x => x.toUpperCase().match(/^([A-Z]+?)\d{2}([A-Z]{3})(\d{2})/));
+        if (parts.length === 2 && m[0] && m[1] && m[0][1] === m[1][1])
+            return `<span title="${tesc(parts.join(' − '))}">${m[0][1]} ${m[0][2]}${m[0][3]}/${m[1][2]}${m[1][3]}</span>`;
+        return parts.length ? `<span title="${tesc(parts.join(' − '))}">${tesc(parts.join(' − ')).slice(0, 26)}</span>` : DASH;
+    }
+    const inout = (a, b, d = 2, open = false) => (a == null && b == null) ? DASH
+        : `${num(a, d)} → ${b == null ? (open ? '<span class="dim">open</span>' : DASH) : num(b, d)}`;
+    const legCell = (i, o, open) => !i ? DASH
+        : `${i.side === 'sell' ? 'S' : 'B'} ${num(i.price, 1)} → ${o ? `${o.side === 'sell' ? 'S' : 'B'} ${num(o.price, 1)}` : (open ? '<span class="dim">open</span>' : DASH)}`;
+    const lvl = (v, kind) => v == null ? DASH : `${num(v)}${kind === 'z' ? '<span class="dim" title="the z exit / z-stop level — no ₹ level is set">ᶻ</span>' : ''}`;
+    function edgeCell(e) {
+        if (!e) return DASH;
+        if (!(e.min_mult > 0)) return `<span class="dim" title="min edge multiple is 0 — the edge filter is off">off</span>`;
+        return `<span class="${e.ok ? 'pos' : 'neg'}" title="${tesc(e.reason || 'passes: capture ≥ ' + e.min_mult + '× cost')}">` +
+               `₹${num(e.capture, 0)} / ₹${num(e.needed, 0)} ${e.ok ? '✓' : '✗'}</span>`;
+    }
+    function edgeFromText(t) {      // a Signal row's "edge filter: after-tax capture ₹40 < 2× cost ₹170"
+        const m = String(t || '').match(/capture ₹(-?\d+) < ([\d.]+)× cost ₹(\d+)/);
+        return m ? edgeCell({capture: +m[1], needed: +m[2] * +m[3], min_mult: +m[2], ok: false, reason: t}) : null;
+    }
+    function sigmaCell(a, b) {
+        if (a == null) return DASH;
+        if (b == null) return `${num(a)} → <span class="dim">open</span>`;
+        const d = b - a;
+        return `${num(a)} → ${num(b)} <span class="${d > 0 ? 'neg' : d < 0 ? 'pos' : 'dim'}">(${d > 0 ? '+' : ''}${num(d)})</span>`;
+    }
+    const why = t => t ? `<span title="${tesc(t)}">${tesc(String(t).length > 46 ? String(t).slice(0, 45) + '…' : t)}</span>` : DASH;
+    const TSTAT = {'take profit': 'won', 'back to mean': '', 'stopped out': 'lost', 'stopped out (z-stop)': 'lost'};
+    function statusCell(st, net) {
+        if (!st) return `<td>${DASH}</td>`;
+        if (st === 'open') return '<td class="dim">open</td>';
+        const c = net > 0 ? 'won' : net < 0 ? 'lost' : (TSTAT[st] || 'dim');
+        return `<td class="${c}">${tesc(st)}</td>`;
+    }
+
     function sigRow(r) {
             const t = r.armed_ts || r.entry_ts;
             const traded = ['open', 'closed', 'running'].includes(r.status);
+            const open = r.status === 'open' || r.status === 'running';
             const algo = r.algo === 'took it' ? '<span class="pos">took it</span>'
-                : r.algo ? `<span class="dim" title="${r.algo}">${r.algo.split(' (')[0]}</span>` : '<span class="dim">—</span>';
-            return `<tr style="background:var(--bs-tertiary-bg)"><td>${when(t)}</td><td><b>Signal</b></td><td>${side(r.side)}</td>
+                : r.algo ? `<span class="dim" title="${tesc(r.algo)}">${tesc(r.algo.split(' (')[0])}</span>` : '<span class="dim">—</span>';
+            const st = !traded ? 'no entry' : open ? 'open'
+                : (EXIT[r.exit_reason] || r.exit_reason || 'closed') + (r.result === 'won' ? ' · PROFIT' : r.result === 'lost' ? ' · LOSS' : '');
+            const whyTxt = !traded ? (r.lost_reason || 'never came back inside the re-entry window')
+                : open ? 'holding' : (EXIT[r.exit_reason] || r.exit_reason || '');
+            const leg = (px) => px == null ? DASH : `<span class="dim" title="mid at entry">${num(px, 1)}</span>`;
+            return `<tr style="background:var(--bs-tertiary-bg)"><td>${when(t)}</td><td><b>Signal</b></td>
+                <td>${instr(r.pair)}</td><td>${side(r.side)}</td>
                 <td class="${r.source === 'replayed' ? 'rep' : ''}">${r.source === 'replayed' ? 'replay' : 'live'}</td>
                 <td class="n" title="peak z of the stretch">${num(r.peak_z ?? r.armed_z ?? r.entry_z)}</td>
-                <td class="n">${traded ? `${num(r.entry_z)} → ${num(r.exit_z)}` : DASH}</td>
-                <td class="n">${traded ? `${num(r.entry_spread)} → ${num(r.exit_spread)}` : DASH}</td>
-                <td>${traded ? (EXIT[r.exit_reason] || r.exit_reason || 'open') : '<span class="dim">never came back</span>'}</td>
-                <td class="n">${held(r.held_sec)}</td><td class="n ${cls(r.net)}">${rs(r.net)}</td>
-                ${resultCell(r)}<td>${algo}</td></tr>`;
+                <td class="n">${edgeFromText(r.algo) || (r.algo === 'took it' ? '<span class="pos">✓</span>' : DASH)}</td>
+                <td class="n">${traded ? inout(r.entry_z, r.exit_z, 2, open) : DASH}</td>
+                <td class="n">${DASH}</td>
+                <td class="n">${traded ? inout(r.entry_spread, r.exit_spread, 2, open) : DASH}</td>
+                <td class="n">${traded ? num(r.entry_spread) : DASH}</td>
+                <td class="n">${lvl(r.break_even)}</td><td class="n">${lvl(r.target_spread, r.target_kind)}</td><td class="n">${lvl(r.stop_spread, r.stop_kind)}</td>
+                <td class="n">${leg(r.entry_leg_a)}</td><td class="n">${leg(r.entry_leg_b)}</td>
+                <td class="n">${held(r.held_sec)}</td>${statusCell(st, r.net)}<td>${why(whyTxt)}</td>
+                <td class="n ${cls(r.net)}">${rs(r.net)}</td><td>${algo}</td></tr>`;
+    }
+
+    function touchRow(ev) {
+        const [lbl, c] = evtLabel(ev);
+        const t = ev.trade;
+        const sideTxt = !ev.side ? DASH : ev.type === 'reversion'
+            ? `<span class="dim">${ev.side} spread</span>`      // closes a stretch; opens nothing
+            : `${ev.side === 'sell' ? 'H→L' : 'L→H'} <span class="dim">${ev.side}</span>`;
+        const head = `<tr><td>${when(ev.ts)}</td><td class="${c}">${lbl}</td><td>${instr(ev.series)}</td>` +
+            `<td class="${c}" title="${ev.side ? (ev.side === 'sell' ? 'Bid A − Ask B: where a short enters / a long exits' : 'Ask A − Bid B: where a long enters / a short exits') : ''}">${sideTxt}</td><td>live</td>` +
+            `<td class="n">${num(ev.z)}</td>`;
+        if (ev.type === 'reversion')
+            return head + `<td colspan="10"></td><td class="n">${DASH}</td><td class="dim">—</td>` +
+                `<td>${why(`the stretch came back to the mean on the ${ev.side || ''} spread (${num(ev.spread)})`)}</td><td></td><td></td></tr>`;
+        if (!t)
+            return head + `<td colspan="3"></td><td class="n">${ev.spread == null ? '' : num(ev.spread)}</td><td colspan="7"></td>` +
+                `<td class="dim">—</td><td>${why('recorded before touch trades were tracked — no trade data')}</td><td></td><td></td></tr>`;
+        const open = t.status === 'open';
+        return head +
+            `<td class="n">${edgeCell(t.edge)}</td>` +
+            `<td class="n">${inout(t.entry_z, t.exit_z, 2, open)}</td>` +
+            `<td class="n">${sigmaCell(t.entry_std, t.exit_std)}</td>` +
+            `<td class="n">${inout(t.entry_spread, t.exit_spread, 2, open)}</td>` +
+            `<td class="n">${num(t.entry_spread)}</td>` +
+            `<td class="n">${lvl(t.break_even)}</td><td class="n">${lvl(t.take_profit, t.take_profit_kind)}</td><td class="n">${lvl(t.stop_loss, t.stop_loss_kind)}</td>` +
+            `<td class="n">${legCell(t.leg_a_in, t.leg_a_out, open)}</td><td class="n">${legCell(t.leg_b_in, t.leg_b_out, open)}</td>` +
+            `<td class="n">${held(t.held_sec)}</td>${statusCell(t.status, t.net)}<td>${why(t.why)}</td>` +
+            `<td class="n ${cls(t.net)}">${rs(t.net)}</td><td class="dim">—</td></tr>`;
     }
 
     function render() {
         const items = [];
         if ($('tl-sig').checked) lastSig.forEach(r => items.push({t: r.armed_ts || r.entry_ts, html: () => sigRow(r)}));
-        if ($('tl-tch').checked) lastTch.filter(ev => inRange(ev.ts)).forEach(ev => {
-            const [lbl, c] = evtLabel(ev);
-            const where = ev.side ? `${ev.side} spread` : (ev.type === 'reversion' ? '' : (ev.type.endsWith('_up') ? '↑ upper' : '↓ lower'));
-            items.push({t: ev.ts, html: () => `<tr><td>${when(ev.ts)}</td><td class="${c}">${lbl}</td>` +
-                `<td class="${c}" title="${ev.side ? (ev.side === 'sell' ? 'Bid A − Ask B: where a short enters / a long exits' : 'Ask A − Bid B: where a long enters / a short exits') : ''}">${where}</td><td>live</td>` +
-                `<td class="n">${num(ev.z)}</td><td></td><td class="n">${ev.spread == null ? '' : num(ev.spread)}</td><td colspan="5"></td></tr>`});
-        });
+        if ($('tl-tch').checked) lastTch.filter(ev => inRange(ev.ts)).forEach(ev =>
+            items.push({t: ev.ts, html: () => touchRow(ev)}));
         items.sort((a, b) => (b.t || 0) - (a.t || 0));
         $('sg-body').innerHTML = items.length ? items.map(i => i.html()).join('')
-            : '<tr><td colspan="12" class="empty">Nothing in this range</td></tr>';
+            : '<tr><td colspan="21" class="empty">Nothing in this range</td></tr>';
     }
 
     async function loadTrades() {
