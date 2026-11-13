@@ -607,7 +607,7 @@ def test_beta_drift_endpoint_wiring(tmp_path):
     assert hot["max_abs_z"] >= 2.0
 
 
-def test_volume_endpoint_day_week_month(tmp_path):
+def test_volume_endpoint_day_week_month(tmp_path, monkeypatch):
     """/api/volume reports ₹ turnover + spread-lots for today/week/month (IST),
     computed from the trade log. Seed the log file so the app loads it on init."""
     import json as _json
@@ -648,6 +648,12 @@ def test_volume_endpoint_day_week_month(tmp_path):
     appmod.EXECUTION_LOG_FILE = tmp_path / "execution_log.jsonl"
     app, _sio = appmod.create_app(Config(settings))
     client = app.test_client()
+    # The periods are counted from "now": pin the volume module's clock to
+    # the Thursday the records are dated around (it read the real clock, so
+    # this passed only on 13 Aug 2026).
+    import types
+    from arrow_statarb.core import volume as volmod
+    monkeypatch.setattr(volmod, "time", types.SimpleNamespace(time=lambda: now.timestamp()))
 
     v = client.get("/api/volume").get_json()
     per_fill = 1 * 100 * (6000.0 + 6050.0)
@@ -1474,3 +1480,198 @@ def test_an_instrument_change_starts_the_new_pair_warmup(tmp_path):
     # the setting round-trips through the Settings API
     c.post("/api/settings", json={"signal": {"warmup_after_pair_change": False}})
     assert c.get("/api/settings").get_json()["signal"]["warmup_after_pair_change"] is False
+
+
+# ── the desk (ported from brave-gauss): the Mirror ladder, the algo box, the Algo window ──
+
+def _desk_books(app, broker, a=(110.0, 111.0), b=(10.0, 11.0), age=0.0):
+    import time as _t
+    now = _t.time()
+    depth = lambda bid, ask: [{"type": "bid", "price": bid, "volume": 150},
+                              {"type": "ask", "price": ask, "volume": 150}]
+    books = {"NIFTY30JUN26F": {"bid": a[0], "ask": a[1], "ts": now - age, "depth": depth(*a)},
+             "NIFTY28JUL26F": {"bid": b[0], "ask": b[1], "ts": now - age, "depth": depth(*b)}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push((a[0] + a[1]) / 2, (b[0] + b[1]) / 2, ts=now - 3 + i)
+    eng._book = {"leg_a": books["NIFTY30JUN26F"], "leg_b": books["NIFTY28JUL26F"]}
+    return books
+
+
+def test_desk_page_serves_with_one_shared_algo_control(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    html = c.get("/desk").get_data(as_text=True)
+    assert html.count('id="algo-ctl"') == 1           # ONE toggle, the same as every page
+    # Mirror-MT5's own stylesheet, served with the page
+    assert "/static/ladder.css" in html and "/static/desk.js" in html
+    assert c.get("/static/ladder.css").status_code == 200
+    assert c.get("/static/desk.js").status_code == 200
+    # embedded pages drop their navbar
+    assert 'embedded' in c.get("/settings?embed=1").get_data(as_text=True)
+
+
+def test_desk_trades_report_who_opened_and_who_closed(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    d = c.get("/api/desk/trades").get_json()
+    assert d["open"]["source"] == "manual" and d["count"] == 0
+    c.post("/api/engine/close-position", json={})
+    d = c.get("/api/desk/trades").get_json()
+    assert d["count"] == 1 and d["open"] is None
+    t = d["trips"][0]
+    assert t["entry_source"] == "manual" and t["exit_source"] == "manual"
+    assert t["exit_spread"] is not None
+
+
+def test_ladder_endpoint_derives_sizes_and_marks_the_position(tmp_path):
+    import time as _t
+    app, broker, c, algo = _lock_app(tmp_path)
+    now = _t.time()
+    depth = lambda bids, asks: ([{"type": "bid", "price": p, "volume": v} for p, v in bids]
+                                + [{"type": "ask", "price": p, "volume": v} for p, v in asks])
+    books = {"NIFTY30JUN26F": {"bid": 110.0, "ask": 111.0, "ltp": 110.5, "ts": now,
+                               "depth": depth([(110.0, 150)], [(111.0, 300)])},
+             "NIFTY28JUL26F": {"bid": 10.0, "ask": 11.0, "ltp": 10.5, "ts": now,
+                               "depth": depth([(10.0, 225)], [(11.0, 75)])}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push(110.5, 10.5, ts=now - 3 + i)
+    eng._book = {"leg_a": books["NIFTY30JUN26F"], "leg_b": books["NIFTY28JUL26F"]}
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["sell_spread"] == 99.0 and d["buy_spread"] == 101.0      # 110−11, 111−10
+    rows = {r["level"]: r for r in d["rows"]}
+    # 75 units per lot: buy = min(300, 225)/75 = 3 clips; sell = min(150, 75)/75 = 1
+    assert rows[101.0]["is_best_ask"] and rows[101.0]["ask_size"] == 3
+    assert rows[99.0]["is_best_bid"] and rows[99.0]["bid_size"] == 1
+    assert d["manual_block"] is None and d["markers"] is None
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    d = c.get("/api/ladder?increment=1").get_json()
+    assert d["position"]["owner"] == "manual" and d["markers"]["break_even"] is not None
+
+
+def test_ladder_prices_the_inside_from_the_same_book_as_its_depth(tmp_path):
+    """The engine's last sample may lag the book the depth comes from; the
+    ladder's best rows must still carry sizes (one snapshot for both)."""
+    import time as _t
+    app, broker, c, algo = _lock_app(tmp_path)
+    now = _t.time()
+    depth = lambda b, a: [{"type": "bid", "price": b, "volume": 150},
+                          {"type": "ask", "price": a, "volume": 150}]
+    books = {"NIFTY30JUN26F": {"bid": 112.0, "ask": 113.0, "ts": now, "depth": depth(112.0, 113.0)},
+             "NIFTY28JUL26F": {"bid": 10.0, "ask": 11.0, "ts": now, "depth": depth(10.0, 11.0)}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push(110.5, 10.5, ts=now - 3 + i)          # stale: spread ≈ 100
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    assert d["sell_spread"] == 101.0 and d["buy_spread"] == 103.0
+    rows = {r["level"]: r for r in d["rows"]}
+    assert rows[103.0]["is_best_ask"] and rows[103.0]["ask_size"] is not None
+    assert rows[101.0]["is_best_bid"] and rows[101.0]["bid_size"] is not None
+
+
+def test_the_ladder_carries_each_legs_book_and_its_age(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker, age=7.0)
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    a, b = d["legbook"]["a"], d["legbook"]["b"]
+    assert (a["symbol"], a["bid"], a["ask"]) == ("NIFTY30JUN26F", 110.0, 111.0)
+    assert (b["bid"], b["ask"]) == (10.0, 11.0)
+    assert a["age"] >= 6.5                            # measured from the quote's own stamp
+    assert a["volume"] is None                       # not published → unmeasured, not 0
+    assert set(d["session"]) == {"open", "high", "low", "net_change"}
+
+
+def test_the_ladder_marks_the_last_fill(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    assert c.get("/api/ladder?increment=1").get_json()["last_print"] is None
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    lp = c.get("/api/ladder?increment=1").get_json()["last_print"]
+    assert lp is not None and lp["lots"] == 1 and lp["level"] is not None
+
+
+def test_the_algo_box_prices_break_even_beyond_the_touch_on_each_side(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    d = c.get("/api/desk/exit").get_json()
+    assert d["width"] == 2.0 and d["cost_inr"] is not None and d["cost_inr"] > 0
+    # a buy at the ask must rise to break even; a sell at the bid must fall
+    assert d["buy"]["break_even"] > 101.0 and d["sell"]["break_even"] < 99.0
+    assert d["auto"] == "off" and d["position"] is None
+
+
+def test_the_algo_box_says_why_an_mcx_spread_has_no_fair_value(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    import arrow_statarb.web.app as appmod
+    from arrow_statarb.core import sessions
+    real = sessions.is_mcx
+    sessions.is_mcx = lambda seg: True
+    try:
+        d = c.get("/api/desk/exit").get_json()
+    finally:
+        sessions.is_mcx = real
+    assert d["fair"] is None and d["gap_buy"] is None and "no fair spread" in d["fair_kind"]
+
+
+def test_control_a_non_mcx_pair_is_not_told_it_has_no_fair_value(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    d = c.get("/api/desk/exit").get_json()
+    assert "MCX" not in str(d["fair_kind"])
+
+
+def test_the_algo_box_reads_nothing_into_an_order(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    n = len(broker.orders)
+    c.get("/api/desk/exit"); c.get("/api/ladder?increment=1")
+    assert len(broker.orders) == n
+
+
+def test_the_algo_window_reads_this_pairs_engine_in_mirrors_shape(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    b = c.get("/api/desk/algo").get_json()
+    assert b["mode"] == "OFF" and b["state"] == "OFF" and b["positions"] == []
+    assert b["sell_spread"] == 99.0 and b["buy_spread"] == 101.0
+    assert b["params"]["entry_z"] == 2.0 and b["params"]["direction"] == "BOTH"
+    assert b["filters"]["trend"] == {"on": False}          # Arrow has no trend filter: OFF, said so
+    assert b["atr"] is None                                  # tick bands: no candles → unmeasured, not 0
+    assert b["last_blocked"] is None and b["recent"] == []
+
+
+def test_the_algo_window_values_an_open_position(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    (p,) = c.get("/api/desk/algo").get_json()["positions"]
+    assert p["side"] == "BUY" and p["source"] == "MANUAL" and p["closing_spread"] == 99.0
+    assert p["net_pnl"] is not None and p["break_even"] is not None
+
+
+def test_the_algo_window_backtest_needs_candle_bands(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    r = c.get("/api/desk/backtest?days=3").get_json()
+    assert r["ok"] is False and "candle bands" in r["reason"]
+
+
+def test_control_with_candle_bands_the_backtest_goes_to_arrows_history(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    c.post("/api/settings", json={"signal": {"band_source": "candles"}})
+    r = c.get("/api/desk/backtest?days=3").get_json()
+    assert "candle bands" not in str(r.get("reason"))
+
+
+def test_the_algo_window_reads_nothing_into_an_order(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    n = len(broker.orders)
+    c.get("/api/desk/algo"); c.get("/api/desk/backtest?days=3")
+    assert len(broker.orders) == n and algo.running is False

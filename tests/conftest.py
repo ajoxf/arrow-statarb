@@ -185,3 +185,8 @@ def _analysis_files_never_touch_the_real_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(appmod, "EXCURSIONS_FILE", tmp_path / "excursions.json")
     monkeypatch.setattr(appmod, "SIGNAL_STUDY_FILE", tmp_path / "signal_study.json")
     monkeypatch.setattr(appmod, "SIGNAL_OUTCOMES_FILE", tmp_path / "signal_outcomes.json")
+    # extra pairs: their folders, and the registry of them, never the repo's
+    monkeypatch.setattr(appmod, "PAIR_CONFIG_ROOT", tmp_path / "pair_config")
+    monkeypatch.setattr(appmod, "PAIR_DATA_ROOT", tmp_path / "pair_data")
+    import arrow_statarb.web.pairs as pairsmod
+    monkeypatch.setattr(pairsmod, "PAIRS_FILE", tmp_path / "pairs.yaml")

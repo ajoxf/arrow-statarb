@@ -19,17 +19,27 @@
         .log-trade { color: var(--bs-info); }
     </style>
 </head>
-<body>
+<body{% if request.args.get('embed') %} class="embedded"{% endif %}>
+    {% if request.args.get('embed') %}
+    <!-- Inside a desk window: the desk's own top bar carries the navigation,
+         the ALGO control and the mode, so this page's copy is hidden. -->
+    <style>
+      body.embedded > nav.navbar { display: none !important; }
+      body.embedded { background: #f0f0f0; font-size: 0.86rem; }
+      body.embedded .container-fluid { padding-top: 6px; }
+    </style>
+    {% endif %}
     <nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom mb-3">
         <div class="container-fluid">
             <a class="navbar-brand fw-bold" href="/">
                 <i class="bi bi-arrow-left-right me-1"></i>Nexus
             </a>
             <div class="navbar-nav">
-                <a class="nav-link {% block nav_dash %}{% endblock %}" href="/dashboard">Dashboard</a>
-                <a class="nav-link {% block nav_settings %}{% endblock %}" href="/settings">Settings</a>
-                <a class="nav-link {% block nav_setup %}{% endblock %}" href="/">Setup</a>
-                <a class="nav-link {% block nav_analysis %}{% endblock %}" href="/analysis">Analysis</a>
+                <a class="nav-link fw-semibold" href="/desk">Desk</a>
+                <a class="nav-link {% block nav_dash %}{% endblock %}" href="{{ request.script_root }}/dashboard">Dashboard</a>
+                <a class="nav-link {% block nav_settings %}{% endblock %}" href="{{ request.script_root }}/settings">Settings</a>
+                <a class="nav-link {% block nav_setup %}{% endblock %}" href="{{ request.script_root }}/">Setup</a>
+                <a class="nav-link {% block nav_analysis %}{% endblock %}" href="{{ request.script_root }}/analysis">Analysis</a>
             </div>
             <div class="ms-auto d-flex align-items-center gap-2">
                 <span id="health-badge" class="badge rounded-pill bg-secondary" title="Liveness — loop heartbeat + price feed">health</span>
