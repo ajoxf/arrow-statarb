@@ -156,3 +156,23 @@ def test_the_entry_atr_is_journaled_and_survives_a_restart(tmp_path):
     algo = _algo(_p(atr_now=40.0))
     algo.restore_position(dict(op, source="algo"))
     assert algo._pos["entry_atr"] == 3.0                    # the restart keeps the ENTRY's ATR, not today's
+
+
+def test_the_algo_window_sizes_a_position_on_its_entry_atr(tmp_path):
+    # the algo's position while the algo is stopped: the window must still
+    # use the ATR the trade was sized on, not today's (here: none at all)
+    from arrow_statarb.core.trade_log import TradeLog
+    log = TradeLog(path=tmp_path / "trades.json")
+    log.record(action="OPEN", direction="SHORT_SPREAD", lots=1, spread=142.0, dry_run=True,
+               status="DRY-RUN", source="algo", lot_size=10, leg_a_price=9142.0, leg_b_price=9000.0)
+    log.annotate_open(entry_atr=6.4)
+    from tests.test_web import _app
+    app, _ = _app(tmp_path)
+    c = app.test_client()
+    c.post("/api/settings", json={"exits": {"stop_mode": "atr", "target_mode": "atr",
+                                            "atr_stop_mult": 2.0, "atr_target_mult": 1.5},
+                                  "pairs": {"multiplier_a": 10, "multiplier_b": 10}})
+    pos = c.get("/api/desk/algo").get_json()["positions"][0]
+    assert pos["entry_atr"] == 6.4
+    assert pos["sl"] == pytest.approx(pos["break_even"] + 2.0 * 6.4, abs=0.02)
+    assert pos["tp"] == pytest.approx(pos["break_even"] - 1.5 * 6.4, abs=0.02)
