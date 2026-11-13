@@ -607,7 +607,7 @@ def test_beta_drift_endpoint_wiring(tmp_path):
     assert hot["max_abs_z"] >= 2.0
 
 
-def test_volume_endpoint_day_week_month(tmp_path):
+def test_volume_endpoint_day_week_month(tmp_path, monkeypatch):
     """/api/volume reports ₹ turnover + spread-lots for today/week/month (IST),
     computed from the trade log. Seed the log file so the app loads it on init."""
     import json as _json
@@ -648,6 +648,12 @@ def test_volume_endpoint_day_week_month(tmp_path):
     appmod.EXECUTION_LOG_FILE = tmp_path / "execution_log.jsonl"
     app, _sio = appmod.create_app(Config(settings))
     client = app.test_client()
+    # The periods are counted from "now": pin the volume module's clock to
+    # the Thursday the records are dated around (it read the real clock, so
+    # this passed only on 13 Aug 2026).
+    import types
+    from arrow_statarb.core import volume as volmod
+    monkeypatch.setattr(volmod, "time", types.SimpleNamespace(time=lambda: now.timestamp()))
 
     v = client.get("/api/volume").get_json()
     per_fill = 1 * 100 * (6000.0 + 6050.0)
