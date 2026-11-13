@@ -2112,7 +2112,167 @@ def create_app(config: Optional[Config] = None) -> Tuple[Flask, SocketIO]:
         if not out["rows"]:
             out["error"] = ("No Sell/Buy spread yet — waiting for both legs' bid and ask."
                             if sell is None or buy is None else "Cannot build the ladder.")
+        out.update(_ladder_extras(legs, la, lb, k))
         return jsonify(out)
+
+    def _ladder_extras(legs: Dict, la: Dict, lb: Dict, k: float) -> Dict:
+        """What the Mirror ladder window shows around the grid: the two legs'
+        books with their ages (the footer), the session's spread H / L / O and
+        net change (the quote strip), and the last fill (LTQ). Anything not
+        measured is None — the page prints an em dash, never a zero."""
+        now = time.time()
+
+        def leg(lk, q):
+            ts = q.get("ts") if q else None
+            return {"symbol": legs[lk]["symbol"], "bid": (q or {}).get("bid"),
+                    "ask": (q or {}).get("ask"),
+                    "age": round(now - float(ts), 1) if ts else None,
+                    "volume": (q or {}).get("volume")}
+        session = {"open": None, "high": None, "low": None, "net_change": None}
+        try:
+            day0 = sessions.ist_day_start(now) if hasattr(sessions, "ist_day_start") else (
+                (now + 19800) // 86400 * 86400 - 19800)
+            bars = [b for b in spread_candles.ohlc("1m", k) if b[0] >= day0]
+            if bars:
+                session = {"open": bars[0][1], "high": max(b[2] for b in bars),
+                           "low": min(b[3] for b in bars),
+                           "net_change": bars[-1][4] - bars[0][1]}
+        except Exception:
+            pass
+        last = None
+        try:
+            for r in trade_log.all():                       # newest first
+                lvl = r.get("exit_spread") if r.get("action") == "CLOSE" else r.get("entry_spread")
+                if lvl is not None and str(r.get("status", "")).upper() not in ("FAILED", "REJECTED"):
+                    last = {"level": float(lvl), "lots": r.get("lots"),
+                            "action": r.get("action"), "ts": r.get("ts")}
+                    break
+        except Exception:
+            last = None
+        return {"legbook": {"a": leg("leg_a", la), "b": leg("leg_b", lb)},
+                "session": session, "last_print": last}
+
+    @app.route("/api/desk/exit", methods=["GET"])
+    def api_desk_exit():
+        """The ALGO BOX (Mirror's per-pair window): what the carry says the
+        spread should be, and — for a buy at the ask and a sell at the bid
+        NOW — the round-trip cost, the break-even and the levels the algo would
+        close at. Reads only; nothing here places an order."""
+        legs = _read_legs()
+        out: Dict[str, Any] = {"fair": None, "gap_buy": None, "gap_sell": None,
+                               "fair_kind": None, "fair_note": None,
+                               "width": None, "cost_inr": None, "lots": None,
+                               "target_note": None, "buy": None, "sell": None,
+                               "overnight": "Hold overnight", "auto": None,
+                               "position": None}
+        if not _have_both_legs(legs):
+            out["fair_note"] = "Assign both legs in Setup first."
+            return jsonify(out)
+        sig = signal_engine.get_signal() or {}
+        p = _algo_params()
+        sell, buy = sig.get("sell_spread"), sig.get("buy_spread")
+        if sell is not None and buy is not None:
+            out["width"] = round(float(buy) - float(sell), 4)
+        lots = int(p.get("lots", 1) or 1)
+        out["lots"] = lots
+        la, lb = sig.get("leg_a"), sig.get("leg_b")
+        try:
+            out["cost_inr"] = round(arrow_algo._round_trip_cost(p, lots=lots, ref_price=la, ref_b=lb), 2) \
+                if la and lb else None
+        except Exception:
+            out["cost_inr"] = None
+        # Fair spread: the same rule the dashboard uses — none for an MCX
+        # commodity calendar (carry does not price it), and said so.
+        pairs = cfg.section("pairs")
+        ptype = str(pairs.get("pair_type", "SPOT_FUTURE"))
+        if any(sessions.is_mcx(sg) for sg in _leg_segments()):
+            out["fair_kind"] = "MCX commodity spread: no fair spread"
+            out["fair_note"] = ("Carry does not price a commodity calendar — storage, convenience "
+                                "yield and season do. The rolling mean is the anchor.")
+        elif ptype == "RELATED":
+            out["fair_kind"] = "Related: two instruments, no fair spread"
+        else:
+            try:
+                st = engine_status_fair()
+                if st and st.get("fair_value") is not None:
+                    fv = float(st["fair_value"])
+                    out["fair"] = round(fv, 4)
+                    out["gap_buy"] = round(float(buy) - fv, 4) if buy is not None else None
+                    out["gap_sell"] = round(float(sell) - fv, 4) if sell is not None else None
+                    out["fair_kind"] = ("Calendar: carry to the near expiry" if ptype == "FUTURE_FUTURE"
+                                        else "Spot vs future: carry to expiry")
+            except Exception:
+                pass
+        # B / S: a buy at the ask now, a sell at the bid now — the levels the
+        # algo's own formulas give (break-even after every cost, then the
+        # target and stop it would close at).
+        def side(direction, px):
+            if px is None:
+                return None
+            pos = {"direction": direction, "lots": lots, "entry_spread": float(px),
+                   "entry_fill_spread": float(px), "entry_leg_a": la, "entry_leg_b": lb}
+            try:
+                lv = arrow_algo.entry_levels(p, pos, sig, auto_exits=True)
+            except Exception:
+                return None
+            return {"break_even": lv.get("break_even"), "target": lv.get("target_spread"),
+                    "target_kind": lv.get("target_kind"), "stop": lv.get("stop_spread"),
+                    "stop_kind": lv.get("stop_kind")}
+        out["buy"] = side("LONG_SPREAD", buy)
+        out["sell"] = side("SHORT_SPREAD", sell)
+        tgt = float(p.get("profit_target_inr", 0) or 0)
+        out["target_note"] = (f"₹{tgt:,.0f} net" if tgt > 0
+                              else f"z {float(p.get('exit_zscore', 0) or 0):+.1f} (the mean)")
+        st = arrow_algo.get_state() or {}
+        out["auto"] = ("on · " + str(st.get("status") or "watching")) if arrow_algo.running else "off"
+        op = _open_position_view()
+        if op:
+            out["position"] = {"owner": op["owner"], "direction": op["direction"], "lots": op["lots"]}
+        return jsonify(out)
+
+    def engine_status_fair() -> Optional[Dict]:
+        """The fair value block for a NON-MCX pair, the dashboard's arithmetic."""
+        legs = _read_legs()
+        la, lb = _leg_prices()
+        if not la or not lb:
+            return None
+        pairs = cfg.section("pairs")
+        hedge_ratio = float(cfg.get("signal.hedge_ratio", 1) or 1)
+        b = active.get()
+
+        def _exp_iso(sym):
+            if b and hasattr(b, "resolve_expiry_ymd"):
+                try:
+                    ymd = b.resolve_expiry_ymd(sym)
+                    if ymd and ymd != (9999, 99, 99):
+                        return f"{ymd[0]:04d}-{ymd[1]:02d}-{(ymd[2] or 1):02d}"
+                except Exception:
+                    pass
+            return None
+        acfg = {"pair_type": pairs.get("pair_type", "SPOT_FUTURE"),
+                "risk_free_rate": pairs.get("risk_free_rate", 0.0425),
+                "futures_expiry": _exp_iso(legs["leg_b"]["symbol"]),
+                "spot_expiry": _exp_iso(legs["leg_a"]["symbol"])}
+        eff = hedge_ratio * la - lb
+        fv = fairvalue.fair_value_block(acfg, la, lb, eff, hedge_ratio) or {}
+        if fv.get("fair_value") is not None:
+            fv["fair_value"] = -fv["fair_value"]
+        return fv
+
+    @app.route("/api/desk/refresh-feed", methods=["POST"])
+    def api_desk_refresh_feed():
+        """↻ Feed: drop and re-open the price stream for both legs."""
+        legs = _read_legs()
+        b = active.get()
+        if not b or not _have_both_legs(legs):
+            return jsonify({"success": False, "error": "No broker session, or the legs are not set."})
+        try:
+            if hasattr(b, "stop_price_stream"):
+                b.stop_price_stream()
+            ok = b.start_price_stream([legs["leg_a"]["symbol"], legs["leg_b"]["symbol"]])
+        except Exception as exc:
+            return jsonify({"success": False, "error": f"Feed not restarted: {exc}"})
+        return jsonify({"success": bool(ok)})
 
     _margin_cache: Dict[str, Any] = {"key": None, "at": 0.0, "value": None,
                                       "good": None, "good_at": 0.0}

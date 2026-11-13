@@ -14,7 +14,7 @@
   'use strict';
 
   var DASH = '—';
-  var LAYOUT_KEY = 'nexus-desk-layout-v3';   // v2: the spread candle/bands window in the default set
+  var LAYOUT_KEY = 'nexus-desk-layout-v4';   // v4: Mirror's ladder + algo box
   var PREF_KEY = 'nexus-desk-prefs-v1';
 
   // ── tiny helpers ───────────────────────────────────────────────────────
@@ -152,19 +152,22 @@
 
   var DEFS = [
     // id, title, default left/top/width/height, builder
-    {id: 'ladder', title: 'Ladder · A − B', x: 8, y: 8, w: 360, h: 640, flush: true},
-    {id: 'signal', title: 'Signal & Position', x: 376, y: 8, w: 470, h: 360},
-    {id: 'stats', title: 'Statistics & Filters', x: 854, y: 8, w: 330, h: 360},
-    {id: 'bands', title: 'Spread', x: 376, y: 376, w: 470, h: 272},
-    {id: 'charts', title: 'Z-Score & Spread', x: 376, y: 376, w: 470, h: 272, closed: true},
-    {id: 'margin', title: 'Margin', x: 1192, y: 8, w: 300, h: 300},
-    {id: 'fills', title: 'Fills & Slippage', x: 8, y: 656, w: 420, h: 250, flush: true},
-    {id: 'workorders', title: 'Working Orders', x: 434, y: 656, w: 412, h: 250, flush: true},
-    {id: 'trades', title: 'Trades', x: 854, y: 376, w: 638, h: 272, flush: true},
-    {id: 'orders', title: 'Order Log (Arrow)', x: 854, y: 656, w: 638, h: 250, flush: true},
-    {id: 'settings', title: 'Settings', x: 120, y: 60, w: 900, h: 640, flush: true, iframe: '/settings?embed=1', closed: true},
-    {id: 'setup', title: 'Setup · pair', x: 160, y: 80, w: 900, h: 600, flush: true, iframe: '/?embed=1', closed: true},
-    {id: 'analysis', title: 'Analysis', x: 200, y: 100, w: 1000, h: 640, flush: true, iframe: '/analysis?embed=1', closed: true},
+    // Mirror's two windows per pair: the ladder and its algo box.
+    {id: 'ladder', title: 'Ladder', x: 2, y: 2, w: 390, h: 900, mirror: 'ladder', group: 'ladder'},
+    {id: 'fair', title: 'Algo box', x: 396, y: 2, w: 250, h: 330, mirror: 'fairwin', group: 'ladder'},
+    // The Arrow-StatArb windows, as they were — open or close each from +.
+    {id: 'signal', title: 'Signal & Position', x: 652, y: 2, w: 470, h: 360, note: 'z on both sides, position, levels'},
+    {id: 'stats', title: 'Statistics & Filters', x: 1128, y: 2, w: 330, h: 360, note: 'lookback, edge filter, algo state'},
+    {id: 'bands', title: 'Spread', x: 652, y: 368, w: 470, h: 272, note: 'the spread in candles, with the entry bands'},
+    {id: 'charts', title: 'Z-Score & Spread', x: 652, y: 368, w: 470, h: 272, closed: true, note: 'z and spread lines'},
+    {id: 'margin', title: 'Margin', x: 1464, y: 2, w: 300, h: 300, note: 'Arrow\'s pair margin and funds'},
+    {id: 'fills', title: 'Fills & Slippage', x: 396, y: 646, w: 420, h: 250, flush: true, note: 'executed orders, slip per lot'},
+    {id: 'workorders', title: 'Working Orders', x: 822, y: 646, w: 412, h: 250, flush: true, note: 'resting spread orders'},
+    {id: 'trades', title: 'Trades', x: 1128, y: 368, w: 636, h: 272, flush: true, note: 'closed round trips'},
+    {id: 'orders', title: 'Order Log (Arrow)', x: 1240, y: 646, w: 524, h: 250, flush: true, note: 'Arrow\'s own order book'},
+    {id: 'settings', title: 'Settings', x: 120, y: 60, w: 900, h: 640, flush: true, iframe: '/settings?embed=1', closed: true, note: 'signal, algo, risk, costs'},
+    {id: 'setup', title: 'Setup · pair', x: 160, y: 80, w: 900, h: 600, flush: true, iframe: '/?embed=1', closed: true, note: 'choose the two legs'},
+    {id: 'analysis', title: 'Analysis', x: 200, y: 100, w: 1000, h: 640, flush: true, iframe: '/analysis?embed=1', closed: true, note: 'did reaching the entry z make money'},
   ];
 
   function defOf(id) { return DEFS.filter(function (d) { return d.id === id; })[0]; }
@@ -173,7 +176,8 @@
   // zoomed screen it is scaled down to fit (a moved window keeps its place).
   function fit(d) {
     var dk = $('#desktop');
-    var sx = Math.min(1, (dk.clientWidth - 8) / 1500), sy = Math.min(1, (dk.clientHeight - 8) / 910);
+    var sx = Math.min(1, (dk.clientWidth - 4) / 1770), sy = Math.min(1, (dk.clientHeight - 4) / 1000);
+    if (d.mirror === 'ladder') { sy = Math.min(1, (dk.clientHeight - 4) / d.h); }
     return {x: Math.round(d.x * sx), y: Math.round(d.y * sy), w: Math.round(d.w * sx), h: Math.round(d.h * sy)};
   }
 
@@ -189,9 +193,11 @@
     if (!d) { return; }
     if (W[id]) { raise(W[id].node); return; }
     var node = document.createElement('section');
-    node.className = 'window floating sized';
+    node.className = 'window floating sized' + (d.mirror ? ' ' + d.mirror : '');
     node.dataset.id = id;
-    node.innerHTML =
+    if (d.mirror) {
+      node.innerHTML = (d.mirror === 'ladder' ? MIRROR_LADDER : MIRROR_FAIR) + '<div class="grip"></div>';
+    } else node.innerHTML =
       '<div class="titlebar"><span class="title">' + esc(d.title) + '</span>' +
       (d.iframe ? '<a class="winbtn" href="' + d.iframe.replace(/[?&]embed=1/, '') +
                   '" target="_blank" title="Open as a full page">↗</a>' : '') +
@@ -203,9 +209,10 @@
     place(node, L.x != null ? L.x : F.x, L.y != null ? L.y : F.y, L.w || F.w, L.h || F.h);
     node.style.zIndex = L.z || ++topZ;
     topZ = Math.max(topZ, L.z || 0);
-    var body = node.querySelector('.wbody');
+    var body = d.mirror ? node : node.querySelector('.wbody');
     W[id] = {def: d, node: node, body: body};
     node.querySelector('.close').onclick = function () { closeWindow(id); };
+    if (d.mirror === 'fairwin') { node.style.height = 'auto'; }
     node.addEventListener('pointerdown', function (e) { raise(node); startDrag(e, node); });
     if (d.iframe) {
       body.innerHTML = '<iframe class="embed" src="' + d.iframe + '"></iframe>';
@@ -270,24 +277,46 @@
   function renderTabs() {
     var tabs = $('#tabs');
     tabs.innerHTML = '';
+    var pair = pairTitle(S.ladder && S.ladder.legs);
     DEFS.forEach(function (d) {
       if (!W[d.id]) { return; }
       var b = document.createElement('button');
-      b.className = 'tab';
-      b.textContent = d.title;
+      b.className = 'tab' + (d.id === 'ladder' ? ' on' : '');
+      var n = d.id === 'ladder' ? ((S.wo && S.wo.active) || []).length : 0;
+      b.innerHTML = esc(d.id === 'ladder' ? pair : d.id === 'fair' ? pair + ' · algo' : d.title) +
+        (n ? '<span class="badge">' + n + '</span>' : '');
       b.onclick = function () { raise(W[d.id].node); };
       tabs.appendChild(b);
     });
+    // Mirror's + menu: the ladders, then the windows. The Arrow-StatArb
+    // windows are ticked when open — untick to close one.
     var menu = $('#add-menu');
-    menu.innerHTML = '<div class="menu-title">Open a window</div>' + DEFS.map(function (d) {
-      return '<button data-id="' + d.id + '">' + esc(d.title) + (W[d.id] ? ' <small>open</small>' : '') + '</button>';
-    }).join('');
+    var lad = DEFS.filter(function (d) { return d.group === 'ladder'; });
+    var rest = DEFS.filter(function (d) { return !d.group; });
+    menu.innerHTML = '<div class="menu-title">Ladders</div>' + lad.map(function (d) {
+      var legs = (S.ladder && S.ladder.legs) || [];
+      return '<button data-id="' + d.id + '">' + esc(d.id === 'ladder' ? pair : pair + ' · algo box') +
+        '<small>' + esc(d.id === 'ladder' ? (legs[0] || '?') + ' / ' + (legs[1] || '?') : 'fair spread, exit levels, auto') +
+        (W[d.id] ? ' · open' : '') + '</small></button>';
+    }).join('') + '<div class="menu-title">Arrow-StatArb windows</div>' + rest.map(function (d) {
+      return '<button data-id="' + d.id + '" data-toggle="1"><input type="checkbox" tabindex="-1"' + (W[d.id] ? ' checked' : '') +
+        ' style="float:left;margin:2px 6px 0 0;pointer-events:none"> ' + esc(d.title) +
+        '<small style="margin-left:22px">' + esc(d.note || '') + (W[d.id] ? ' · open' : '') + '</small></button>';
+    }).join('') + '<div class="menu-note">Ticked = open; untick to close it. Where you put a window is where it is after a reload; Tidy puts them back.</div>';
     Array.prototype.forEach.call(menu.querySelectorAll('button[data-id]'), function (b) {
-      b.onclick = function () { menu.classList.add('hidden'); openWindow(b.dataset.id); };
+      b.onclick = function (e) {
+        e.stopPropagation();
+        var id = b.dataset.id;
+        if (b.dataset.toggle && W[id]) { closeWindow(id); } else { openWindow(id); }
+        if (!b.dataset.toggle) { menu.classList.add('hidden'); }
+      };
     });
   }
 
-  $('#add-panel').onclick = function () { $('#add-menu').classList.toggle('hidden'); };
+  $('#add-panel').onclick = function (e) { e.stopPropagation(); renderTabs(); $('#add-menu').classList.toggle('hidden'); };
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#add-menu')) { $('#add-menu').classList.add('hidden'); }
+  });
   $('#tidy').onclick = function () {
     layout = {};
     save(LAYOUT_KEY, layout);
@@ -360,14 +389,14 @@
     });
     if (W.ladder) {
       W.ladder.node.classList.toggle('locked-manual', blocked);
-      var note = $('.lock-note', W.ladder.body);
+      var note = $('.lock-note', W.ladder.node);
       if (note) { note.classList.toggle('hidden', !blocked); }
     }
   }
 
   // ── manual orders (server enforces the lock and one-position rule) ────
   function manualOrder(direction) {
-    var qty = parseInt(($('.qty-in', W.ladder && W.ladder.body) || {}).value, 10) || 1;
+    var qty = lots(direction === 'LONG_SPREAD' ? 'BUY' : 'SELL');
     var lad = S.ladder || {};
     var px = direction === 'LONG_SPREAD' ? lad.buy_spread : lad.sell_spread;
     var words = (direction === 'LONG_SPREAD' ? 'BUY' : 'SELL') + ' the spread · ' + qty +
@@ -419,17 +448,20 @@
     return join ? 'BUY' : 'SELL';
   }
 
+  // Mirror's headers stay plain "Bids" / "Asks"; what a click sends is on
+  // each cell's tooltip and in the ladder's own settings (⚙).
   function labelColumns(body) {
-    body = body || (W.ladder && W.ladder.body);
+    body = body || (W.ladder && W.ladder.node);
     if (!body) { return; }
     var b = $('th.c-bid', body), a = $('th.c-ask', body);
     var bs = sideForColumn('bid'), as = sideForColumn('ask');
-    if (b) { b.innerHTML = 'Bids <span class="hdr-' + bs.toLowerCase() + '">' + bs + '</span>'; }
-    if (a) { a.innerHTML = 'Asks <span class="hdr-' + as.toLowerCase() + '">' + as + '</span>'; }
+    if (b) { b.title = 'Bids — where the spread can be SOLD (Bid A − Ask B). A click here sends a ' + bs + '.'; }
+    if (a) { a.title = 'Asks — where the spread can be BOUGHT (Ask A − Bid B). A click here sends a ' + as + '.'; }
   }
 
-  function placeWorking(side, level) {
-    var qty = parseInt(($('.qty-in', W.ladder && W.ladder.body) || {}).value, 10) || 1;
+
+  function placeWorking(side, level, qtyOverride) {
+    var qty = qtyOverride || lots(side);
     var lad = S.ladder || {};
     var now = side === 'SELL' ? lad.sell_spread : lad.buy_spread;
     var marketable = now != null && (side === 'SELL' ? now >= level : now <= level);
@@ -493,10 +525,10 @@
       S.woSeen = S.woSeen || {};
       (d.recent || []).forEach(function (o) { S.woSeen[o.id] = true; });
       var n = (d.active || []).length;
-      if (W.ladder) { $('.wo-n', W.ladder.body).textContent = n ? '(' + n + ')' : ''; }
+      if (W.ladder && S.ladder) { renderRail(W.ladder.node); renderFooter(W.ladder.node, S.ladder); }
       if (REFRESH.workorders) { REFRESH.workorders(); }
       var after = JSON.stringify(d.active.map(function (o) { return o.id + o.status; }));
-      if (before !== after && W.ladder && S.ladder) { drawLadder(W.ladder.body, S.ladder); }
+      if (before !== after && W.ladder && S.ladder) { drawLadder(W.ladder.node, S.ladder); renderTabs(); }
     }).catch(function () {});
   }
 
@@ -504,61 +536,143 @@
   var BUILD = {}, REFRESH = {};
 
   // LADDER ------------------------------------------------------------------
+  // Mirror-MT5's ladder window, markup and classes as Mirror draws them
+  // (ladder.css is Mirror's own stylesheet): title bar, quote strip, the rail,
+  // Work | Bids | Price | Asks | LTQ, the B: S: W: counts, and the footer
+  // with the two legs' books. Every order still goes through THIS engine's
+  // endpoints, so the MANUAL / ALGO lock and the one-position rule hold.
   var ladderAnchor = null;
-  BUILD.ladder = function (body) {
-    body.innerHTML =
-      '<div class="body">' +
-      '<div class="rail">' +
-      '  <div class="lock-note hidden">ALGO ON — manual orders off</div>' +
-      '  <div class="route-box row"><div class="route-leg route-a">A <b>—</b></div><div class="route-leg route-b">B <b>—</b></div></div>' +
-      '  <button class="quick buy-touch" data-manual data-tip="MARKET: buy the spread now at the Buy spread (Ask A − Bid B)">BUY MKT</button>' +
-      '  <button class="quick sell-touch" data-manual data-tip="MARKET: sell the spread now at the Sell spread (Bid A − Ask B)">SELL MKT</button>' +
-      '  <button class="quick flatten" data-manual data-tip="Close the open position at market">CLOSE POSITION</button>' +
-      '  <button class="quick wo-cancel-all" data-tip="Cancel every working order">CANCEL ALL <span class="wo-n"></span></button>' +
-      '  <label class="inline-field" title="What a click in the Bids / Asks columns sends"><span>Click</span>' +
-      '    <select class="click-conv"><option value="join">Bid BUY·Ask SELL</option>' +
-      '    <option value="touch">Bid SELL·Ask BUY</option></select></label>' +
-      '  <label class="inline-field qty-row"><span>Qty (lots)</span><input class="qty-in" type="number" min="1" step="1"></label>' +
-      '  <label class="inline-field"><span>Increment</span><input class="inc-in" type="number" min="0" step="0.05" placeholder="tick"></label>' +
-      '  <div class="centre-row"><label class="check"><input type="checkbox" class="lock-scroll"> Lock</label>' +
-      '    <label class="check" title="Ask before every manual order"><input type="checkbox" class="confirm-clicks"> Confirm</label></div>' +
-      '  <div class="rail-label">Position</div><div class="lad-pos muted">flat</div>' +
-      '  <div class="rail-label">Sell / Buy</div><div class="lad-sb">—</div>' +
-      '  <div class="lad-err muted"></div>' +
-      '</div>' +
-      '<div class="grid"><table><thead><tr>' +
-      '  <th class="c-work" title="Your position\'s levels (ENTRY, BE, TP, SL) and your working orders (S/B + lots — click one to cancel it)">Mark</th>' +
-      '  <th class="c-bid" title="SELL the spread: Bid A − Ask B. Size = what both books can do, in lots">Bids</th>' +
-      '  <th class="c-price" title="The spread, k × A − B, one row per increment">Price</th>' +
-      '  <th class="c-ask" title="BUY the spread: Ask A − Bid B. Size = what both books can do, in lots">Asks</th>' +
-      '</tr></thead><tbody></tbody></table></div>' +
-      '</div>';
-    $('.buy-touch', body).onclick = function () { manualOrder('LONG_SPREAD'); };
-    $('.sell-touch', body).onclick = function () { manualOrder('SHORT_SPREAD'); };
-    $('.flatten', body).onclick = closePosition;
-    var cc = $('.confirm-clicks', body);
-    cc.checked = wantConfirm();
-    cc.onchange = function () { prefs.confirmOrders = cc.checked; save(PREF_KEY, prefs); };
-    $('.lock-scroll', body).onchange = function (e) {
+  var armed = {buy: null, sell: null};
+  var filtered = false;
+  var MIRROR_LADDER =
+    '<div class="titlebar"><span class="swatch"></span><span class="title"></span>' +
+    '<span class="route">arrow → arrow</span><span class="mode-badge"></span>' +
+    '<span class="winbtns"><button class="winbtn ladder-cog" title="This ladder\'s own settings">&#9881;</button>' +
+    '<button class="winbtn close" title="Close this ladder">&times;</button></span></div>' +
+    '<div class="quotestrip"><span class="netchg">—</span>' +
+    '<div class="stats"><span><label>H:</label><b class="stat-h">—</b></span><span><label>L:</label><b class="stat-l">—</b></span></div>' +
+    '<div class="stats"><span><label>O:</label><b class="stat-o">—</b></span>' +
+    '<span title="Volume is per LEG"><label>V1:</label><b class="stat-v1">—</b> <label>V2:</label><b class="stat-v2">—</b></span></div>' +
+    '<span class="ours" title="H / L / O are the spread\'s own 1-minute bars since the session opened (IST).">ours</span></div>' +
+    '<div class="body"><div class="rail">' +
+    '<div class="lock-note hidden">ALGO ON — manual orders off</div>' +
+    '<div class="route-box row" title="Leg A and leg B"><div class="route-leg route-a">A <b>—</b></div><div class="route-leg route-b">B <b>—</b></div></div>' +
+    '<div class="mode-row"><select class="order-type" title="LIMIT: a click rests a working order at that level. MARKET: a click crosses both legs now.">' +
+    '<option value="LIMIT">Limit</option><option value="MARKET">Market</option></select>' +
+    '<select class="tif" title="GTC: until you cancel it. Working orders live in THIS process; turning the algo ON cancels them."><option value="GTC">GTC</option></select></div>' +
+    '<div class="quoting-note" title="A working order is held here and fires both legs at market when the spread reaches it.">—</div>' +
+    '<button class="quick buy-touch" data-manual data-tip="Buy the spread at the offer (Ask A − Bid B), now">BUY</button>' +
+    '<button class="quick sell-touch" data-manual data-tip="Sell the spread at the bid (Bid A − Ask B), now">SELL</button>' +
+    '<button class="quick flatten primary-exit" data-manual data-tip="Close the open position at market, now. It does not touch working orders — use CXL All for those.">CLOSE ALL</button>' +
+    '<div class="close-lmt-row"><input class="close-limit" type="number" step="0.05" placeholder="Close @ limit" title="The SPREAD level to close the open position at. It rests as a working order on the closing side and waits there — CLOSE ALL crosses now.">' +
+    '<button class="quick close-limit-go" data-manual data-tip="Rest a closing order for the open position at the price in the box">@ LMT</button></div>' +
+    '<label class="inline-field qty-row"><span class="qty-buy">Qty BUY</span><input class="armed qty-box buy" type="number" min="1" step="1" title="The lots a BUY sends. The keypad sets both sides."></label>' +
+    '<div class="keypad"><button class="qty" data-qty="1">1</button><button class="qty" data-qty="5">5</button>' +
+    '<button class="qty" data-qty="10">10</button><button class="qty" data-qty="50">50</button>' +
+    '<button class="qty" data-qty="100">100</button><button class="qty clr" data-qty="">CLR</button></div>' +
+    '<label class="inline-field qty-row"><span class="qty-sell">Qty SELL</span><input class="sell-qty qty-box sell" type="number" min="1" step="1" title="The lots a SELL sends."></label>' +
+    '<div class="rail-label">Working orders</div>' +
+    '<div class="cxl-row"><button class="cxl cxl-s" title="Cancel this ladder\'s working SELL orders">S<sup class="count-s"></sup></button>' +
+    '<button class="cxl cxl-all" title="Cancel every working order on this ladder">CXL All<sup class="count-all"></sup></button>' +
+    '<button class="cxl cxl-b" title="Cancel this ladder\'s working BUY orders">B<sup class="count-b"></sup></button></div>' +
+    '<label class="inline-field"><span>Increment</span><input class="increment" type="number" min="0" step="0.05" placeholder="tick"></label>' +
+    '<div class="centre-row"><label class="check lock" title="Hold the ladder exactly where it is"><input type="checkbox" class="lock-scroll"> Lock</label>' +
+    '<label class="check" title="Show only the rows that have something on them"><input type="checkbox" class="filter"> Filter</label>' +
+    '<button class="btn recentre" title="Put the window back around the market now">Centre</button></div>' +
+    '</div><div class="grid"><table><thead><tr>' +
+    '<th class="c-work" title="Work — YOUR working orders at this level, blue for a buy and red for a sell. Double-click to pull them.">Work</th>' +
+    '<th class="c-bid">Bids</th><th class="c-price" title="The spread, k × A − B, one row per increment">Price</th><th class="c-ask">Asks</th>' +
+    '<th class="c-ltq" title="LTQ — the size of the most recent FILL at this price. A print, not an order.">LTQ</th>' +
+    '</tr></thead><tbody></tbody></table>' +
+    '<div class="counts"><span class="cnt-b">B:0</span><span class="cnt-s">S:0</span><span class="cnt-w">W:0</span></div></div></div>' +
+    '<div class="ladder-settings" hidden><div class="ls-head"><b>Ladder settings</b><span class="ls-pair"></span>' +
+    '<button type="button" class="btn ls-close">Close</button></div><div class="ls-body"><div class="ls-group"><h4>Trading</h4>' +
+    '<label class="lsf"><span>Click</span><select class="ls-click"><option value="join">Bids BUY · Asks SELL</option>' +
+    '<option value="touch">Bids SELL · Asks BUY</option></select></label>' +
+    '<label class="lsf check-row" title="Ask before every manual order"><span>Confirm orders</span><input type="checkbox" class="ls-confirm"></label>' +
+    '</div></div></div>' +
+    '<div class="footer"><span class="feed" title="Age of the two legs\' quotes">—</span>' +
+    '<button class="btn refresh-feed" title="Re-subscribe both legs at Arrow">↻ Feed</button>' +
+    '<span class="pos">flat</span><span class="pnl">—</span><span class="clip"></span><span class="errors"></span>' +
+    '<span class="legs">—</span></div>';
+
+  function pairTitle(legs) {
+    if (!legs || !legs[0]) { return 'Ladder'; }
+    var re = /^([A-Z]+?)(\d{2})([A-Z]{3})(\d{2})/;
+    var a = re.exec(legs[0]), b = re.exec(legs[1] || '');
+    if (a && b && a[1] === b[1]) { return a[1] + ' ' + a[3] + '−' + b[3]; }
+    return legs[0] + ' − ' + (legs[1] || '');
+  }
+  function lots(side) {
+    var node = W.ladder && W.ladder.node;
+    var box = node && $(side === 'SELL' ? '.sell-qty' : '.armed', node);
+    return parseInt(box && box.value, 10) || 1;
+  }
+
+  BUILD.ladder = function (node) {
+    node.querySelector('.close').onclick = function () { closeWindow('ladder'); };
+    $('.buy-touch', node).onclick = function () { manualOrder('LONG_SPREAD'); };
+    $('.sell-touch', node).onclick = function () { manualOrder('SHORT_SPREAD'); };
+    $('.flatten', node).onclick = closePosition;
+    $('.close-limit-go', node).onclick = function () {
+      var t = S.status && S.status.open_trade;
+      var lv = parseFloat($('.close-limit', node).value);
+      if (!t) { toast('No open position to close.', 'info'); return; }
+      if (!isFinite(lv)) { toast('Type the spread level to close at.', 'info'); return; }
+      placeWorking(t.position_type === 'LONG' ? 'SELL' : 'BUY', lv, t.quantity);
+    };
+    Array.prototype.forEach.call(node.querySelectorAll('.keypad .qty'), function (b) {
+      b.onclick = function () {
+        var q = b.dataset.qty ? Number(b.dataset.qty) : null;
+        armed.buy = armed.sell = q;
+        $('.armed', node).value = q || (S.ladder && S.ladder.lots) || '';
+        $('.sell-qty', node).value = q || (S.ladder && S.ladder.lots) || '';
+        renderRail(node);
+      };
+    });
+    $('.armed', node).oninput = function (e) { armed.buy = Number(e.target.value) || null; };
+    $('.sell-qty', node).oninput = function (e) { armed.sell = Number(e.target.value) || null; };
+    $('.order-type', node).value = prefs.orderType || 'LIMIT';
+    $('.order-type', node).onchange = function (e) {
+      prefs.orderType = e.target.value; save(PREF_KEY, prefs); renderRail(node);
+      node.classList.toggle('mode-market', e.target.value === 'MARKET');
+    };
+    node.classList.toggle('mode-market', (prefs.orderType || 'LIMIT') === 'MARKET');
+    $('.cxl-all', node).onclick = function () { cancelAllWorking('CXL All on the ladder rail'); };
+    $('.cxl-b', node).onclick = function () { cancelSide('BUY'); };
+    $('.cxl-s', node).onclick = function () { cancelSide('SELL'); };
+    $('.lock-scroll', node).onchange = function (e) {
       ladderAnchor = e.target.checked && S.ladder && S.ladder.rows && S.ladder.rows.length
         ? S.ladder.rows[Math.floor(S.ladder.rows.length / 2)].level : null;
     };
-    var conv = $('.click-conv', body);
-    conv.value = clickMode();
-    conv.onchange = function () { prefs.clickMode = conv.value; save(PREF_KEY, prefs); labelColumns(body); REFRESH.ladder(); };
-    labelColumns(body);
-    $('.wo-cancel-all', body).onclick = function () { cancelAllWorking('CANCEL ALL on the ladder rail'); };
-    // A working order's tag in the Mark column cancels on a DOUBLE-click only:
-    // the column sits beside the prices, and with one-click trading a stray
-    // single click there must not silently cancel an order.
-    $('tbody', body).ondblclick = function (e) {
-      var mark = e.target.closest('td.work');
-      if (mark && mark.dataset.wo) { cancelWorking(mark.dataset.wo.split(','), 'double-click on the ladder Mark tag'); }
+    $('.filter', node).onchange = function (e) { filtered = e.target.checked; if (S.ladder) { drawLadder(node, S.ladder); } };
+    $('.recentre', node).onclick = function () {
+      ladderAnchor = null; $('.lock-scroll', node).checked = false; REFRESH.ladder();
     };
-    $('tbody', body).onclick = function (e) {
-      var mark = e.target.closest('td.work');
-      if (mark && mark.dataset.wo) {
-        if (!debounced('markhint')) { toast('Double-click the tag to cancel that working order.', 'info'); }
+    $('.refresh-feed', node).onclick = function () {
+      postJSON('/api/desk/refresh-feed', {}).then(function (r) {
+        toast(r.success ? 'Feed re-subscribed for both legs.' : 'Feed: ' + (r.error || 'not restarted'), r.success ? 'success' : 'danger');
+      });
+    };
+    var ls = $('.ladder-settings', node);
+    $('.ladder-cog', node).onclick = function () { ls.hidden = !ls.hidden; };
+    $('.ls-close', node).onclick = function () { ls.hidden = true; };
+    var lc = $('.ls-click', node);
+    lc.value = clickMode();
+    lc.onchange = function () { prefs.clickMode = lc.value; save(PREF_KEY, prefs); labelColumns(node); if (S.ladder) { drawLadder(node, S.ladder); } };
+    var cf = $('.ls-confirm', node);
+    cf.checked = wantConfirm();
+    cf.onchange = function () { prefs.confirmOrders = cf.checked; save(PREF_KEY, prefs); };
+    labelColumns(node);
+    var tb = $('tbody', node);
+    tb.ondblclick = function (e) {
+      var w = e.target.closest('td.work');
+      if (w && w.dataset.wo) { cancelWorking(w.dataset.wo.split(','), 'double-click on the ladder Work cell'); }
+    };
+    tb.onclick = function (e) {
+      var w = e.target.closest('td.work');
+      if (w && w.dataset.wo) {
+        if (!debounced('markhint')) { toast('Double-click the Work cell to pull that working order.', 'info'); }
         return;
       }
       var td = e.target.closest('td[data-col]');
@@ -566,37 +680,152 @@
       if ((S.algo || {}).manual_block) { toast(S.algo.manual_block, 'danger'); return; }
       var level = Number(td.parentNode.dataset.level);
       if (!isFinite(level)) { return; }
-      placeWorking(sideForColumn(td.dataset.col), level);
+      var side = sideForColumn(td.dataset.col);
+      if ((prefs.orderType || 'LIMIT') === 'MARKET') {
+        manualOrder(side === 'BUY' ? 'LONG_SPREAD' : 'SHORT_SPREAD');
+      } else {
+        placeWorking(side, level);
+      }
     };
     applyLock();
   };
 
+  function cancelSide(side) {
+    var ids = ((S.wo && S.wo.active) || []).filter(function (o) { return o.side === side; })
+      .map(function (o) { return o.id; });
+    if (!ids.length) { toast('No working ' + side + ' orders.', 'info'); return; }
+    cancelWorking(ids, 'CXL ' + side[0] + ' on the ladder rail');
+  }
+
+  function rowsThatFit(node) {
+    var g = $('.grid', node);
+    var h = g ? g.clientHeight - 38 : 0;          // header + counts
+    var n = Math.floor(h / 17);
+    n = Math.max(9, Math.min(81, n || 29));
+    return n % 2 ? n : n - 1;
+  }
+
   REFRESH.ladder = function () {
     if (!W.ladder) { return Promise.resolve(); }
-    var body = W.ladder.body;
-    var inc = $('.inc-in', body).value;
-    var q = '/api/ladder?count=29' + (inc ? '&increment=' + encodeURIComponent(inc) : '') +
+    var node = W.ladder.node;
+    var inc = $('.increment', node).value;
+    var q = '/api/ladder?count=' + rowsThatFit(node) + (inc ? '&increment=' + encodeURIComponent(inc) : '') +
             (ladderAnchor != null ? '&anchor=' + ladderAnchor : '');
     return getJSON(q).then(function (d) {
       S.ladder = d;
-      var qin = $('.qty-in', body);
-      if (!qin.value && d.lots) { qin.value = d.lots; }
-      if (d.legs) {
-        $('.route-a b', body).textContent = d.legs[0];
-        $('.route-b b', body).textContent = d.legs[1];
-      }
-      $('.lad-err', body).textContent = d.error || '';
-      $('.lad-sb', body).innerHTML = '<span class="down">' + num(d.sell_spread, 2) + '</span> / <span style="color:var(--bid-strong)">' +
-        num(d.buy_spread, 2) + '</span>';
-      var pos = d.position;
-      $('.lad-pos', body).innerHTML = pos
-        ? '<span class="owner ' + pos.owner + '">' + pos.owner.toUpperCase() + '</span> ' +
-          (pos.direction === 'LONG_SPREAD' ? 'LONG' : 'SHORT') + ' ' + pos.lots + ' lot(s)'
-        : 'flat';
-      drawLadder(body, d);
+      renderRail(node);
+      drawLadder(node, d);
+      renderFooter(node, d);
       applyLock();
     }).catch(function () {});
   };
+
+  function renderRail(node) {
+    var d = S.ladder || {};
+    var title = pairTitle(d.legs);
+    $('.title', node).textContent = title;
+    $('.ls-pair', node).textContent = ' · ' + title;
+    if (d.legs) {
+      $('.route-a b', node).innerHTML = esc(d.legs[0]) + '<div class="hint">arrow</div>';
+      $('.route-b b', node).innerHTML = esc(d.legs[1]) + '<div class="hint">arrow</div>';
+    }
+    var mode = prefs.orderType || 'LIMIT';
+    var algoOn = !!(algoState() || {}).running;
+    var badge = $('.mode-badge', node);
+    badge.textContent = mode + ' · GTC' + (algoOn ? ' · AUTO' : '');
+    badge.classList.toggle('auto', algoOn);
+    badge.title = algoOn ? 'The algo is ON for this pair: it enters and exits by itself; manual orders are off.'
+      : 'the mode a click sends, and how long a working order lives';
+    $('.quoting-note', node).textContent = mode === 'MARKET'
+      ? 'MARKET: both legs cross at once'
+      : 'LIMIT: rests here · both legs cross when the spread reaches it';
+    ['buy', 'sell'].forEach(function (side) {
+      var box = $(side === 'buy' ? '.armed' : '.sell-qty', node);
+      if (document.activeElement !== box) { box.value = armed[side] || d.lots || ''; }
+      box.classList.toggle('on', !!armed[side]);
+      var btn = $(side === 'buy' ? '.buy-touch' : '.sell-touch', node);
+      btn.textContent = (side === 'buy' ? 'BUY ' : 'SELL ') + (armed[side] || d.lots || '');
+    });
+    Array.prototype.forEach.call(node.querySelectorAll('.keypad .qty'), function (b) {
+      var q = parseFloat(b.dataset.qty);
+      b.classList.toggle('on', armed.buy === q && armed.sell === q);
+    });
+    var act = (S.wo && S.wo.active) || [];
+    var nb = act.filter(function (o) { return o.side === 'BUY'; }).length;
+    var ns = act.filter(function (o) { return o.side === 'SELL'; }).length;
+    $('.count-b', node).textContent = nb || '';
+    $('.count-s', node).textContent = ns || '';
+    $('.count-all', node).textContent = (nb + ns) || '';
+    $('.cxl-b', node).disabled = !nb; $('.cxl-s', node).disabled = !ns; $('.cxl-all', node).disabled = !(nb + ns);
+    var inc = $('.increment', node);
+    if (document.activeElement !== inc && !inc.value && d.increment) { inc.placeholder = String(d.increment); }
+    var s = d.session || {};
+    var dig = 4;
+    var nc = $('.netchg', node);
+    nc.textContent = s.net_change == null ? DASH : (s.net_change > 0 ? '+' : '') + Number(s.net_change).toFixed(dig);
+    nc.classList.toggle('up', s.net_change > 0);
+    $('.stat-h', node).textContent = s.high == null ? DASH : Number(s.high).toFixed(dig);
+    $('.stat-l', node).textContent = s.low == null ? DASH : Number(s.low).toFixed(dig);
+    $('.stat-o', node).textContent = s.open == null ? DASH : Number(s.open).toFixed(dig);
+    var lb = d.legbook || {};
+    $('.stat-v1', node).textContent = (lb.a && lb.a.volume != null) ? lb.a.volume : DASH;
+    $('.stat-v2', node).textContent = (lb.b && lb.b.volume != null) ? lb.b.volume : DASH;
+  }
+
+  function renderFooter(node, d) {
+    var lb = d.legbook || {};
+    var ages = [lb.a && lb.a.age, lb.b && lb.b.age].filter(function (x) { return x != null; });
+    var worst = ages.length ? Math.max.apply(null, ages) : null;
+    var feed = $('.feed', node);
+    var badge = worst == null ? 'no quote' : (worst > 30 ? 'stale ' + worst.toFixed(0) + 's' : 'OK · ' + worst.toFixed(1) + 's');
+    feed.textContent = badge;
+    feed.className = 'feed ' + (worst == null ? 'bad' : worst > 30 ? 'warn' : 'ok');
+    var t = S.status && S.status.open_trade;
+    $('.pos', node).textContent = t
+      ? (t.position_type === 'LONG' ? '+' : '-') + t.quantity + ' @ ' + (t.entry_spread == null ? DASH : Number(t.entry_spread).toFixed(4))
+      : 'flat';
+    var pnl = $('.pnl', node);
+    var v = t ? t.unrealized_pnl : null;
+    pnl.textContent = v == null ? DASH : inr(v, 2);
+    pnl.classList.toggle('up', v > 0); pnl.classList.toggle('down', v < 0);
+    $('.errors', node).textContent = d.error || '';
+    $('.legs', node).innerHTML = legFeed(d);
+    var c = $('.counts', node);
+    var act = (S.wo && S.wo.active) || [];
+    $('.cnt-b', c).textContent = 'B:' + (t && t.position_type === 'LONG' ? 1 : 0);
+    $('.cnt-s', c).textContent = 'S:' + (t && t.position_type === 'SHORT' ? 1 : 0);
+    $('.cnt-w', c).textContent = 'W:' + act.length;
+  }
+
+  // Mirror's leg book, at the bottom of the window: each leg's bid, ask, the
+  // width it is charging and how long since it changed; under a rule, the
+  // spread's own bid and ask (H → L / L → H) and its round turn.
+  function legFeed(d) {
+    var lb = d.legbook || {};
+    if (!lb.a || lb.a.bid == null && lb.a.ask == null) {
+      return '<span class="bad">no quote from either leg yet</span>';
+    }
+    function f4(v) { return v == null || !isFinite(v) ? DASH : Number(v).toFixed(4); }
+    function cell(v, k) { return '<td class="' + k + '">' + f4(v) + '</td>'; }
+    function width(b, a) { return '<td class="c-width">' + (b == null || a == null ? DASH : f4(a - b)) + '</td>'; }
+    function age(s) {
+      return s == null ? '<td class="age c-age">' + DASH + '</td>'
+        : '<td class="age c-age' + (s > 5 ? ' bad' : '') + '">' + Number(s).toFixed(1) + 's</td>';
+    }
+    function line(lab, L) {
+      return '<tr><th>' + lab + '</th><td class="sym" title="' + esc(L.symbol || '?') + '">' + esc(L.symbol || '?') + '</td>' +
+        cell(L.bid, 'c-bid') + cell(L.ask, 'c-ask') + width(L.bid, L.ask) + age(L.age) + '</tr>';
+    }
+    return '<table class="legbook"><thead><tr><th></th><th class="sym">leg</th><th class="c-bid">Bid</th>' +
+      '<th class="c-ask">Ask</th><th class="c-width" title="the bid-ask each leg is charging — and on the spread row, one round turn of both books">Spread</th>' +
+      '<th class="c-age">Age</th></tr></thead><tbody>' + line('A', lb.a) + line('B', lb.b) +
+      '<tr class="spread-hint"><th></th><td class="sym"></td>' +
+      '<td class="c-bid hint-down" title="The BID is where the spread is SOLD. A short is in profit as the spread falls: High to Low.">H &rarr; L</td>' +
+      '<td class="c-ask hint-up" title="The ASK is where the spread is BOUGHT. A long is in profit as the spread rises: Low to High.">L &rarr; H</td>' +
+      '<td class="c-width"></td><td class="c-age"></td></tr>' +
+      '<tr class="spread"><th></th><td class="sym">spread</td>' + cell(d.sell_spread, 'c-bid') + cell(d.buy_spread, 'c-ask') +
+      width(d.sell_spread, d.buy_spread) + '<td class="age c-age"></td></tr></tbody></table>';
+  }
 
   function nearestRow(rows, v) {
     if (v == null || !rows.length) { return null; }
@@ -605,75 +834,121 @@
     return best;
   }
 
-  function drawLadder(body, d) {
+  function drawLadder(node, d) {
     var rows = d.rows || [];
-    var tb = $('tbody', body);
-    var dig = d.increment && d.increment < 1 ? 2 : 0;
-    var marks = {}, markTips = {};
-    var m = d.markers;
-    if (m && rows.length) {
-      // A level off the visible ladder is NOT drawn at the edge price as if it
-      // were there: it goes on the edge row with an arrow (↑ above, ↓ below).
-      var top = rows[0].level, bottom = rows[rows.length - 1].level;
-      var half = (d.increment || 0) / 2;
-      [['entry', 'ENTRY'], ['break_even', 'BE'], ['take_profit', 'TP'], ['stop', 'SL']].forEach(function (p) {
-        var v = m[p[0]];
-        if (v == null) { return; }
-        var lv, tag = p[1];
-        if (v > top + half) { lv = top; tag += '↑'; }
-        else if (v < bottom - half) { lv = bottom; tag += '↓'; }
-        else { lv = nearestRow(rows, v); }
-        marks[lv] = (marks[lv] ? marks[lv] + ' ' : '') + tag;
-        markTips[lv] = (markTips[lv] ? markTips[lv] + ' · ' : '') + p[1] + ' ' + num(v, 2);
-      });
-    }
-    // Working orders in the Mark column ("S1" = sell 1 lot); off-ladder ones
-    // on the edge row with an arrow, like the position levels.
+    var tb = $('tbody', node);
+    var inc = d.increment || 0;
+    var dig = inc && inc < 1 ? (String(inc).split('.')[1] || '').length || 2 : 0;
+    // Working orders in the Work column: their lots, tinted buy / sell. An
+    // order off the visible ladder sits on the edge row with an arrow.
     var woAt = {}, woTip = {};
     if (rows.length) {
-      var wTop = rows[0].level, wBot = rows[rows.length - 1].level, wHalf = (d.increment || 0) / 2;
+      var top = rows[0].level, bot = rows[rows.length - 1].level, half = inc / 2;
       ((S.wo && S.wo.active) || []).forEach(function (o) {
-        var lv, tag = (o.side === 'SELL' ? 'S' : 'B') + o.lots + (o.status === 'held' ? '⏸' : '');
-        if (o.price > wTop + wHalf) { lv = wTop; tag += '↑'; }
-        else if (o.price < wBot - wHalf) { lv = wBot; tag += '↓'; }
+        var lv, arrow = '';
+        if (o.price > top + half) { lv = top; arrow = '↑'; }
+        else if (o.price < bot - half) { lv = bot; arrow = '↓'; }
         else { lv = nearestRow(rows, o.price); }
-        (woAt[lv] = woAt[lv] || []).push({o: o, tag: tag});
+        (woAt[lv] = woAt[lv] || []).push({o: o, arrow: arrow});
         woTip[lv] = (woTip[lv] ? woTip[lv] + ' · ' : '') + o.side + ' ' + o.lots + ' @ ' + num(o.price, 2) +
-          (o.status === 'held' ? ' (' + o.note + ')' : '') + ' — double-click to cancel';
+          (o.status === 'held' ? ' (NOT live: ' + o.note + ')' : '') + ' — double-click to pull';
       });
     }
+    var lp = d.last_print;
     var sell = d.sell_spread, buy = d.buy_spread;
-    var direction = d.trade_direction || 'both';
     var join = clickMode() === 'join';
-    var bidTip = join ? 'BUY (resting) at this spread price' : 'SELL at this spread price';
-    var askTip = join ? 'SELL (resting) at this spread price' : 'BUY at this spread price';
+    var bidTip = join ? 'BUY (resting) at ' : 'SELL at ';
+    var askTip = join ? 'SELL (resting) at ' : 'BUY at ';
     tb.innerHTML = rows.map(function (r) {
+      var inBid = sell != null && r.level <= sell + 1e-9;
+      var inAsk = buy != null && r.level >= buy - 1e-9;
+      var wo = woAt[r.level] || [];
+      if (filtered && !wo.length && !r.is_best_bid && !r.is_best_ask) { return ''; }
       var cls = [];
-      if (sell != null && r.level <= sell + 1e-9) { cls.push('in-bid'); }
-      if (buy != null && r.level >= buy - 1e-9) { cls.push('in-ask'); }
+      if (inBid) { cls.push('in-bid'); }
+      if (inAsk) { cls.push('in-ask'); }
+      if (r.is_best_bid) { cls.push('market-line'); }
       if (r.is_mid) { cls.push('mid-line'); }
-      var mk = marks[r.level] || '';
-      var mkCls = /SL/.test(mk) ? 'sl' : /TP/.test(mk) ? 'tp' : /BE/.test(mk) ? 'be' : mk ? 'entry' : '';
-      var bidCell = r.level <= (sell == null ? -Infinity : sell + 1e-9);
-      var askCell = r.level >= (buy == null ? Infinity : buy - 1e-9);
+      if (r.is_best_ask) { cls.push('best-ask'); }
+      var wq = wo.reduce(function (s, x) { return s + (Number(x.o.lots) || 0); }, 0);
+      var wside = wo.length ? wo[0].o.side.toLowerCase() : '';
+      var held = wo.some(function (x) { return x.o.status === 'held'; });
+      var isLast = lp && lp.level != null && Math.abs(lp.level - r.level) < (inc || 1) / 2;
       var bidTxt = r.bid_size != null ? r.bid_size : (r.is_best_bid ? '▲' : '');
       var askTxt = r.ask_size != null ? r.ask_size : (r.is_best_ask ? '▼' : '');
-      var wo = woAt[r.level] || [];
-      var woHtml = wo.map(function (x) {
-        return '<span class="wo-mark ' + (x.o.side === 'SELL' ? 'wo-sell' : 'wo-buy') + '">' + esc(x.tag) + '</span>';
-      }).join('');
-      var tip = [mk ? markTips[r.level] : '', wo.length ? woTip[r.level] : ''].filter(Boolean).join(' · ');
       return '<tr class="' + cls.join(' ') + '" data-level="' + r.level + '">' +
-        '<td class="work' + (mk ? ' mark ' + mkCls : '') + (wo.length ? ' has-wo' : '') + '"' +
-          (wo.length ? ' data-wo="' + wo.map(function (x) { return x.o.id; }).join(',') + '"' : '') +
-          (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(mk) + woHtml + '</td>' +
-        '<td data-col="bid" class="' + (bidCell ? 'bid' : '') + (r.is_best_bid ? ' has-qty clickable' : '') + '" title="' +
-          esc(bidTip + ' ' + num(r.level, 2)) + '">' + (bidCell ? bidTxt : '') + '</td>' +
-        '<td class="price">' + num(r.level, dig) + '</td>' +
-        '<td data-col="ask" class="' + (askCell ? 'ask' : '') + (r.is_best_ask ? ' has-qty clickable' : '') + '" title="' +
-          esc(askTip + ' ' + num(r.level, 2)) + '">' + (askCell ? askTxt : '') + '</td></tr>';
+        '<td class="work' + (wo.length ? ' ' + wside : '') + (held ? ' held' : '') + '"' +
+          (wo.length ? ' data-wo="' + wo.map(function (x) { return x.o.id; }).join(',') + '" title="' + esc(woTip[r.level]) + '"' : '') +
+          '>' + (wq ? wq + wo.map(function (x) { return x.arrow; }).join('') : '') + '</td>' +
+        '<td data-col="bid" class="bid' + (r.is_best_bid ? ' has-qty' : '') + '" title="' + esc(bidTip + num(r.level, dig)) + '">' +
+          (inBid ? bidTxt : '') + '</td>' +
+        '<td class="price' + (isLast ? ' last-trade' : '') + '">' + Number(r.level).toFixed(dig) + '</td>' +
+        '<td data-col="ask" class="ask' + (r.is_best_ask ? ' has-qty' : '') + '" title="' + esc(askTip + num(r.level, dig)) + '">' +
+          (inAsk ? askTxt : '') + '</td>' +
+        '<td class="ltq' + (isLast ? ' print' : '') + '">' + (isLast && lp.lots != null ? Number(lp.lots).toFixed(2) : '') + '</td></tr>';
     }).join('');
   }
+
+  // ALGO BOX ----------------------------------------------------------------
+  // Mirror's per-pair floating window: "Fair spread" and "Exit", B and S.
+  var MIRROR_FAIR =
+    '<div class="titlebar"><span class="swatch"></span><span class="title fw-pair"></span>' +
+    '<span class="winbtns"><button class="winbtn fw-cog" title="This ladder\'s own settings">&#9881;</button>' +
+    '<button class="winbtn close" title="Close">&times;</button></span></div>' +
+    '<div class="fw-body"><div class="fair" title="What the carry says this spread should be. A reference reading — it feeds nothing.">' +
+    '<label class="rail-label">Fair spread<button type="button" class="cog open-exits" title="Settings">&#9881;</button></label>' +
+    '<table class="exits fairs"><tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>' +
+    '<tr><th>Fair</th><td class="fair-buy">—</td><td class="fair-sell">—</td></tr>' +
+    '<tr><th>Gap</th><td class="gap-buy">—</td><td class="gap-sell">—</td></tr></table>' +
+    '<div class="fair-kind hint"></div><div class="fair-note hint"></div></div>' +
+    '<div class="exit"><label class="rail-label">Exit<button type="button" class="cog open-exits" title="Costs, targets and stops — Settings">&#9881;</button></label>' +
+    '<table class="exits"><tr><th>B-A Sp</th><td class="x-width" colspan="2">—</td></tr>' +
+    '<tr><th>Comm</th><td class="x-comm" colspan="2">—</td></tr>' +
+    '<tr><th>P% on M</th><td class="x-target" colspan="2">—</td></tr>' +
+    '<tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>' +
+    '<tr><th>B/E</th><td class="be-buy">—</td><td class="be-sell">—</td></tr>' +
+    '<tr><th>TP</th><td class="tp-buy">—</td><td class="tp-sell">—</td></tr>' +
+    '<tr><th>SL</th><td class="sl-buy">—</td><td class="sl-sell">—</td></tr>' +
+    '<tr><th>o/n</th><td class="x-overnight" colspan="2">—</td></tr>' +
+    '<tr><th>Auto</th><td class="auto-route-state" colspan="2">off</td></tr></table>' +
+    '<div class="exit-note hint"></div></div></div>';
+
+  BUILD.fair = function (node) {
+    node.querySelector('.close').onclick = function () { closeWindow('fair'); };
+    Array.prototype.forEach.call(node.querySelectorAll('.fw-cog, .open-exits'), function (b) {
+      b.onclick = function () { openWindow('settings'); };
+    });
+  };
+  REFRESH.fair = function () {
+    if (!W.fair) { return Promise.resolve(); }
+    var node = W.fair.node;
+    return getJSON('/api/desk/exit').then(function (d) {
+      function f4(v) { return v == null || !isFinite(v) ? DASH : Number(v).toFixed(4); }
+      function set(sel, txt) { var el = $(sel, node); if (el) { el.textContent = txt; } }
+      $('.fw-pair', node).textContent = pairTitle(S.ladder && S.ladder.legs);
+      set('.fair-buy', f4(d.fair)); set('.fair-sell', f4(d.fair));
+      [['gap-buy', d.gap_buy], ['gap-sell', d.gap_sell]].forEach(function (g) {
+        var el = $('.' + g[0], node);
+        el.textContent = g[1] == null ? DASH : (g[1] > 0 ? '+' : '') + f4(g[1]);
+        el.className = g[0] + (g[1] == null ? '' : g[1] > 0 ? ' down' : ' up');
+      });
+      set('.fair-kind', d.fair_kind || '');
+      set('.fair-note', d.fair_note || '');
+      set('.x-width', f4(d.width));
+      set('.x-comm', d.cost_inr == null ? DASH : inr(d.cost_inr, 2) + ' / ' + (d.lots || 1) + ' lot');
+      set('.x-target', d.target_note || DASH);
+      var b = d.buy || {}, s = d.sell || {};
+      set('.be-buy', f4(b.break_even)); set('.be-sell', f4(s.break_even));
+      set('.tp-buy', f4(b.target)); set('.tp-sell', f4(s.target));
+      set('.sl-buy', f4(b.stop)); set('.sl-sell', f4(s.stop));
+      set('.x-overnight', d.overnight || DASH);
+      var a = $('.auto-route-state', node);
+      a.textContent = d.auto || 'off';
+      a.classList.toggle('armed', /^on/.test(d.auto || ''));
+      set('.exit-note', d.position ? 'Open: ' + d.position.owner.toUpperCase() + ' ' +
+          d.position.direction.replace('_SPREAD', '') + ' ' + d.position.lots + ' lot(s)' : '');
+    }).catch(function () {});
+  };
 
   // WORKING ORDERS ---------------------------------------------------------------
   BUILD.workorders = function (body) {
@@ -1089,6 +1364,7 @@
   setInterval(pollStatus, 1000);
   setInterval(pollAlgo, 2000);
   setInterval(function () { REFRESH.ladder(); }, 700);
+  setInterval(function () { REFRESH.fair(); }, 2000);
   setInterval(function () { REFRESH.charts(); }, 2000);
   setInterval(function () { REFRESH.bands(); }, 3000);
   setInterval(refreshWorking, 1000);

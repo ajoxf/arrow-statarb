@@ -1005,7 +1005,9 @@ def test_desk_page_serves_with_one_shared_algo_control(tmp_path):
     app, broker, c, algo = _lock_app(tmp_path)
     html = c.get("/desk").get_data(as_text=True)
     assert html.count('id="algo-ctl"') == 1           # ONE toggle, the same as every page
-    assert "/desk-assets/ladder.css" in html and "/static/desk.js" in html
+    # Mirror-MT5's own stylesheet, served with the page
+    assert "/static/ladder.css" in html and "/static/desk.js" in html
+    assert c.get("/static/ladder.css").status_code == 200
     assert c.get("/desk-assets/ladder.css").status_code == 200
     assert c.get("/desk-assets/../app.py").status_code == 404
     assert c.get("/desk-assets/app.py").status_code == 404
@@ -1566,3 +1568,81 @@ def test_an_instrument_change_starts_the_new_pair_warmup(tmp_path):
     # the setting round-trips through the Settings API
     c.post("/api/settings", json={"signal": {"warmup_after_pair_change": False}})
     assert c.get("/api/settings").get_json()["signal"]["warmup_after_pair_change"] is False
+
+
+# ── the Mirror desk: the ladder's leg book and the algo box ──────────────────
+
+def _desk_books(app, broker, a=(110.0, 111.0), b=(10.0, 11.0), age=0.0):
+    import time as _t
+    now = _t.time()
+    depth = lambda bid, ask: [{"type": "bid", "price": bid, "volume": 150},
+                              {"type": "ask", "price": ask, "volume": 150}]
+    books = {"NIFTY30JUN26F": {"bid": a[0], "ask": a[1], "ts": now - age, "depth": depth(*a)},
+             "NIFTY28JUL26F": {"bid": b[0], "ask": b[1], "ts": now - age, "depth": depth(*b)}}
+    broker.get_streamed_book = lambda syms: {s.upper(): books[s.upper()] for s in syms}
+    broker.start_price_stream = lambda syms: True
+    eng = app.extensions["arrow"]["signal"]
+    for i in range(3):
+        eng.push((a[0] + a[1]) / 2, (b[0] + b[1]) / 2, ts=now - 3 + i)
+    eng._book = {"leg_a": books["NIFTY30JUN26F"], "leg_b": books["NIFTY28JUL26F"]}
+    return books
+
+
+def test_the_ladder_carries_each_legs_book_and_its_age(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker, age=7.0)
+    d = c.get("/api/ladder?increment=1&count=21").get_json()
+    a, b = d["legbook"]["a"], d["legbook"]["b"]
+    assert (a["symbol"], a["bid"], a["ask"]) == ("NIFTY30JUN26F", 110.0, 111.0)
+    assert (b["bid"], b["ask"]) == (10.0, 11.0)
+    assert 6.5 <= a["age"] <= 9.0
+    assert a["volume"] is None                       # not published → unmeasured, not 0
+    assert set(d["session"]) == {"open", "high", "low", "net_change"}
+
+
+def test_the_ladder_marks_the_last_fill(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    assert c.get("/api/ladder?increment=1").get_json()["last_print"] is None
+    c.post("/api/manual-trade/execute", json={"direction": "LONG_SPREAD", "lots": 1})
+    lp = c.get("/api/ladder?increment=1").get_json()["last_print"]
+    assert lp is not None and lp["lots"] == 1 and lp["level"] is not None
+
+
+def test_the_algo_box_prices_break_even_beyond_the_touch_on_each_side(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    d = c.get("/api/desk/exit").get_json()
+    assert d["width"] == 2.0 and d["cost_inr"] is not None and d["cost_inr"] > 0
+    # a buy at the ask must rise to break even; a sell at the bid must fall
+    assert d["buy"]["break_even"] > 101.0 and d["sell"]["break_even"] < 99.0
+    assert d["auto"] == "off" and d["position"] is None
+
+
+def test_the_algo_box_says_why_an_mcx_spread_has_no_fair_value(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    import arrow_statarb.web.app as appmod
+    from arrow_statarb.core import sessions
+    real = sessions.is_mcx
+    sessions.is_mcx = lambda seg: True
+    try:
+        d = c.get("/api/desk/exit").get_json()
+    finally:
+        sessions.is_mcx = real
+    assert d["fair"] is None and d["gap_buy"] is None and "no fair spread" in d["fair_kind"]
+
+
+def test_control_a_non_mcx_pair_is_not_told_it_has_no_fair_value(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    d = c.get("/api/desk/exit").get_json()
+    assert "MCX" not in str(d["fair_kind"])
+
+
+def test_the_algo_box_reads_nothing_into_an_order(tmp_path):
+    app, broker, c, algo = _lock_app(tmp_path)
+    _desk_books(app, broker)
+    n = len(broker.orders)
+    c.get("/api/desk/exit"); c.get("/api/ladder?increment=1")
+    assert len(broker.orders) == n

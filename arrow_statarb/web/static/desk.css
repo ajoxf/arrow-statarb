@@ -2,7 +2,7 @@
  * taskbar. This file only adds what the stat-arb windows need, in the same
  * palette (bid blue, ask red, light grey frame). */
 
-body.desk { margin: 0; background: var(--panel, #f0f0f0); font: 12px/1.35 Tahoma, Verdana, Segoe UI, sans-serif; color: var(--text, #1a1a1a); }
+/* The page itself is Mirror's (ladder.css: the blue-grey desktop, its font). */
 .d-none { display: none !important; }
 
 /* ── windows ─────────────────────────────────────────────────────────────── */
@@ -58,13 +58,12 @@ body.desk iframe.embed { width: 100%; height: 100%; border: 0; background: #f0f0
 .bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: #8a6b1f; }
 .bar.ready > i { background: #1b7a35; }
 
-/* ── ladder: markers in the Work column, lock veil ───────────────────────── */
-td.work.mark { font-size: 10px; font-weight: 700; text-align: center; }
-td.work.mark.entry { background: #e6e0f5; color: #3d2a7a; }
-td.work.mark.be { background: #e9e9e9; color: #333; }
-td.work.mark.tp { background: #d7f0dc; color: #1b5e2b; }
-td.work.mark.sl { background: #f6d2d2; color: #7a1010; }
-td.bid.clickable, td.ask.clickable { cursor: pointer; outline: 2px solid #000; outline-offset: -2px; }
+/* ── ladder: lock veil ───────────────────────────────────────────────────── */
+/* Mirror's ladder fills its window: rows take the height, the footer sits
+ * at the bottom. */
+body.desk .window.ladder > .body { flex: 1 1 auto; min-height: 0; }
+body.desk .window.ladder .grid { overflow: hidden; }
+body.desk .window.ladder td.work[data-wo] { cursor: pointer; }
 .window.locked-manual .grid { opacity: .55; }
 .lock-note { background: #1f7ac2; color: #fff; padding: 4px 6px; font-weight: 700; font-size: 11px; margin-bottom: 4px; }
 .rail button:disabled, .rail input:disabled { opacity: .45; cursor: not-allowed; }
@@ -93,10 +92,9 @@ td.bid.clickable, td.ask.clickable { cursor: pointer; outline: 2px solid #000; o
 #algoCtlModal .fw-semibold { font-weight: 600; }
 #algoCtlModal .mb-0 { margin-bottom: 0; } #algoCtlModal .mb-2 { margin-bottom: 6px; }
 
-/* the two legs, one per line, in the narrow rail */
-body.desk .rail .route-box { display: block; background: #fff; border: 1px solid #b8b8b8; padding: 2px 4px; }
-body.desk .rail .route-leg { display: block; font-size: 9px; color: var(--frame-muted, #5a5a5a); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-body.desk .rail .route-leg b { font: 700 9px Consolas, Menlo, monospace; color: #1a1a1a; }
+/* An Arrow contract name is longer than an MT5 symbol: cut it with an
+ * ellipsis inside Mirror's two-column leg box rather than overlap. */
+body.desk .rail .route-box.row .route-leg b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* working orders in the ladder's Mark column (click to cancel) */
 td.work.has-wo { cursor: pointer; }
@@ -104,19 +102,17 @@ td.work.has-wo { cursor: pointer; }
            color: #fff; border-radius: 2px; }
 .wo-mark.wo-sell { background: var(--ask, #b83232); }
 .wo-mark.wo-buy { background: var(--bid-strong, #1f7ac2); }
-td[data-col] { cursor: crosshair; }
-td[data-col].clickable { cursor: pointer; }
-.rail .quick.wo-cancel-all { background: linear-gradient(#f4d58d, #e0b450); color: #3a2a00; border-color: #8a6b1f; }
-.rail .click-conv { font-size: 10px; max-width: 100%; }
 .btn.wo-x { padding: 0 5px; font-size: 10px; line-height: 14px; }
 
-/* One colour language on the whole desk: RED = SELL, BLUE = BUY
- * (Signal & Position shows the Sell spread red and the Buy spread blue). */
-body.desk .rail .quick.buy-touch { background: var(--bid-strong, #1f7ac2); }
-body.desk .rail .quick.sell-touch { background: var(--ask-strong, #b83232); }
+/* The rail's BUY / SELL are Mirror's colours (ladder.css): BUY lifts the
+ * red ask, SELL hits the blue bid. */
 th.c-bid .hdr-buy, th.c-ask .hdr-buy, th .hdr-buy { color: #fff; background: var(--bid-strong, #1f7ac2); padding: 0 3px; border-radius: 2px; font-size: 9px; }
 th .hdr-sell { color: #fff; background: var(--ask-strong, #b83232); padding: 0 3px; border-radius: 2px; font-size: 9px; }
 #modal-title.tone-sell { color: var(--ask-strong, #b83232); }
 #modal-title.tone-buy { color: var(--bid-strong, #1f7ac2); }
 #modal-confirm.tone-sell { background: var(--ask-strong, #b83232); color: #fff; border-color: #7a1010; }
 #modal-confirm.tone-buy { background: var(--bid-strong, #1f7ac2); color: #fff; border-color: #0f4d7a; }
+
+/* Mirror's + menu, kept narrow: the notes wrap rather than widen it. */
+#add-menu { width: 320px; }
+#add-menu .menu-note { white-space: normal; }
