@@ -537,8 +537,13 @@ def replay_candles(bars: List, params: Dict, tf: str, tf_sec: int, length: int,
              regime_enabled=False, max_entry_spread_divergence=0, confirmation_ticks=1)
     study = SignalStudy(None, sig, lambda: p, clock=lambda: float(bars[cur["i"]][0]) + tf_sec,
                         pair_provider=lambda: pair, source="replayed")
+    atr_on = "atr" in (str(p.get("stop_mode", "inr")).lower(), str(p.get("target_mode", "inr")).lower())
+    if atr_on:
+        from arrow_statarb.core.candles import close_atr
     for i in range(len(bars)):
         cur["i"] = i
+        if atr_on:
+            p["atr_now"] = close_atr(closes[max(0, i - 300):i + 1], int(p.get("atr_period", 14) or 14))
         study.tick()
     return study._rows
 

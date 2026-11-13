@@ -1196,6 +1196,19 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
         def _cost_key(lk):
             e = _clegs.get(lk) or {}
             return e.get("cost_key") or e.get("segment") or ""
+        # ATR-sized stop / target (Mirror-MT5): the spread's ATR on the
+        # algo's own candles, close to close — measured only when asked for
+        atr_now = None
+        if "atr" in (str(xo.get("stop_mode", "inr")).lower(), str(xo.get("target_mode", "inr")).lower()):
+            try:
+                if str(s.get("band_source", "ticks")) == "candles":
+                    from arrow_statarb.core.candles import close_atr
+                    _k = float(s.get("hedge_ratio", 1) or 1)
+                    # CLOSED candles only — the one forming now has no close yet
+                    _cl = [c for _t, c in spread_candles.closes(str(s.get("band_timeframe", "15m")), _k)][:-1]
+                    atr_now = close_atr(_cl[-300:], int(xo.get("atr_period", 14) or 14))
+            except Exception:                          # noqa: BLE001
+                atr_now = None
         return {
             "entry_zscore": float(s.get("entry_zscore", 2.0)),
             "exit_zscore": float(s.get("exit_zscore", 0.0)),
@@ -1209,6 +1222,12 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
             "max_entry_z_divergence": float(s.get("max_entry_z_divergence", 0) or 0),
             "max_entry_spread_divergence": float(s.get("max_entry_spread_divergence", 0) or 0),
             "max_entry_zscore": float(s.get("max_entry_zscore", 0) or 0),
+            "stop_mode": str(xo.get("stop_mode", "inr") or "inr").lower(),
+            "target_mode": str(xo.get("target_mode", "inr") or "inr").lower(),
+            "atr_period": int(xo.get("atr_period", 14) or 14),
+            "atr_stop_mult": float(xo.get("atr_stop_mult", 2.0) or 2.0),
+            "atr_target_mult": float(xo.get("atr_target_mult", 1.5) or 1.5),
+            "atr_now": atr_now,
             "tick_interval": float(s.get("sample_interval_sec", 0.5)),
             "min_hold_sec": float(s.get("min_hold_sec", 0) or 0),
             # candle band mode: max hold in candles of the position's timeframe
@@ -2341,7 +2360,9 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
         atr = None
         if candles:
             try:
-                atr = _wilder_atr(spread_candles.ohlc(tf, k)[-200:], 14)
+                from arrow_statarb.core.candles import close_atr
+                atr = close_atr([c for _t, c in spread_candles.closes(tf, k)][:-1][-300:],
+                                int(p.get("atr_period", 14) or 14))
             except Exception:                         # noqa: BLE001
                 atr = None
         # live warm-up: a new pair's live minutes (candle mode), or the tick
@@ -2406,7 +2427,11 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
                 "break_even": lv.get("break_even", el.get("break_even")),
                 "tp": tp, "sl": sl, "tp_money": float(p.get("profit_target_inr", 0) or 0) or None,
                 "sl_money": -float(p.get("dollar_stop_inr", 0) or 0) or None,
-                "progress": prog})
+                "progress": prog,
+                "entry_atr": (ap.get("entry_atr") if ap else j.get("entry_atr")),
+                "stop_mode": "ATR" if p.get("stop_mode") == "atr" else "INR",
+                "target_mode": "ATR" if p.get("target_mode") == "atr" else "INR",
+                "atr_stop_mult": p.get("atr_stop_mult"), "atr_target_mult": p.get("atr_target_mult")})
         # the state line, in the algo's own words
         blocked_now = None if st.get("running") else _algo_blocked()
         status = str(st.get("status") or "")
@@ -2462,7 +2487,7 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
             "mean": mean, "sigma": sd,
             "upper": (mean + entry_z * sd) if (mean is not None and sd) else None,
             "lower": (mean - entry_z * sd) if (mean is not None and sd) else None,
-            "atr": atr, "atr_period": 14, "timeframe": tf if candles else "ticks",
+            "atr": atr, "atr_period": int(p.get("atr_period", 14) or 14), "timeframe": tf if candles else "ticks",
             "count": count, "needed": needed, "ready": bool(sig.get("ready")),
             "warmup": warmup,
             "armed": {"SELL": armed == "SHORT", "BUY": armed == "LONG"},
@@ -3958,6 +3983,11 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
                     "stop_rr": xo.get("stop_rr", 0),
                     "z_stop_exit_enabled": bool(xo.get("z_stop_exit_enabled", True)),
                     "hard_time_stop_mult": xo.get("hard_time_stop_mult", 0),
+                    "stop_mode": str(xo.get("stop_mode", "inr") or "inr"),
+                    "target_mode": str(xo.get("target_mode", "inr") or "inr"),
+                    "atr_period": xo.get("atr_period", 14),
+                    "atr_stop_mult": xo.get("atr_stop_mult", 2.0),
+                    "atr_target_mult": xo.get("atr_target_mult", 1.5),
                 },
                 "regime": {
                     "enabled": bool(rg.get("enabled", False)),
@@ -4182,6 +4212,15 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
                      ("cost_floor_mult", 0.0), ("stop_capital_pct", 0.0), ("stop_rr", 0.0),
                      ("hard_time_stop_mult", 0.0)):
             if k in xd:
+                xo[k] = _num(xd[k], d)
+        # ATR-sized stop / target: ₹ (as set) or ATR, and the ATR's terms
+        for k in ("stop_mode", "target_mode"):
+            if k in xd and str(xd[k]).lower() in ("inr", "atr"):
+                xo[k] = str(xd[k]).lower()
+        if "atr_period" in xd:
+            xo["atr_period"] = max(2, int(_num(xd["atr_period"], 14)))
+        for k, d in (("atr_stop_mult", 2.0), ("atr_target_mult", 1.5)):
+            if k in xd and _num(xd[k], d) > 0:
                 xo[k] = _num(xd[k], d)
 
         rg = raw.setdefault("regime", {})

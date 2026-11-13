@@ -1457,11 +1457,12 @@ def test_capital_at_risk_refreshes_in_the_background_for_the_algo(tmp_path):
     algo = app.extensions["arrow"]["algo"]
     # no page has asked for the margin yet: the manual value, and a refresh starts
     assert algo._params()["capital_at_risk_inr"] == 50000.0
-    for _ in range(50):
-        if calls:
+    # the refresh runs in the background: wait for it (up to 5 s — under a
+    # full suite's load a background thread can take a while to be scheduled)
+    for _ in range(250):
+        if calls and algo._params()["capital_at_risk_inr"] == 15240.0:
             break
         _t.sleep(0.02)
-    _t.sleep(0.05)
     assert calls and algo._params()["capital_at_risk_inr"] == 15240.0
 
 

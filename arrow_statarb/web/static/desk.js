@@ -685,11 +685,9 @@
     '</tr></thead><tbody></tbody></table>' +
     '<div class="counts"><span class="cnt-b">B:0</span><span class="cnt-s">S:0</span><span class="cnt-w">W:0</span></div></div></div>' +
     '<div class="ladder-settings" hidden><div class="ls-head"><b>Ladder settings</b><span class="ls-pair"></span>' +
-    '<button type="button" class="btn ls-close">Close</button></div><div class="ls-body"><div class="ls-group"><h4>Trading</h4>' +
-    '<label class="lsf"><span>Click</span><select class="ls-click"><option value="join">Bids BUY · Asks SELL</option>' +
-    '<option value="touch">Bids SELL · Asks BUY</option></select></label>' +
-    '<label class="lsf check-row" title="Ask before every manual order"><span>Confirm orders</span><input type="checkbox" class="ls-confirm"></label>' +
-    '</div></div></div>' +
+    '<button type="button" class="btn ls-close">Close</button></div><div class="ls-body"></div>' +
+    '<div class="ls-actions"><button type="button" class="btn ls-save">Apply</button>' +
+    '<span class="ls-note hint">For this pair only. Applies at once; blank keeps the value it has.</span></div></div>' +
     '<div class="footer"><span class="feed" title="Age of the two legs\' quotes">—</span>' +
     '<button class="btn refresh-feed" title="Re-subscribe both legs at Arrow">↻ Feed</button>' +
     '<span class="pos">flat</span><span class="pnl">—</span><span class="clip"></span><span class="errors"></span>' +
@@ -708,6 +706,179 @@
     var node = ctx && ctx.win && ctx.win.node;
     var box = node && $(side === 'SELL' ? '.sell-qty' : '.armed', node);
     return parseInt(box && box.value, 10) || 1;
+  }
+
+  // LADDER SETTINGS (⚙) -------------------------------------------------------
+  // Mirror's per-ladder settings, filled with THIS pair's own settings (each
+  // pair has its own settings file). Only fields Arrow's engine really has —
+  // a control that changes nothing is not shown. Apply sends only what was
+  // changed; blank keeps the value.
+  var LS_GROUPS = [
+    ['Trading', [
+      {k: 'ui.orderType', label: 'Mode', type: 'select', opts: [['LIMIT', 'Limit'], ['MARKET', 'Market']], ui: 'orderType'},
+      {k: 'ui.tif', label: 'Time in force', type: 'select', opts: [['GTC', 'GTC']], ui: 'tif', tip: 'working orders live until cancelled — turning the algo ON cancels them'},
+      {k: 'ui.increment', label: 'Increment', type: 'num', ui: 'increment', tip: 'one ladder row; blank = the contracts’ tick'},
+      {k: 'risk.lots_per_trade', label: 'Default qty', type: 'int', tip: 'lots one click sends — and the algo’s size'},
+      {k: 'legs.leg_a', label: 'Leg A ratio', type: 'num', tip: 'k: spread = k × A − B. Changing it restarts the lookback'},
+      {k: 'legs.leg_b', label: 'Leg B ratio', type: 'num'},
+      {k: 'pairs.multiplier_a', label: 'Contract A', type: 'num', zeroAuto: true, tip: '₹ per point of ONE lot of leg A. Blank / 0 = from the contract (CRUDEOILM 10, GOLDM 10, SILVERM 5, COPPER 2,500)'},
+      {k: 'pairs.multiplier_b', label: 'Contract B', type: 'num', zeroAuto: true},
+      {k: 'ui.clickMode', label: 'Click', type: 'select', opts: [['join', 'Bids BUY'], ['touch', 'Bids SELL']], ui: 'clickMode', tip: 'Bids BUY: a click in Bids rests a BUY, in Asks a SELL. Bids SELL: the other way round'},
+      {k: 'ui.confirmOrders', label: 'Confirm orders', type: 'check', ui: 'confirmOrders'}]],
+    ['Exit', [
+      {k: 'signal.exit_zscore', label: 'Back to mean', type: 'num', tip: 'the algo closes when z comes back to this'},
+      {k: 'signal.stop_zscore', label: 'Z-stop at', type: 'num', tip: 'the algo closes when z stretches this far against it; 0 = off'},
+      {k: 'exits.profit_target_inr', label: 'Profit target ₹', type: 'num', zeroOff: true},
+      {k: 'exits.dollar_stop_inr', label: 'Stop ₹', type: 'num', zeroOff: true},
+      {k: 'exits.tp_capital_pct', label: 'TP % of margin', type: 'num', zeroOff: true},
+      {k: 'exits.stop_capital_pct', label: 'SL % of margin', type: 'num', zeroOff: true},
+      {k: 'exits.stop_mode', label: 'Stop sized by', type: 'select', opts: [['inr', '₹ / % (above)'], ['atr', 'ATR']],
+       tip: 'ATR: the stop is Stop × ATR beyond break-even, the ATR frozen when the trade opens. Needs candle bands'},
+      {k: 'exits.target_mode', label: 'Target sized by', type: 'select', opts: [['inr', '₹ / % / z (above)'], ['atr', 'ATR']],
+       tip: 'ATR: the target is Target × ATR beyond break-even, frozen at entry. Needs candle bands'},
+      {k: 'exits.atr_period', label: 'ATR period', type: 'int', tip: 'candles: the spread’s close-to-close moves, Wilder-smoothed'},
+      {k: 'exits.atr_stop_mult', label: 'Stop × ATR', type: 'num'},
+      {k: 'exits.atr_target_mult', label: 'Target × ATR', type: 'num'},
+      {k: 'filters.brokerage_per_lot', label: 'Comm/lot', type: 'num', tip: '₹ per lot per leg, each way'},
+      {k: 'filters.slippage_per_lot', label: 'Slippage', type: 'num', tip: 'slippage allowance: ₹ per lot per leg, each way — a budget, not a measurement'}]],
+    ['Algo', [
+      {k: 'signal.entry_zscore', label: 'Entry z', type: 'num'},
+      {k: 'signal.trade_direction', label: 'Direction', type: 'select', opts: [['both', 'Both'], ['sell_only', 'H to L only'], ['buy_only', 'L to H only']]},
+      {k: 'signal.band', label: 'Candle', type: 'select', opts: [['ticks', 'ticks'], ['5m', '5 min'], ['15m', '15 min']], tip: 'the bands: a rolling window of ticks, or Bollinger bands on 5 / 15-minute candles'},
+      {k: 'signal.band_length', label: 'Length (candles)', type: 'int'},
+      {k: 'signal.confirmation_ticks', label: 'Confirm (ticks)', type: 'int'},
+      {k: 'signal.max_entry_zscore', label: 'Max entry z', type: 'num', zeroOff: true},
+      {k: 'signal.entry_mode', label: 'Entry', type: 'select', opts: [['reentry', 'armed'], ['touch', 'touch']], tip: 'armed: arm at the entry z, enter on the way back in; touch: enter at the entry z'},
+      {k: 'signal.reentry_back', label: 'Re-entry back by', type: 'num'},
+      {k: 'signal.reentry_window_pct', label: 'Re-entry %', type: 'num', tip: 're-entry window: how far back towards the mean it may still enter'},
+      {k: 'execution.cooldown_sec', label: 'Cooldown (min)', type: 'num', scale: 60},
+      {k: 'signal.min_signal_minutes', label: 'Warm-up (min)', type: 'num'},
+      {k: 'risk.max_daily_loss', label: 'Daily loss limit', type: 'num', zeroOff: true},
+      {k: 'risk.loss_streak_pause_at', label: 'Losses in a row', type: 'int', zeroOff: true},
+      {k: 'filters.min_edge_multiple', label: 'Edge filter ×', type: 'num', zeroOff: true},
+      {k: 'exits.profit_target_sigma_frac', label: 'Capture fraction', type: 'num', zeroAuto: true, tip: 'how much of the stretch the edge filter expects to keep; 0 = 0.5'},
+      {k: 'regime.enabled', label: 'Regime filter', type: 'check'},
+      {k: 'filters.half_life_min_sec', label: 'Half-life min', type: 'num', scale: 60, zeroOff: true, tip: 'minutes'},
+      {k: 'filters.half_life_max_sec', label: 'Half-life max', type: 'num', scale: 60, zeroOff: true, tip: 'minutes'}]],
+    ['Carry', [
+      {k: 'pairs.pair_type', label: 'Pair type', type: 'select', opts: [['SPOT_FUTURE', 'Spot vs Fut'], ['FUTURE_FUTURE', 'Calendar'], ['RELATED', 'Related']], tip: 'Calendar: same underlying, two expiries. Related: two instruments — no fair spread'},
+      {k: 'pairs.risk_free_rate', label: 'Carry %/yr', type: 'num', scale: 0.01, tip: 'carry rate, % a year — used only for the Fair spread reading'}]]
+  ];
+
+  function lsBuild(node, S) {
+    var body = $('.ls-body', node);
+    body.innerHTML = LS_GROUPS.map(function (g) {
+      return '<div class="ls-group"><h4>' + g[0] + (g[0] === 'Algo' ? ' <small class="ls-algo-state"></small>' : '') + '</h4>' +
+        g[1].map(function (f) {
+          var id = 'ls-' + f.k.replace('.', '-');
+          var ctl = f.type === 'select'
+            ? '<select data-k="' + f.k + '">' + f.opts.map(function (o) { return '<option value="' + o[0] + '">' + esc(o[1]) + '</option>'; }).join('') + '</select>'
+            : f.type === 'check' ? '<input type="checkbox" data-k="' + f.k + '">'
+            : '<input type="number" step="any" data-k="' + f.k + '"' + (f.zeroOff ? ' placeholder="off"' : f.zeroAuto ? ' placeholder="auto"' : '') + '>';
+          return '<label class="lsf' + (f.type === 'check' ? ' check-row' : '') + '"' + (f.tip ? ' title="' + esc(f.tip) + '"' : '') +
+            '><span>' + esc(f.label) + '</span>' + ctl + '</label>';
+        }).join('') + '</div>';
+    }).join('');
+  }
+
+  function lsValue(f, settings, legs, node, S) {
+    if (f.ui) {
+      if (f.ui === 'increment') { return $('.increment', node).value; }
+      if (f.ui === 'tif') { return 'GTC'; }
+      if (f.ui === 'orderType') { return prefs.orderType || 'LIMIT'; }
+      if (f.ui === 'clickMode') { return clickMode(); }
+      if (f.ui === 'confirmOrders') { return wantConfirm(); }
+    }
+    if (f.k === 'signal.band') {
+      var sg = settings.signal || {};
+      return sg.band_source === 'candles' ? (sg.band_timeframe || '15m') : 'ticks';
+    }
+    if (f.k.indexOf('legs.') === 0) { return ((legs || {})[f.k.slice(5)] || {}).ratio; }
+    var p = f.k.split('.'), v = (settings[p[0]] || {})[p[1]];
+    if (v == null) { return ''; }
+    if (f.scale && typeof v === 'number') { v = +(v / f.scale).toFixed(4); }
+    if ((f.zeroOff || f.zeroAuto) && v === 0) { return ''; }
+    return v;
+  }
+
+  function lsOpen(node, S) {
+    var ls = $('.ladder-settings', node);
+    if (!$('.ls-group', ls)) { lsBuild(ls, S); }
+    $('.ls-pair', ls).textContent = ' · ' + pairName(S);
+    Promise.all([getJSON(S.base + '/api/settings', true), getJSON(S.base + '/api/leg-assignments', true)]).then(function (r) {
+      var settings = r[0] || {}, legs = r[1] || {};
+      S.lsLoaded = {};
+      LS_GROUPS.forEach(function (g) {
+        g[1].forEach(function (f) {
+          var el = ls.querySelector('[data-k="' + f.k + '"]');
+          var v = lsValue(f, settings, legs, node, S);
+          if (f.type === 'check') { el.checked = !!v; } else { el.value = v == null ? '' : v; }
+          S.lsLoaded[f.k] = f.type === 'check' ? !!v : String(v == null ? '' : v);
+        });
+      });
+      var st = $('.ls-algo-state', ls);
+      st.textContent = (S.algo && S.algo.running) ? '— ON (' + (S.algo.mode === 'live' ? 'LIVE' : 'dry-run') + '): changes apply on its next tick' : '— off';
+      S.lsLegs = legs;
+      ls.hidden = false;
+    }).catch(function (e) { toast('Settings not loaded: ' + e, 'danger'); });
+  }
+
+  function lsApply(node, S) {
+    var ls = $('.ladder-settings', node);
+    var body = {}, legChange = null, n = 0;
+    LS_GROUPS.forEach(function (g) {
+      g[1].forEach(function (f) {
+        var el = ls.querySelector('[data-k="' + f.k + '"]');
+        var now = f.type === 'check' ? el.checked : String(el.value);
+        if (now === S.lsLoaded[f.k]) { return; }
+        if (f.type !== 'check' && f.type !== 'select' && now === '' && !f.zeroOff && !f.zeroAuto) { return; }  // blank keeps
+        n++;
+        if (f.ui) {
+          if (f.ui === 'increment') { $('.increment', node).value = now; }
+          else if (f.ui === 'orderType') { prefs.orderType = now; node.classList.toggle('mode-market', now === 'MARKET'); }
+          else if (f.ui === 'clickMode') { prefs.clickMode = now; eachLadder(function (c) { labelColumns(c.win.node); }); }
+          else if (f.ui === 'confirmOrders') { prefs.confirmOrders = now; }
+          save(PREF_KEY, prefs);
+          return;
+        }
+        if (f.k === 'signal.band') {
+          var sg = body.signal = body.signal || {};
+          if (now === 'ticks') { sg.band_source = 'ticks'; } else { sg.band_source = 'candles'; sg.band_timeframe = now; }
+          return;
+        }
+        if (f.k.indexOf('legs.') === 0) {
+          legChange = legChange || {};
+          legChange[f.k.slice(5)] = parseFloat(now) || 1;
+          return;
+        }
+        var p = f.k.split('.');
+        var v = f.type === 'select' ? now : f.type === 'check' ? now
+          : (now === '' ? 0 : (f.type === 'int' ? parseInt(now, 10) : parseFloat(now)) * (f.scale || 1));
+        (body[p[0]] = body[p[0]] || {})[p[1]] = v;
+      });
+    });
+    if (!n) { toast('Nothing changed.', 'info'); return; }
+    var jobs = [];
+    if (Object.keys(body).length) {
+      jobs.push(postJSON(S.base + '/api/settings', body).then(function (r) {
+        if (r && r.success === false) { throw new Error(r.error || 'refused'); }
+      }));
+    }
+    if (legChange) {
+      var L = S.lsLegs || {}, out = {};
+      ['leg_a', 'leg_b'].forEach(function (lk) {
+        if (L[lk] && L[lk].mapping_id) {
+          out[lk] = {mapping_id: L[lk].mapping_id, ratio: legChange[lk] != null ? legChange[lk] : (L[lk].ratio || 1)};
+        }
+      });
+      jobs.push(postJSON(S.base + '/api/leg-assignments', out).then(function (r) {
+        if (r && r.success === false) { throw new Error(r.error || 'refused'); }
+      }));
+    }
+    Promise.all(jobs).then(function () {
+      toast(pairName(S) + ' — ' + n + ' setting(s) applied.', 'success');
+      lsOpen(node, S); refreshLadder(S); refreshAlgo(S); refreshFair(S);
+    }).catch(function (e) { toast('Not applied: ' + e.message, 'danger'); lsOpen(node, S); });
   }
 
   BUILD.ladder = function (node, ctx) {
@@ -766,14 +937,9 @@
     document.addEventListener('click', function () { menu.hidden = true; });
     $('.chart-btn', node).onclick = function () { setActive(S.key); openWindow('bands'); };
     var ls = $('.ladder-settings', node);
-    $('.ladder-cog', node).onclick = function () { ls.hidden = !ls.hidden; };
+    $('.ladder-cog', node).onclick = function () { if (ls.hidden) { lsOpen(node, S); } else { ls.hidden = true; } };
     $('.ls-close', node).onclick = function () { ls.hidden = true; };
-    var lc = $('.ls-click', node);
-    lc.value = clickMode();
-    lc.onchange = function () { prefs.clickMode = lc.value; save(PREF_KEY, prefs); eachLadder(function (c) { labelColumns(c.win.node); if (c.ladder) { drawLadder(c.win.node, c); } }); };
-    var cf = $('.ls-confirm', node);
-    cf.checked = wantConfirm();
-    cf.onchange = function () { prefs.confirmOrders = cf.checked; save(PREF_KEY, prefs); };
+    $('.ls-save', node).onclick = function () { lsApply(node, S); };
     labelColumns(node);
     var tb = $('tbody', node);
     tb.ondblclick = function (e) {
@@ -1142,7 +1308,9 @@
   BUILD.algo = function (node, ctx) {
     var S = ctx;
     node.querySelector('.close').onclick = function () { closeWindow('algo:' + S.key); };
-    $('.aw-cog', node).onclick = function () { setActive(S.key); openWindow('settings'); };
+    $('.aw-cog', node).onclick = function () {
+      if (S.win) { lsOpen(S.win.node, S); } else { setActive(S.key); openWindow('settings'); }
+    };
     $('.aw-bt-run', node).onclick = function () {
       var days = parseInt($('.aw-bt-days', node).value, 10) || 5;
       var out = $('.aw-bt-out', node), btn = $('.aw-bt-run', node);
@@ -1316,7 +1484,11 @@
         kv('Age', first.age_sec == null ? DASH : Math.floor(first.age_sec / 60) + 'm ' + Math.floor(first.age_sec % 60) + 's') +
         kv('Size', fmt2(first.quantity, 2) + ' lot(s)') + '</div>' +
         kv('Levels', 'BE ' + fmt2(first.break_even, digits) + ' · TP ' + (first.tp == null ? DASH : levelWords(first.tp, first.tp_money, digits)) +
-           ' · SL ' + (first.sl == null ? (params.stop_loss_on ? DASH : 'off') : levelWords(first.sl, first.sl_money, digits)), '',
+           ' · SL ' + (first.sl == null ? (params.stop_loss_on ? DASH : 'off') : levelWords(first.sl, first.sl_money, digits)) +
+           (first.stop_mode === 'ATR' || first.target_mode === 'ATR'
+             ? ' <small>(ATR ' + fmt2(first.entry_atr, digits) + ' at entry: ' +
+               (first.target_mode === 'ATR' ? 'TP ' + first.atr_target_mult + '×' : 'TP ₹') + ', ' +
+               (first.stop_mode === 'ATR' ? 'SL ' + first.atr_stop_mult + '×' : 'SL ₹') + ')</small>' : ''), '',
            'compare with the CLOSING price: the Sell spread for a LONG, the Buy spread for a SHORT') + progressHtml(first, digits);
     }
     $('.aw-signal', node).innerHTML = html;

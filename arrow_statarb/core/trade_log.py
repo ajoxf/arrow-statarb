@@ -73,7 +73,8 @@ def _outcome_tag(reason: str, net: float, entry_z, exit_z) -> str:
 
 
 # The levels a position is opened against, journaled on its OPEN and CLOSE.
-ENTRY_LEVEL_KEYS = ("break_even", "target_spread", "target_kind", "stop_spread", "stop_kind", "entry_mean", "entry_std")
+ENTRY_LEVEL_KEYS = ("break_even", "target_spread", "target_kind", "stop_spread", "stop_kind", "entry_mean", "entry_std",
+                    "entry_atr")
 
 class TradeLog:
     def __init__(self, path: Optional[Path] = None, brokerage_per_lot: float = 20.0):
@@ -274,7 +275,9 @@ class TradeLog:
                             "leg_b_price": rec.get("leg_b_price"),
                             "zscore": rec.get("zscore"),
                             "band_source": rec.get("band_source") or "ticks",
-                            "band_tf": rec.get("band_tf")}
+                            "band_tf": rec.get("band_tf"),
+                            # the ATR its exits were sized on, frozen at entry
+                            "entry_atr": rec.get("entry_atr")}
         return None
 
     def last_close_time(self, source: Optional[str] = None) -> Optional[float]:

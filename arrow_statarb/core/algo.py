@@ -216,6 +216,7 @@ class ArrowAutoTrader:
                 "entry_time": float(pos.get("ts") or self._clock()),
                 "band_source": pos.get("band_source") or "ticks",
                 "band_tf": pos.get("band_tf"),
+                "entry_atr": pos.get("entry_atr"),      # frozen at entry, kept across a restart
                 "peak_pnl": 0.0, "trough_pnl": 0.0,   # lifecycle extremes (fresh)
                 "peak_min": 0.0, "trough_min": 0.0,
                 "order_ids": [],
@@ -630,6 +631,25 @@ class ArrowAutoTrader:
             cands.append((scap / 100.0) * car)
         if cands:
             stop = min(cands)
+        # ── ATR-sized (Mirror-MT5): a multiple of the spread's ATR, measured
+        # from break-even and frozen at entry. Unmeasured stays unmeasured —
+        # no ATR, no level: never a stop placed on nothing.
+        stop_mode = str(p.get("stop_mode", "inr") or "inr").lower()
+        target_mode = str(p.get("target_mode", "inr") or "inr").lower()
+        if "atr" in (stop_mode, target_mode):
+            atr = pos.get("entry_atr") if pos else None
+            if atr is None and not pos:
+                atr = p.get("atr_now")                 # a prospective position: the ATR now
+            atr = float(atr) if atr else None
+            oz = lots * lot_m
+            if stop_mode == "atr":
+                stop = float(p.get("atr_stop_mult", 2.0) or 0) * atr * oz if atr else 0.0
+            if target_mode == "atr":
+                cgt = float(p.get("capital_gains_pct", 0) or 0) / 100.0
+                keep = (1.0 - cgt) if 0 <= cgt < 1 else 1.0
+                # the target is compared with the AFTER-TAX net P&L, so the
+                # level lands exactly target × ATR beyond break-even
+                target = keep * float(p.get("atr_target_mult", 1.5) or 0) * atr * oz if atr else 0.0
         return round(stop, 2), round(target, 2)
 
     def entry_levels(self, p: Dict, pos: Dict, sig: Dict, auto_exits: bool = True) -> Dict:
@@ -651,10 +671,13 @@ class ArrowAutoTrader:
                 self._pos = saved
         lv = self._spread_levels(p, tgt_inr, stop_inr, pos=pos) or {}
         out["break_even"] = lv.get("break_even")
+        out["entry_atr"] = pos.get("entry_atr", p.get("atr_now")) if auto_exits else None
+        atr_t = auto_exits and str(p.get("target_mode", "inr")).lower() == "atr"
+        atr_s = auto_exits and str(p.get("stop_mode", "inr")).lower() == "atr"
         if lv.get("take_profit") is not None:
-            out.update(target_spread=lv["take_profit"], target_kind="₹")
+            out.update(target_spread=lv["take_profit"], target_kind="ATR" if atr_t else "₹")
         if lv.get("stop") is not None:
-            out.update(stop_spread=lv["stop"], stop_kind="₹")
+            out.update(stop_spread=lv["stop"], stop_kind="ATR" if atr_s else "₹")
         mean, sd = sig.get("mean"), sig.get("std")
         if mean is not None and sd:
             d = -1.0 if pos.get("direction") == "LONG_SPREAD" else 1.0   # SHORT sits above
@@ -1225,6 +1248,9 @@ class ArrowAutoTrader:
                 # Arrow's margin, a margin change mid-trade must not move the
                 # %-of-capital stop / target of a position already open
                 "capital_at_risk_inr": float(p.get("capital_at_risk_inr", 0) or 0),
+                # the spread's ATR frozen at entry: an ATR-sized stop / target
+                # is set by the market the trade was opened in, not today's
+                "entry_atr": p.get("atr_now"),
                 "entry_fill_spread": (float(fill) if fill is not None else round(spread, 2)),
                 "entry_leg_a": res.get("leg_a_fill"),
                 "entry_leg_b": res.get("leg_b_fill"),
