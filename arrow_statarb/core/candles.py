@@ -433,3 +433,20 @@ class SpreadCandles:
     def counts(self) -> Dict[str, int]:
         with self._lock:
             return {tf: len(b) for tf, b in self._bars.items()}
+
+
+def close_atr(closes, period: int = 14):
+    """The average true range of the SPREAD, close to close, Wilder's
+    smoothing — in spread points, or None with too few candles (Mirror-MT5's
+    formula). A spread candle's high and low come from two legs making them
+    at different moments — a price that never traded — so the true range of
+    the spread is the size of each move from one close to the next."""
+    period = int(period or 0)
+    values = [float(x) for x in (closes or ()) if x is not None]
+    if period < 2 or len(values) < period + 1:
+        return None
+    moves = [abs(b - a) for a, b in zip(values, values[1:])]
+    value = sum(moves[:period]) / period
+    for move in moves[period:]:
+        value = (value * (period - 1) + move) / period
+    return value

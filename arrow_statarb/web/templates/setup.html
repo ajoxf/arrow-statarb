@@ -386,10 +386,13 @@
                 : (legs.leg_a && legs.leg_b ? '<span class="badge bg-success">on the desk</span>'
                                             : '<span class="badge bg-warning text-dark">legs not set</span>');
             const toggle = p.main ? '' : `<button class="btn btn-sm btn-outline-secondary ms-1" onclick="togglePair('${p.key}', ${!p.enabled})">${p.enabled ? 'Switch off' : 'Switch on'}</button>`;
-            return `<tr class="${here ? 'table-primary' : ''}"><td class="ps-3"><strong>${pairLabel(p)}</strong>${p.main ? ' <span class="text-secondary small">(main)</span>' : ''}</td>
+            const del = (p.main || p.enabled) ? '' : `<button class="btn btn-sm btn-outline-danger ms-1" onclick="deletePair('${p.key}')">Delete</button>`;
+            const label = pairLabel(p).replace(/"/g, '&quot;');
+            return `<tr class="${here ? 'table-primary' : ''}"><td class="ps-3" id="pname-${p.key}"><strong>${pairLabel(p)}</strong>${p.main ? ' <span class="text-secondary small">(main)</span>' : ''}
+                <button class="btn btn-sm btn-link py-0 ms-1" title="Rename this pair" onclick="renamePair('${p.key}', &quot;${label}&quot;)"><i class="bi bi-pencil"></i> Rename</button></td>
                 <td class="font-monospace small">${legs.leg_a || '—'}</td><td class="font-monospace small">${legs.leg_b || '—'}</td>
                 <td>${status}</td><td class="text-end pe-3">${here ? '<span class="text-primary small me-1">editing below</span>'
-                    : (p.enabled ? `<a class="btn btn-sm btn-primary" href="${p.base}/">Edit legs</a>` : '')}${toggle}</td></tr>`;
+                    : (p.enabled ? `<a class="btn btn-sm btn-primary" href="${p.base}/">Edit legs</a>` : '')}${toggle}${del}</td></tr>`;
         });
         document.getElementById('pairs-body').innerHTML = rows.join('') || '<tr><td colspan="5" class="ps-3">—</td></tr>';
     }
@@ -406,6 +409,37 @@
         const r = await fetch(REG.replace('/api/pairs', '/api/pairs/' + encodeURIComponent(key)), {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: on})}).then(r => r.json());
         if (!r.success) { uiToast(r.error || 'Not changed', 'danger'); return; }
+        loadPairs();
+    }
+    function pairUrl(key) { return REG.replace('/api/pairs', '/api/pairs/' + encodeURIComponent(key)); }
+    function renamePair(key, current) {
+        const cell = document.getElementById('pname-' + key);
+        cell.innerHTML = `<div class="d-flex gap-1"><input class="form-control form-control-sm" id="rn-${key}" maxlength="60" style="max-width:260px">
+            <button class="btn btn-sm btn-primary" id="rn-ok-${key}">Save</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="loadPairs()">Cancel</button></div>`;
+        const box = document.getElementById('rn-' + key);
+        box.value = current; box.focus(); box.select();
+        const go = async () => {
+            const name = box.value.trim();
+            if (!name) { uiToast('A pair needs a name.', 'warning'); return; }
+            const r = await fetch(pairUrl(key), {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify({name})}).then(r => r.json());
+            if (!r.success) { uiToast(r.error || 'Not renamed', 'danger'); return; }
+            uiToast('Renamed to ' + name + '.', 'success');
+            loadPairs();
+        };
+        document.getElementById('rn-ok-' + key).onclick = go;
+        box.onkeydown = (e) => { if (e.key === 'Enter') go(); if (e.key === 'Escape') loadPairs(); };
+    }
+    async function deletePair(key) {
+        const ok = typeof uiConfirm === 'function'
+            ? await uiConfirm({title: 'Delete this pair?', variant: 'danger', confirmText: 'Delete',
+                               body: 'It leaves the list and the desk. Its settings and trade journal stay on disk (data/pairs/' + key + '), and a new pair never reuses them.'})
+            : window.confirm('Delete this pair?');
+        if (!ok) return;
+        const r = await fetch(pairUrl(key), {method: 'DELETE'}).then(r => r.json());
+        if (!r.success) { uiToast(r.error || 'Not deleted', 'danger'); return; }
+        uiToast('Pair deleted.', 'success');
         loadPairs();
     }
     loadPairs();

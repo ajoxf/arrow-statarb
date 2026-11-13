@@ -187,3 +187,44 @@ def test_control_a_new_pair_keeps_the_main_pairs_rules(tmp_path):
     _add(c, "Copper")
     new = yaml.safe_load(appmod.pair_paths("copper")["settings"].read_text())
     assert new["signal"]["window_minutes"] == 120 and new["mode"] == "dry_run"
+
+
+# ── rename and delete ─────────────────────────────────────────────────────────
+
+def test_a_pair_and_the_main_pair_can_be_renamed(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    _add(c, "Crude Nov - Dec")
+    assert c.post("/api/pairs/crude-nov-dec", json={"name": "Gold Dec-Feb"}).get_json()["success"]
+    assert c.post("/api/pairs/main", json={"name": "Nifty Jun-Jul"}).get_json()["success"]
+    rows = {r["key"]: r["name"] for r in c.get("/api/pairs").get_json()["pairs"]}
+    assert rows == {"main": "Nifty Jun-Jul", "crude-nov-dec": "Gold Dec-Feb"}
+    app2, _, c2 = _desk(tmp_path)                                  # and it survives a restart
+    assert {r["key"]: r["name"] for r in c2.get("/api/pairs").get_json()["pairs"]}["main"] == "Nifty Jun-Jul"
+
+
+def test_a_pair_cannot_be_renamed_to_nothing(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    _add(c, "Silver")
+    r = c.post("/api/pairs/silver", json={"name": "  "}).get_json()
+    assert r["success"] is False and {x["key"]: x["name"] for x in c.get("/api/pairs").get_json()["pairs"]}["silver"] == "Silver"
+
+
+def test_a_pair_that_is_on_cannot_be_deleted(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    _add(c, "Silver")
+    r = c.delete("/api/pairs/silver").get_json()
+    assert r["success"] is False and "Switch the pair off" in r["error"]
+    assert c.delete("/api/pairs/main").get_json()["success"] is False
+
+
+def test_control_a_switched_off_pair_is_deleted_and_frees_its_contracts(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    p = _add(c, "Silver")
+    _legs(c, p["base"], "SILVERM28NOV26F", "SILVERM26FEB27F")
+    assert c.post("/api/pairs/silver", json={"enabled": False}).get_json()["success"]
+    assert c.delete("/api/pairs/silver").get_json()["success"]
+    assert [r["key"] for r in c.get("/api/pairs").get_json()["pairs"]] == ["main"]
+    q = _add(c, "Silver")                                          # same name: a NEW folder
+    assert q["key"] != "silver"
+    assert c.get(q["base"] + "/api/leg-assignments").get_json() == {}   # nothing inherited
+    assert _legs(c, q["base"], "SILVERM28NOV26F", "SILVERM26FEB27F")["success"]   # contracts free again

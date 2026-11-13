@@ -54,11 +54,24 @@ def load_pairs(path=None) -> List[Dict[str, Any]]:
     return out
 
 
-def save_pairs(pairs: List[Dict[str, Any]], path=None) -> None:
+def load_main_name(path=None) -> str:
+    """The name the trader gave the main pair, or "" (then its legs name it)."""
+    p = path or PAIRS_FILE
+    try:
+        return str((yaml.safe_load(p.read_text()) or {}).get("main_name") or "") if p.exists() else ""
+    except Exception:                               # noqa: BLE001
+        return ""
+
+
+def save_pairs(pairs: List[Dict[str, Any]], path=None, main_name: Optional[str] = None) -> None:
     p = path or PAIRS_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
+    keep = load_main_name(p) if main_name is None else main_name
+    data: Dict[str, Any] = {"pairs": pairs}
+    if keep:
+        data["main_name"] = keep
     tmp = p.with_suffix(".yaml.tmp")
-    tmp.write_text(yaml.safe_dump({"pairs": pairs}, sort_keys=False))
+    tmp.write_text(yaml.safe_dump(data, sort_keys=False))
     os.replace(tmp, p)
 
 
@@ -166,7 +179,7 @@ def create_desk_app(config: Optional[Config] = None) -> Tuple[Flask, Any]:
     main_app.wsgi_app = dispatcher
 
     def listing() -> List[Dict[str, Any]]:
-        main_name = (cfg.get("pairs.name") or "") if hasattr(cfg, "get") else ""
+        main_name = load_main_name()
         rows = [{"key": MAIN, "name": main_name or "", "enabled": True, "base": "/p/" + MAIN,
                  "running": True, "legs": legs_of(MAIN), "main": True}]
         for p in load_pairs():
@@ -193,7 +206,10 @@ def create_desk_app(config: Optional[Config] = None) -> Tuple[Flask, Any]:
                 return jsonify({"success": False, "error": f"At most {MAX_PAIRS} pairs."})
             key, n = slug(name), 2
             taken = {p["key"] for p in pairs} | {MAIN}
-            while key in taken:
+            # a deleted pair's folder is still on disk: a new pair never
+            # inherits its settings, legs or journal
+            while key in taken or appmod.pair_paths(key)["settings"].parent.exists() \
+                    or appmod.pair_paths(key)["trades"].parent.exists():
                 key, n = f"{slug(name)}-{n}", n + 1
             try:
                 apps[key] = build(key)
@@ -214,11 +230,22 @@ def create_desk_app(config: Optional[Config] = None) -> Tuple[Flask, Any]:
         d = request.get_json(silent=True) or {}
         with lock:
             pairs = load_pairs()
+            if key == MAIN:
+                # the main pair can be renamed; it is never switched off
+                if "enabled" in d and not d["enabled"]:
+                    return jsonify({"success": False, "error": "The main pair cannot be switched off."})
+                name = str(d.get("name") or "").strip()
+                save_pairs(pairs, main_name=name[:60])
+                names[MAIN] = name[:60]
+                return jsonify({"success": True, "pairs": listing()})
             row = next((p for p in pairs if p["key"] == key), None)
             if row is None:
-                return jsonify({"success": False, "error": "No such pair (the main pair cannot be switched off)."})
-            if "name" in d and str(d["name"]).strip():
-                row["name"] = names[key] = str(d["name"]).strip()
+                return jsonify({"success": False, "error": "No such pair."})
+            if "name" in d:
+                name = str(d["name"]).strip()[:60]
+                if not name:
+                    return jsonify({"success": False, "error": "A pair needs a name."})
+                row["name"] = names[key] = name
             if "enabled" in d and bool(d["enabled"]) != row["enabled"]:
                 if not d["enabled"]:
                     a = apps.get(key)
@@ -238,6 +265,28 @@ def create_desk_app(config: Optional[Config] = None) -> Tuple[Flask, Any]:
                     mounts["/p/" + key] = apps[key].wsgi_app
                     row["enabled"] = True
             save_pairs(pairs)
+        return jsonify({"success": True, "pairs": listing()})
+
+    @main_app.route("/api/pairs/<key>", methods=["DELETE"])
+    def api_pairs_delete(key):
+        """Take a pair off the list. Only a pair that is switched OFF (which
+        needed it flat, with no working orders and its algo off) — and never
+        the main one. Its settings and journal stay on disk."""
+        with lock:
+            if key == MAIN:
+                return jsonify({"success": False, "error": "The main pair cannot be deleted."})
+            pairs = load_pairs()
+            row = next((p for p in pairs if p["key"] == key), None)
+            if row is None:
+                return jsonify({"success": False, "error": "No such pair."})
+            if row["enabled"] or key in apps:
+                return jsonify({"success": False, "error": "Switch the pair off first — that checks it is flat, "
+                                                          "with no working orders and its algo off."})
+            pairs = [p for p in pairs if p["key"] != key]
+            save_pairs(pairs)
+            names.pop(key, None)
+        logger.info("Pair deleted: {} ({}) — its files are kept in {}", row["name"], key,
+                    appmod.pair_paths(key)["trades"].parent)
         return jsonify({"success": True, "pairs": listing()})
 
     main_app.extensions["arrow"]["pairs"] = {"apps": apps, "listing": listing, "clash": clash}
