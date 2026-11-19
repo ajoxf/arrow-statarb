@@ -228,3 +228,38 @@ def test_control_a_switched_off_pair_is_deleted_and_frees_its_contracts(tmp_path
     assert q["key"] != "silver"
     assert c.get(q["base"] + "/api/leg-assignments").get_json() == {}   # nothing inherited
     assert _legs(c, q["base"], "SILVERM28NOV26F", "SILVERM26FEB27F")["success"]   # contracts free again
+
+
+# ── a new pair's legs, and the Analysis page across pairs ─────────────────────
+
+def test_a_new_pair_has_no_legs_until_they_are_picked(tmp_path):
+    """The main pair's settings carry its own contracts as defaults; a new
+    pair copies those settings but must never trade (or report) them."""
+    import yaml
+    app, broker, c = _desk(tmp_path)
+    s = tmp_path / "settings.yaml"
+    d = yaml.safe_load(s.read_text())
+    d["instruments"] = {"leg_a": {"segment": "nse_fo", "symbol": "NIFTY30JUN26F"},
+                        "leg_b": {"segment": "nse_fo", "symbol": "NIFTY28JUL26F"}}
+    s.write_text(yaml.safe_dump(d))
+    p = _add(c, "Gold")
+    assert c.get(p["base"] + "/api/analysis/outcomes?range=1d").get_json()["pair"] is None
+    assert c.get("/api/analysis/outcomes?range=1d").get_json()["pair"] == "NIFTY30JUN26F − NIFTY28JUL26F"
+
+
+def test_control_a_new_pair_reports_the_legs_picked_for_it(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    p = _add(c, "Gold")
+    assert _legs(c, p["base"], "GOLDM05DEC26F", "GOLDM05FEB27F").get("success") is not False
+    assert c.get(p["base"] + "/api/analysis/outcomes?range=1d").get_json()["pair"] == \
+        "GOLDM05DEC26F − GOLDM05FEB27F"
+
+
+def test_the_analysis_page_lists_every_pair(tmp_path):
+    app, broker, c = _desk(tmp_path)
+    p = _add(c, "Gold")
+    for page in ("/analysis", p["base"] + "/analysis"):
+        html = c.get(page).get_data(as_text=True)
+        assert 'id="ax-pairs"' in html and 'id="all-pairs"' in html
+    # the page reads the pair list from the desk itself, never via its own pair
+    assert "ORIGIN + '/api/pairs'" in c.get(p["base"] + "/analysis").get_data(as_text=True)

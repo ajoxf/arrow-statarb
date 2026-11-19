@@ -45,6 +45,12 @@
     .ax .up { color: #dc3545; } .ax .dn { color: #0d6efd; }
     .ax details summary { cursor: pointer; font-size: .7rem; color: var(--bs-link-color); }
     .ax .foot { font-size: .66rem; color: var(--bs-secondary-color); margin-top: .15rem; }
+    .ax .pairs { display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: .3rem; }
+    .ax .pairs a { font-size: .72rem; padding: .05rem .55rem; border: 1px solid var(--bs-border-color); border-radius: .2rem;
+        text-decoration: none; color: var(--bs-body-color); background: var(--bs-body-bg); }
+    .ax .pairs a.on { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; font-weight: 600; }
+    .ax #all-pairs tbody tr { cursor: pointer; }
+    .ax #all-pairs tbody tr.on { background: var(--bs-tertiary-bg); font-weight: 600; }
 </style>
 
 <div class="ax">
@@ -58,7 +64,15 @@
     <span class="muted">or on</span><input type="date" id="ax-day">
     <button class="btn btn-outline-primary btn-x" id="ax-derive" title="Replay the last 30 days of Arrow's 15-min candles">Derive 30 days</button>
 </div>
+<div class="pairs" id="ax-pairs" hidden></div>
 <div class="rules" id="ax-rules">—</div>
+<div id="all-pairs-wrap" hidden>
+<div class="sec"><b>All pairs</b><span class="muted">— each ladder over the same period; click a pair to open its analysis below</span></div>
+<div class="tw" style="margin-bottom:.3rem"><table id="all-pairs"><thead><tr>
+    <th>Pair</th><th>Legs</th><th class="n">Entry z reached</th><th class="n">Entered</th><th class="n">Profit</th><th class="n">Loss</th>
+    <th class="n">Win rate</th><th class="n">Net ₹</th><th class="n">Algo took / didn't</th><th>Paper algo</th></tr></thead>
+    <tbody><tr><td colspan="10" class="empty">—</td></tr></tbody></table></div>
+</div>
 
 <div class="kp">
     <div><div class="v" id="k-reached">—</div><div class="l">Entry z reached</div></div>
@@ -216,7 +230,7 @@
             ` · ₹ per point ${num(r0.lot_multiplier, 0)} · costs: the algo's own · paper algo: ${d.paper_status || DASH}`);
         const reached = rows.length, entered = s.taken || 0;
         set('k-reached', reached || DASH); set('k-entered', reached ? entered : DASH);
-        set('k-won', s.won ?? DASH); set('k-lost', s.lost ?? DASH);
+        set('k-won', reached ? (s.won ?? DASH) : DASH); set('k-lost', reached ? (s.lost ?? DASH) : DASH);
         set('k-wr', s.win_rate == null ? DASH : num(s.win_rate, 0) + '%');
         const net = $('k-net'); net.textContent = rs(s.net); net.className = 'v ' + cls(s.net);
         set('k-avg', (s.avg_win == null && s.avg_loss == null) ? DASH : `${rs(s.avg_win)} / ${rs(s.avg_loss)}`);
@@ -511,6 +525,50 @@
         try { renderCheck(await fetch('/api/reconcile/report', {method: 'POST', body: fd}).then(x => x.json())); }
         catch (e) { set('rc-sum', '— could not reach the server'); }
     });
+
+    // ── every pair (ladder): a bar to switch, and one summary row each ───────
+    // Each pair's analysis lives at its own address (/p/<key>/analysis); the
+    // main pair's at /analysis. Calls go to the full origin so this page's
+    // own pair routing never redirects them.
+    const ORIGIN = location.origin;
+    const HERE = (window.PAIR_BASE || '').replace(/^\/p\//, '') || 'main';
+    const pageOf = p => p.main ? '/analysis' : p.base + '/analysis';
+    let pairList = [];
+    async function loadPairs() {
+        try { pairList = ((await fetch(ORIGIN + '/api/pairs', {cache: 'no-store'}).then(x => x.json())).pairs || [])
+            .filter(p => p.enabled && p.running); }
+        catch (e) { pairList = []; }
+        const bar = $('ax-pairs');
+        bar.hidden = pairList.length < 2;
+        $('all-pairs-wrap').hidden = pairList.length < 2;
+        bar.innerHTML = pairList.map(p => `<a href="${pageOf(p)}" class="${p.key === HERE ? 'on' : ''}">${tesc(p.name || 'Main pair')}</a>`).join('');
+        loadAllPairs();
+    }
+    async function loadAllPairs() {
+        if (pairList.length < 2) return;
+        const q = new URLSearchParams({range});
+        if (day) q.set('day', day);
+        const rows = await Promise.all(pairList.map(p =>
+            fetch(ORIGIN + p.base + '/api/analysis/outcomes?' + q, {cache: 'no-store'}).then(x => x.json())
+                .then(d => ({p, d})).catch(() => ({p, d: null}))));
+        const tb = $('all-pairs').querySelector('tbody');
+        tb.innerHTML = rows.map(({p, d}) => {
+            const name = `<td>${tesc(p.name || 'Main pair')}</td>`;
+            if (!d) return `<tr data-href="${pageOf(p)}" class="${p.key === HERE ? 'on' : ''}">${name}<td colspan="9" class="dim">not answering</td></tr>`;
+            const s = d.summary || {}, n = (d.rows || []).length;
+            return `<tr data-href="${pageOf(p)}" class="${p.key === HERE ? 'on' : ''}">${name}` +
+                `<td>${instr(d.pair)}</td><td class="n">${n || DASH}</td><td class="n">${n ? (s.taken || 0) : DASH}</td>` +
+                `<td class="n pos">${n ? (s.won ?? DASH) : DASH}</td><td class="n neg">${n ? (s.lost ?? DASH) : DASH}</td>` +
+                `<td class="n">${s.win_rate == null ? DASH : num(s.win_rate, 0) + '%'}</td>` +
+                `<td class="n ${cls(s.net)}">${rs(s.net)}</td>` +
+                `<td class="n">${n ? `${s.algo_took || 0} / ${s.algo_blocked || 0}` : DASH}</td>` +
+                `<td class="dim">${tesc(d.paper_status || '') || DASH}</td></tr>`;
+        }).join('') || '<tr><td colspan="10" class="empty">—</td></tr>';
+        tb.querySelectorAll('tr[data-href]').forEach(tr => tr.onclick = () => { location.href = tr.dataset.href; });
+    }
+    $('ax-range').addEventListener('change', () => loadAllPairs());
+    $('ax-day').addEventListener('change', () => loadAllPairs());
+    loadPairs(); setInterval(loadAllPairs, 15000);
 
     loadSignals(); loadTrades(); loadMini();
     setInterval(loadSignals, 4000); setInterval(loadTrades, 6000); setInterval(loadMini, 15000);

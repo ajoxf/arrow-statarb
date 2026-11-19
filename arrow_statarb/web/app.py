@@ -341,6 +341,11 @@ def create_app(config: Optional[Config] = None, *, pair_key: Optional[str] = Non
                                              if entry.get("cost_key") else "")}
         if "leg_a" in legs and "leg_b" in legs:
             return legs
+        # An EXTRA pair trades only the legs picked for it on its own Setup
+        # page: its settings were copied from the main pair, and the defaults
+        # there are the main pair's contracts — never this pair's.
+        if pair_key:
+            return legs
         # Fall back to config defaults
         for lk in ("leg_a", "leg_b"):
             d = cfg.get(f"instruments.{lk}") or {}
