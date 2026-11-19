@@ -71,3 +71,6 @@ data/signal_outcomes.json.tmp
 config/pairs.yaml
 config/pairs/
 data/pairs/
+
+# every σ touch played out as a trade (rewritten while the app runs)
+data/touch_study.json
